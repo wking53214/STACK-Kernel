@@ -7,7 +7,7 @@
 #include "../include/tack_host_binding.hpp"
 #include "../include/tack_audit.hpp"
 
-using namespace tack;
+using namespace stack;
 
 TEST_CASE("PRODUCTION FIRE-TEST: ≡TACK Kernel Components") {
     std::cout << "\n" << std::string(72, '=') << "\n";
