@@ -1,7 +1,48 @@
 #pragma once
 
-#include "tack_kernel.hpp"
-#include "tack_kinetic_governor.hpp"
+/**
+ * ≡TACK KERNEL LAYER 4: Host Boundary Orchestration and SECCOMP Enforcement
+ *
+ * CONFIDENTIAL. Trade secret of William King (wking53214).
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ * ORCHESTRATION LAYER: Binding Execution to Governance
+ *
+ * This is where all prior layers converge into one boundary: the host.
+ *
+ * The GovernedMinotaurHost orchestrates five enforced gates:
+ *   1. Capability verification (SIMD token validation)
+ *   2. Rate limiting (KineticGovernor token consumption)
+ *   3. Deadline detection (HardenedPosixPreemptionGuard signal handler)
+ *   4. Software deadline tracking (ExecutionDeadlineScope)
+ *   5. Debt accrual and ceiling enforcement (ComputeDebtTracker)
+ *
+ * Plus a kernel-level boundary:
+ *   6. SECCOMP BPF filter (syscall restriction)
+ *
+ * Execution flow through ExecuteGovernedTransaction():
+ *   Check capabilities → consume tokens → arm timer → run payload →
+ *   check preemption → check deadline → accrue debt → commit
+ *
+ * If any gate rejects, execution halts and error returns to caller.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ * ARCHITECTURAL NOTE: Single-Responsibility Violation
+ *
+ * ExecuteGovernedTransaction() is doing too much in one method. It orchestrates
+ * capability checking, rate limiting, deadline enforcement, debt tracking, and
+ * transaction rollback all in a single call. This is architecturally correct for
+ * correctness (all gates must complete) but tactically complex.
+ *
+ * A production implementation would likely split this into separate orchestration
+ * phases, each checkpointable and recoverable independently. Current implementation
+ * is intentionally unified to ensure atomic all-or-nothing execution.
+ *
+ * ───────────────────────────────────────────────────────────────────────────
+ */
+
+#include "stack_kernel.hpp"
+#include "stack_kinetic_governor.hpp"
 #include "posix_deadline_timer_hardened.hpp"
 
 #include <array>
@@ -25,13 +66,23 @@
 #include <arm_neon.h>
 #endif
 
-namespace tack::host {
+namespace stack::host {
 
-using namespace tack::governor;
+using namespace stack::governor;
 
-// ============================================================================
-// COMPONENT 13: SIMD-ACCELERATED CAPABILITY TOKEN SERIALIZATION
-// ============================================================================
+/**
+ * CAPABILITY MASK: 256-bit Permission Vector
+ *
+ * Represents a set of capabilities as a 256-bit bitmask (four uint64_t values).
+ * Each bit represents a capability the execution context can use.
+ *
+ * Used to verify that requested capabilities (in SIMDCapabilityToken) are a
+ * subset of available capabilities (in CapabilityMask256).
+ *
+ * Validation uses SIMD: IsSubsetOf() tests (required AND NOT available) == 0.
+ * SIMD implementations (AVX2 on x86_64, NEON on ARM64) check all 256 bits in
+ * parallel. Fallback uses bitwise AND for unknown architectures.
+ */
 struct alignas(32) CapabilityMask256 {
     uint64_t data[4]{0, 0, 0, 0};
 
@@ -85,9 +136,26 @@ public:
     [[nodiscard]] constexpr uint64_t GetContextId() const noexcept { return context_id_; }
 };
 
-// ============================================================================
-// COMPONENT 11: SECCOMP-BPF SIGNAL LOCKDOWN ENGINE
-// ============================================================================
+/**
+ * SECCOMP FILTER ENGINE: Kernel-Level Syscall Restriction Boundary
+ *
+ * Installs a SECCOMP BPF filter (Berkeley Packet Filter) that runs in the
+ * Linux kernel and restricts which syscalls Minotaur (the untrusted execution
+ * engine) can invoke.
+ *
+ * The filter explicitly blocks:
+ *   - ptrace (attach/inspect)
+ *   - rt_sigaction (modify signal handlers, except GOVERNOR_PREEMPT_SIG)
+ *   - rt_sigprocmask (block/unblock signals)
+ *   - prctl with PR_SET_SECCOMP (can't layer another SECCOMP filter)
+ *
+ * All other syscalls are allowed by default. This is a whitelist-by-exception:
+ * we permit almost everything except the specific escapes that would break
+ * governance.
+ *
+ * Once installed, the filter cannot be removed or modified—only by the host
+ * process with appropriate privileges. For Minotaur, once sealed, it is sealed.
+ */
 enum class SeccompError : uint8_t {
     None = 0,
     SetNoNewPrivsFailed,
@@ -276,4 +344,4 @@ public:
     }
 };
 
-} // namespace tack::host
+} // namespace stack::host
