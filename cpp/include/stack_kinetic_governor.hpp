@@ -25,7 +25,7 @@
  * ───────────────────────────────────────────────────────────────────────────
  */
 
-#include "tack_kernel.hpp"
+#include "stack_kernel.hpp"
 #include <atomic>
 #include <cstdint>
 #include <expected>
@@ -37,7 +37,7 @@
 
 #include <algorithm>
 
-namespace tack::governor {
+namespace stack::governor {
 
 /**
  * GOVERNOR ERROR: Rate limiting and debt ceiling violations.

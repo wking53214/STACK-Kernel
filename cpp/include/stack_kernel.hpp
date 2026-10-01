@@ -47,7 +47,7 @@
 #include <arm_neon.h>
 #endif
 
-namespace tack::governor {
+namespace stack::governor {
 
 /**
  * PRIORITY CLASS: Admission tier for the governance system.

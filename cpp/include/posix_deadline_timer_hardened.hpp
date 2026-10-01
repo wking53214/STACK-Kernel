@@ -1,5 +1,7 @@
 #pragma once
 
+#include "stack_kernel.hpp"
+
 /**
  * ≡TACK KERNEL LAYER 2: Hardened POSIX Deadline Timer and Preemption
  *
@@ -51,7 +53,7 @@
 #include <unistd.h>
 #include <atomic>
 
-namespace tack::governor {
+namespace stack::governor {
 
 /**
  * SIGNAL NUMBER: Real-time signal for deadline breach notification.
