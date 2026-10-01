@@ -4,7 +4,7 @@ Ceiling padding showed no detectable leak in 9 of 9 release runs at about 100,00
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `tack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 A pass here means no detectable leak at that sample size, on one 4-vCPU (virtual CPU) machine. It is never a proof. The same runs, plus a red-team pass, also show where the brief's design had to change.
 
@@ -219,7 +219,7 @@ Every metric carries a closed `strategy="ceiling"` label, and every other label 
 
 ```yaml
 groups:
-  - name: tack-anc-ceiling
+  - name: stack-anc-ceiling
     rules:
       - alert: TackAncCeilingShedSustained
         expr: sum(rate(tack_anc_shed_total{strategy="ceiling",reason="slots_full"}[1m])) > 0
@@ -287,7 +287,7 @@ Overruns were rare: 9 released late and 3 RETRYs in 1.8 million padded requests.
 
 **Red team and test status.** A red-team pass wrote 17 attack tests against the first build: 9 broke it, 1 partly broke it, and 7 held. The fixes made all 9 pass, though rt04 is now flaky.
 
-One pre-existing async test had its upper bound raised from 50 ms to 300 ms for the new retry window. My final re-run of `cargo test -p tack-anc-ceiling --all-targets` ended with this summary line:
+One pre-existing async test had its upper bound raised from 50 ms to 300 ms for the new retry window. My final re-run of `cargo test -p stack-anc-ceiling --all-targets` ended with this summary line:
 
 ```text
 test result: FAILED. 15 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s

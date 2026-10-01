@@ -2,7 +2,7 @@
 
 ANC cannot make the timing delta zero; the testable goal is no detectable difference at 100,000 samples per class (Welch |t| at most 4.5).
 
-*New design: analysis only. No ANC code exists in the TACK repositories today. The tests it defines run in the tack-anc-harness crate, compiled and tested on Rust 1.94.*
+*New design: analysis only. No ANC code exists in the STACK repositories today. The tests it defines run in the stack-anc-harness crate, compiled and tested on Rust 1.94.*
 
 ### The problem ANC is meant to solve
 
@@ -107,7 +107,7 @@ shift flagged    at n = 100,000 per class, equal spread: about 0.020 standard de
 
 The harness maps each verdict onto the CNS outcomes. A leak is TERMINAL_BREACH, and the resolution is reject: the build under test is not promoted. Too few samples or no computable statistic is RETRY, so an unclear run never passes.
 
-From `tack-anc-harness/src/lib.rs`:
+From `stack-anc-harness/src/lib.rs`:
 
 ```rust
 /// The TVLA leak threshold on |t|. Above it, the two classes are treated
@@ -115,7 +115,7 @@ From `tack-anc-harness/src/lib.rs`:
 pub const T_THRESHOLD: f64 = 4.5;
 ```
 
-From `tack-anc-harness/src/report.rs`:
+From `stack-anc-harness/src/report.rs`:
 
 ```rust
     pub const fn gate_outcome(&self) -> GateOutcome {
@@ -138,7 +138,7 @@ A pad-up strategy has no such proof, because its guarantee depends on clocks and
 A test that cannot see a known leak proves nothing, so the harness was first run on known cases. These are in-process timings of the 32-byte compare, not network timings. Each run used 200,000 samples: 99,885 in one class and 100,115 in the other.
 
 ```text
-cargo run --release -p tack-anc-harness --example calibrate 200000 50
+cargo run --release -p stack-anc-harness --example calibrate 200000 50
 ```
 
 | Case | Timer | Largest \|t\| | Verdict |

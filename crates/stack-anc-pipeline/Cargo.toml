@@ -1,0 +1,26 @@
+[package]
+name = "stack-anc-pipeline"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "STACK ANC strategy 3: instruction-level pipeline padding. Three 32-byte token validators (early exit, balanced dummy work, constant time) behind one admission gate. New design."
+
+[dependencies]
+tracing.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+subtle.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+metrics-util.workspace = true
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+stack-anc-harness = { path = "../stack-anc-harness" }
+
+[lints]
+workspace = true

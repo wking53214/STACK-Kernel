@@ -19,11 +19,11 @@ Five web pages and six local files were opened; seven papers the network blocked
 | Source | What it supports |
 |---|---|
 | [CNS gate.py](file:///home/user/CNS/cns/gate.py) | GatePosition (ALPHA, OMEGA), GateOutcome (PASS, RETRY, TERMINAL_BREACH) and `subject_digest`, a SHA-256 over a type-tagged rendering; the header marks the file confidential. |
-| [sentinel_os twin_custody.py](file:///home/user/sentinel_os/sentinel_os/twin_custody.py) | The Python verifier that tack-sentinel matches (`verify_rows`, `deep_verify_row`, `check_head_anchor`), and the 16-character hash prefixes in its messages. |
+| [sentinel_os twin_custody.py](file:///home/user/sentinel_os/sentinel_os/twin_custody.py) | The Python verifier that stack-sentinel matches (`verify_rows`, `deep_verify_row`, `check_head_anchor`), and the 16-character hash prefixes in its messages. |
 | [sentinel_os canonical_fields.py](file:///home/user/sentinel_os/sentinel_os/canonical_fields.py) | `OPTIONAL_HASHED_FIELDS`, the shared list of optional columns that enter a row's hash when present. |
 | [sentinel_os api_key_auth.py](file:///home/user/sentinel_os/sentinel_os/api_key_auth.py) | `_find_key_constant_time` checks every key with `hmac.compare_digest` and no early exit; its two failure replies differ in text. |
 | [observe-perceive observe_consolidated.py](file:///home/user/observe-perceive/observe_consolidated.py) | `sanitize_context` returns a cleaned copy plus notes: the repair approach the Inlet deliberately does not take. |
-| [tack-anc-harness victim.rs](file:///tmp/claude-0/-home-user/dc79eb2b-c581-5d0f-9c7a-4872a4d2458f/scratchpad/tack/crates/tack-anc-harness/src/victim.rs) | The early-exit victim `leaky_validate` and the constant-time control `ct_validate`, over a 32-byte token. |
+| [stack-anc-harness victim.rs](file:///tmp/claude-0/-home-user/dc79eb2b-c581-5d0f-9c7a-4872a4d2458f/scratchpad/stack/crates/stack-anc-harness/src/victim.rs) | The early-exit victim `leaky_validate` and the constant-time control `ct_validate`, over a 32-byte token. |
 
 These claims rest on memory or search-engine summaries, because the network refused the papers:
 

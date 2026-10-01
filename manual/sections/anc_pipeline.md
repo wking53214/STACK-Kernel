@@ -4,7 +4,7 @@ The brief's padding design leaked in 9 of 9 release measurements, while the bran
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn secrets from how long replies take. This crate, `tack-anc-pipeline`, is a new design that is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn secrets from how long replies take. This crate, `stack-anc-pipeline`, is a new design that is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain exists today.
 
 Each measurement timed 100,000 guesses in each of two classes. A max |t|, the test statistic explained below, above 4.5 counts as a detected leak. A pass means no detectable leak at that n on one machine; it is never a proof.
 
@@ -98,7 +98,7 @@ Every trip maps to the CNS outcome RETRY (repairable: the caller may resubmit) w
 | `SlotsFull` | In-flight count already at `max_in_flight` | RETRY | reject | Load shedding before any secret work. The caller may retry later. |
 | `Mismatch` | 32 bytes, wrong value | RETRY | reject | The caller may resubmit the right token. The reply is a fixed code that never names the wrong byte. |
 
-No trip yields TERMINAL_BREACH, quarantine, rollback or halt. The gate keeps no state except an in-flight counter that each request restores, so there is nothing to isolate or restore. Isolating a sender who keeps guessing belongs upstream, for example in TACK Inlet, and which component owns it is an open decision.
+No trip yields TERMINAL_BREACH, quarantine, rollback or halt. The gate keeps no state except an in-flight counter that each request restores, so there is nothing to isolate or restore. Isolating a sender who keeps guessing belongs upstream, for example in STACK Inlet, and which component owns it is an open decision.
 
 No decision reads the clock, so the kernel's "clock unavailable" trip cannot arise. There is no ceiling and no adaptive controller either, so "ceiling overrun" and "leakage budget spent" do not exist here.
 
@@ -195,7 +195,7 @@ impl Default for PipelineConfig {
 
 The same idea already exists in sentinel_os. Its `api_key_auth.py` compares keys with Python's `hmac.compare_digest` and never exits early, but that code has not been measured with this harness.
 
-**Telemetry.** The gate emits `tack_anc_requests_total`, `tack_anc_shed_total`, `tack_anc_token_mismatch_total`, `tack_anc_leaky_validator_active` and `tack_anc_response_seconds`. Every label comes from a closed enum, and each check opens one debug span, `tack.anc.pipeline_check`.
+**Telemetry.** The gate emits `tack_anc_requests_total`, `tack_anc_shed_total`, `tack_anc_token_mismatch_total`, `tack_anc_leaky_validator_active` and `tack_anc_response_seconds`. Every label comes from a closed enum, and each check opens one debug span, `stack.anc.pipeline_check`.
 
 Debug logs carry the input length, plus the full SHA-256 hex for inputs within the 32-byte cap; raw input is never logged. Hashing 32 bytes costs the same for every value, so it adds no class-dependent time. A red-team test with debug logging and a live recorder on the path stayed at max |t| 1.81, in a debug build.
 
@@ -306,7 +306,7 @@ The builder ran the smoke test ten times and all passed: `constant_time` max |t|
 The gate below was run against the three recorded runs. It exited 0 on each, and exited 1 when `constant_time` was swapped for `balanced_dummy`.
 
 ```text
-cargo run --release -p tack-anc-pipeline --example verify > verify.json
+cargo run --release -p stack-anc-pipeline --example verify > verify.json
 jq -e '.profile == "release" and .summary.evidence_valid
   and ([.summary.primary_gate.constant_time,
         .summary.primary_gate_with_debugging_recorder.constant_time,
@@ -363,13 +363,13 @@ Without `black_box` the filler is gone. `objdump` places `balanced_dummy_no_blac
 
 The crate's own docs quote an earlier run on a 2.80 GHz VM, for example `balanced_dummy` at max cropped t 32.4. Its verdicts agree with the table above.
 
-**Test suite status.** `cargo clippy -p tack-anc-pipeline --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, the builder's 28 tests all pass: 15 unit, 5 equivalence, 1 flood, 1 leak, 1 logs and 5 telemetry.
+**Test suite status.** `cargo clippy -p stack-anc-pipeline --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, the builder's 28 tests all pass: 15 unit, 5 equivalence, 1 flood, 1 leak, 1 logs and 5 telemetry.
 
 The red team's 17 tests live in `tests/redteam.rs` in the same crate, and 6 of them fail on open findings. The brief's command therefore fails. Its final summary line, re-run for this section:
 
 ```text
 test result: FAILED. 11 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.01s
-error: test failed, to rerun pass `-p tack-anc-pipeline --test redteam`
+error: test failed, to rerun pass `-p stack-anc-pipeline --test redteam`
 ```
 
 Cargo stops at the first failing target, so `tests/telemetry.rs` did not run in that pass. Five red-team tests fail on every run. The `balanced_dummy` shed-channel test failed in both re-runs here and in 4 of the red team's 7 runs.
@@ -388,7 +388,7 @@ Formal tools that could check the no-branch property, such as ct-verif and binse
 
 **The metrics endpoint must stay private.** For a leaky validator, `tack_anc_response_seconds` is a histogram of the leak. Whether that histogram should default to off for this strategy is an open question.
 
-**Not rate limiting, lockout or replay protection.** The token is a static bearer token: whoever presents it gets in. The gate keeps no per-sender state, so a captured token replays forever. Those controls belong to the layer that issues and carries the token, such as TACK Inlet.
+**Not rate limiting, lockout or replay protection.** The token is a static bearer token: whoever presents it gets in. The gate keeps no per-sender state, so a captured token replays forever. Those controls belong to the layer that issues and carries the token, such as STACK Inlet.
 
 **Not total CPU protection.** The gate caps the cost of each request and how many run at once. A flood still takes every core it is allowed.
 

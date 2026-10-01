@@ -39,7 +39,7 @@ Terms used below:
 - **ALPHA and OMEGA.** The two ends of the CNS gate. ALPHA checks before work starts; OMEGA judges a produced result.
 - **Fail closed.** Unknown or malformed input is refused, never passed.
 
-This is a new design. Only the Sentinel Hash-Chain exists today, in sentinel_os. The scheduler is a standalone Rust crate, `tack-greenwave`, and no Python repository calls it yet.
+This is a new design. Only the Sentinel Hash-Chain exists today, in sentinel_os. The scheduler is a standalone Rust crate, `stack-greenwave`, and no Python repository calls it yet.
 
 ### Mechanism
 
@@ -212,7 +212,7 @@ Before each poll the driver reserves room in its output channel, and the poll ta
 | Missed phases are lost, not made up | Lanes never borrow each other's phases | A late driver costs that lane its turn |
 | Live tickets expire at a per-lane cap | Memory stays bounded per lane | Work slower than the cap allows has its completion refused |
 
-**The Python that exists.** A search of the five TACK repositories found no Python scheduler like this. Two nearby pieces live in sentinel_os/sentinel_os, read on 2026-10-01. `rate_limiter_v2.py` is a Redis token bucket per validated API key that answers HTTP 429 with a Retry-After header.
+**The Python that exists.** A search of the five STACK repositories found no Python scheduler like this. Two nearby pieces live in sentinel_os/sentinel_os, read on 2026-10-01. `rate_limiter_v2.py` is a Redis token bucket per validated API key that answers HTTP 429 with a Retry-After header.
 
 That limiter caps how fast each caller sends, but it gives no caller a guaranteed turn. Its docstring says it fails open when Redis is unavailable, the opposite of this crate's fail-closed rule. `queue_schema.py` keeps pending jobs in one Redis list per queue, so one caller's backlog can sit ahead of everyone else's.
 
@@ -300,16 +300,16 @@ The two gauges are shared by every scheduler in a process, with no instance labe
 
 tests/telemetry.rs asserts that 13 of the 14 metrics fire, using `DebuggingRecorder` with `metrics::with_local_recorder`. No crate test covers `tack_greenwave_tickets_expired_total`; a scratch program for this manual saw it reach 1. tests/driver_metrics.rs uses a global recorder, because the driver polls on its own thread.
 
-Spans, named `tack.greenwave.<operation>`:
+Spans, named `stack.greenwave.<operation>`:
 
-- `tack.greenwave.build` (INFO; fields `lanes`, `phases`, `stages`). Wraps `TrafficCop::new`.
-- `tack.greenwave.admit` (DEBUG; field `lane`). Core and driver admission.
-- `tack.greenwave.poll` (DEBUG). WARN events inside report missed phases and expired tickets.
-- `tack.greenwave.stage_check` (TRACE; fields `seq`, `stage`).
-- `tack.greenwave.complete` (TRACE; field `seq`). The completion time is not a field.
-- `tack.greenwave.reset` (INFO; field `was_halted`).
-- `tack.greenwave.drive` (INFO; field `max_phases`). The driver's poll loop.
-- `tack.greenwave.release_wait` (TRACE; field `seq`). The driver holding a result until release.
+- `stack.greenwave.build` (INFO; fields `lanes`, `phases`, `stages`). Wraps `TrafficCop::new`.
+- `stack.greenwave.admit` (DEBUG; field `lane`). Core and driver admission.
+- `stack.greenwave.poll` (DEBUG). WARN events inside report missed phases and expired tickets.
+- `stack.greenwave.stage_check` (TRACE; fields `seq`, `stage`).
+- `stack.greenwave.complete` (TRACE; field `seq`). The completion time is not a field.
+- `stack.greenwave.reset` (INFO; field `was_halted`).
+- `stack.greenwave.drive` (INFO; field `max_phases`). The driver's poll loop.
+- `stack.greenwave.release_wait` (TRACE; field `seq`). The driver holding a result until release.
 
 A clock regression logs one ERROR event with the previous and observed clock readings.
 
@@ -325,7 +325,7 @@ A clock regression logs one ERROR event with the previous and observed clock rea
 
 ```yaml
 groups:
-  - name: tack-greenwave
+  - name: stack-greenwave
     rules:
       - alert: TackGreenwaveHalted
         expr: max(tack_greenwave_halted) >= 1
@@ -409,7 +409,7 @@ Known limitations that remain:
 - **Process scope.** Issuer numbers are unique per process, and each clock anchors its own epoch boundaries.
 - **Stale comment.** The `HALTED` doc comment in src/telemetry.rs says dropping a halted scheduler lowers the gauge. The `Drop` impl in src/cop.rs deliberately does not; the comment needs fixing.
 
-`cargo clippy -p tack-greenwave --all-targets -- -D warnings` finishes with no warnings. Across 10 runs of `cargo test -p tack-greenwave --all-targets` for this manual, 7 passed all 47 tests. Three failed one test each, twice in the red-team binary and once in driver_metrics.
+`cargo clippy -p stack-greenwave --all-targets -- -D warnings` finishes with no warnings. Across 10 runs of `cargo test -p stack-greenwave --all-targets` for this manual, 7 passed all 47 tests. Three failed one test each, twice in the red-team binary and once in driver_metrics.
 
 Failing runs stop at the failing binary, as in `test result: FAILED. 24 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.52s`. The final run passed; its lines are unit, driver, driver_metrics, redteam, scheduling, starvation_prop and telemetry:
 

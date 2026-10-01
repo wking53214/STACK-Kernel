@@ -2,7 +2,7 @@
 
 Edits to hashed fields, deleted rows and cut tails in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in all 211 cases.
 
-*Exists today in sentinel_os. The Rust verifier, tack-sentinel, is a new design: reference implementation compiled and tested on Rust 1.94*
+*Exists today in sentinel_os. The Rust verifier, stack-sentinel, is a new design: reference implementation compiled and tested on Rust 1.94*
 
 ### Metaphor and goal
 
@@ -20,7 +20,7 @@ The goal is persistent memory whose every alteration, reordering or truncation c
 | Canonical form | The exact set of fields the writer hashed for a row, rebuilt the same way every time. |
 | Export | A JSON file holding every ledger row, in the format `sentinel_os.ledger_export.v1`. |
 
-Facts first. The Sentinel Hash-Chain is the only TACK component that exists today, written in Python in sentinel_os. The crate `tack-sentinel` is new: an independent second implementation of sentinel_os's offline verifier, written in Rust.
+Facts first. The Sentinel Hash-Chain is the only STACK component that exists today, written in Python in sentinel_os. The crate `stack-sentinel` is new: an independent second implementation of sentinel_os's offline verifier, written in Rust.
 
 It reads the same export and anchor files and prints the same verdict words, without importing, calling or trusting any Python. It is read-only: it opens no database, writes no file and keeps nothing between calls. Two independent implementations that agree on every verdict are evidence that the rule is written down correctly.
 
@@ -227,7 +227,7 @@ A report's outcome is the most severe across the first finding, the anchor note 
 
 The verifier never uses rollback or halt. It holds no state, so it has nothing of its own to restore; restoring the ledger is the operator's decision. Halting would let one bad export stop every other audit, which helps an attacker and protects nothing.
 
-The CLI, `tack-sentinel-verify`, takes the Python tool's flags and exit codes. It exits 0 only on VERIFIED, and 1 on a finding or an unreadable export. It exits 2 when no trusted key is held or the arguments are wrong.
+The CLI, `stack-sentinel-verify`, takes the Python tool's flags and exit codes. It exits 0 only on VERIFIED, and 1 on a finding or an unreadable export. It exits 2 when no trusted key is held or the arguments are wrong.
 
 ### Observability and telemetry
 
@@ -235,11 +235,11 @@ Metrics go through the `metrics` facade and spans through `tracing` (`src/teleme
 
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
-| `tack_sentinel_verifications_total` | counter | `verdict`, `outcome` | One per export that reached a verdict. `outcome` is that of the most severe finding. |
-| `tack_sentinel_trips_total` | counter | `verdict`, `reason` (23 values), `outcome`, `resolution` | One per finding: the first, the anchor note and the escalation. |
-| `tack_sentinel_input_rejected_total` | counter | `reason` (10 values), `outcome` (always `retry`) | One per export or key set refused before a verdict. |
-| `tack_sentinel_rows_checked_total` | counter | none | Rows the chain walk examined. It adds 0 when the anchor was missing or unreadable. |
-| `tack_sentinel_verify_duration_seconds` | histogram | `outcome` | Wall time of one `verify_export` call. A refusal is recorded as `retry`. |
+| `stack_sentinel_verifications_total` | counter | `verdict`, `outcome` | One per export that reached a verdict. `outcome` is that of the most severe finding. |
+| `stack_sentinel_trips_total` | counter | `verdict`, `reason` (23 values), `outcome`, `resolution` | One per finding: the first, the anchor note and the escalation. |
+| `stack_sentinel_input_rejected_total` | counter | `reason` (10 values), `outcome` (always `retry`) | One per export or key set refused before a verdict. |
+| `stack_sentinel_rows_checked_total` | counter | none | Rows the chain walk examined. It adds 0 when the anchor was missing or unreadable. |
+| `stack_sentinel_verify_duration_seconds` | histogram | `outcome` | Wall time of one `verify_export` call. A refusal is recorded as `retry`. |
 
 Each finding is counted with four closed labels (`src/telemetry.rs`):
 
@@ -257,13 +257,13 @@ fn record_trip(f: &Finding) {
 }
 ```
 
-Spans, each named `tack.sentinel.<operation>`:
+Spans, each named `stack.sentinel.<operation>`:
 
-- `tack.sentinel.verify_export`: `export_len`, `anchor_len`, and `export_sha256` as full hex for an export under the cap. At the end it records `verdict`, `outcome`, `anchor_entries`, `anchor_sealed_at` and `anchor_key_fingerprint`.
-- `tack.sentinel.parse_export`: `export_len`.
-- `tack.sentinel.parse_anchor`: `anchor_len`, plus `anchor_sha256` as full hex once the anchor is known to be within its cap.
-- `tack.sentinel.verify_rows`: `rows`.
-- `tack.sentinel.check_anchor`: no fields.
+- `stack.sentinel.verify_export`: `export_len`, `anchor_len`, and `export_sha256` as full hex for an export under the cap. At the end it records `verdict`, `outcome`, `anchor_entries`, `anchor_sealed_at` and `anchor_key_fingerprint`.
+- `stack.sentinel.parse_export`: `export_len`.
+- `stack.sentinel.parse_anchor`: `anchor_len`, plus `anchor_sha256` as full hex once the anchor is known to be within its cap.
+- `stack.sentinel.verify_rows`: `rows`.
+- `stack.sentinel.check_anchor`: no fields.
 
 Inside `verify_export`, each finding emits one `warn` event with `finding` (first, also or escalation), `verdict`, `reason`, `outcome`, `resolution`, `row_id` and `row_position`. A refusal emits `reason` and `outcome`. `Verifier::new` emits a `warn` with `reason` when it refuses a key set with no trusted key.
 
@@ -271,33 +271,33 @@ The code never logs raw input, and a red-team test found none in any span or eve
 
 The one short identifier is the 16-hex key fingerprint, which the Python wire format fixes inside signatures and anchors. It names a key publicly and is not an integrity hash. Key `Debug` output uses the full 64-hex key digest instead.
 
-The `tack-sentinel-verify` binary installs no metrics recorder and no tracing subscriber, so on its own it emits nothing. The telemetry reaches a control room only when the library runs inside a host process that installs both. The duration alert reads `_bucket` series, so the host's exporter must publish that metric as a bucketed histogram, not as a summary.
+The `stack-sentinel-verify` binary installs no metrics recorder and no tracing subscriber, so on its own it emits nothing. The telemetry reaches a control room only when the library runs inside a host process that installs both. The duration alert reads `_bucket` series, so the host's exporter must publish that metric as a bucketed histogram, not as a summary.
 
 The alert rules ship as `telemetry::ALERT_RULES`. Here they are as a Prometheus rule file, with expressions copied from the crate:
 
 ```yaml
 groups:
-  - name: tack-sentinel
+  - name: stack-sentinel
     rules:
       - alert: TackSentinelTamperEvidence
-        expr: sum(increase(tack_sentinel_trips_total{outcome="terminal_breach"}[15m])) > 0
+        expr: sum(increase(stack_sentinel_trips_total{outcome="terminal_breach"}[15m])) > 0
         labels: {severity: critical}
         annotations: {summary: "An export failed a hash, link, signature, subject binding, seed or anchor-head check, or carries a signature by a retired key or by an unknown key after the attestation policy. The ledger or its export was altered. Quarantine the export and compare it with the witness copy."}
       - alert: TackSentinelTruncation
-        expr: sum(increase(tack_sentinel_trips_total{verdict="truncated",outcome="terminal_breach"}[15m])) > 0
+        expr: sum(increase(stack_sentinel_trips_total{verdict="truncated",outcome="terminal_breach"}[15m])) > 0
         labels: {severity: critical}
         annotations: {summary: "The chain is shorter than its signed anchor, or the anchored head is not in it, or the anchor itself was altered. Rows were cut or the chain was rebuilt."}
       - alert: TackSentinelVerificationCannotComplete
-        expr: sum(increase(tack_sentinel_verifications_total{outcome="retry"}[1h])) + sum(increase(tack_sentinel_input_rejected_total[1h])) > 3
+        expr: sum(increase(stack_sentinel_verifications_total{outcome="retry"}[1h])) + sum(increase(stack_sentinel_input_rejected_total[1h])) > 3
         for: 15m
         labels: {severity: warning}
         annotations: {summary: "Verifications keep ending in RETRY: the anchor is missing, stale, empty or sealed with a retired key, a key is not held, or exports are malformed or over budget. Audits are not happening even though nothing tripped."}
       - alert: TackSentinelNoCleanVerification
-        expr: absent_over_time(tack_sentinel_verifications_total{verdict="verified"}[26h])
+        expr: absent_over_time(stack_sentinel_verifications_total{verdict="verified"}[26h])
         labels: {severity: warning}
         annotations: {summary: "No export verified cleanly in 26 hours. For a daily audit job this means the job stopped or every run failed."}
       - alert: TackSentinelSlowVerification
-        expr: histogram_quantile(0.99, sum by (le) (rate(tack_sentinel_verify_duration_seconds_bucket[1h]))) > 60
+        expr: histogram_quantile(0.99, sum by (le) (rate(stack_sentinel_verify_duration_seconds_bucket[1h]))) > 60
         for: 30m
         labels: {severity: info}
         annotations: {summary: "Verification p99 above one minute. The ledger has outgrown the export cap planning, or the host is starved."}
@@ -335,7 +335,7 @@ Masking means a harmless-looking finding that hides a serious one. Amplification
 | Random edits of 1 to 5 bytes to the export (property test, 256 cases) | Held | No panic. |
 | Newlines, ANSI escapes and a fake `VERIFIED row=1` planted in hashes, signatures, claims and anchor fields | Held | Report text never echoed them. Non-hash values appear as type, length and digest. |
 | Metric label cardinality under every hostile input | Held | Every metric name and label value came from the closed sets. |
-| Raw input or shortened hashes in spans | Held | Every span is `tack.sentinel.*`, and every `*sha256` field is 64 hex. |
+| Raw input or shortened hashes in spans | Held | Every span is `stack.sentinel.*`, and every `*sha256` field is 64 hex. |
 | One `Verifier` shared by 8 threads, 30 runs each | Held | Every result matched the single-thread result. The verifier holds no mutable state. |
 | Digest comparison time by position of the first wrong character | Held | No detectable difference at 2,000 runs per side. This is a smoke test only, because HMAC time dominates. |
 | Anchor counts off by one, a 4,000-digit count, and row ids at the 64-bit limits | Held | Each gave the expected finding, and an id of 2^63 is refused. |
@@ -352,12 +352,12 @@ Known limitations that remain:
 - **Rows before the marker.** Unsigned claims written before the first `attestation_policy` row are not judged, as in Python.
 - **Keys in memory.** Keys sit in an ordinary `Vec<u8>`, neither locked in memory nor wiped on drop.
 - **Alert expressions.** Two issues were found while writing this section, by reading the rules; neither was run against Prometheus. `TackSentinelVerificationCannotComplete` adds two `sum()` results, so it cannot fire while either counter has no series; wrapping each side in `(... or vector(0))` fixes that.
-- **Stalled-job alert.** `TackSentinelNoCleanVerification` uses `absent_over_time`, but a long-running host keeps exporting the counter after its first VERIFIED, unless its exporter expires idle series. Adding `sum(increase(tack_sentinel_verifications_total{verdict="verified"}[26h])) == 0` as an alternative would catch a stalled job.
+- **Stalled-job alert.** `TackSentinelNoCleanVerification` uses `absent_over_time`, but a long-running host keeps exporting the counter after its first VERIFIED, unless its exporter expires idle series. Adding `sum(increase(stack_sentinel_verifications_total{verdict="verified"}[26h])) == 0` as an alternative would catch a stalled job.
 - **Test strength.** The byte-edit and column-value attacks are property tests with 256 cases each, not coverage-guided fuzzing.
 
-`tests/properties.rs` adds nine properties: four at 256 cases and five at 48. `cargo clippy -p tack-sentinel --all-targets -- -D warnings` finished with no warnings.
+`tests/properties.rs` adds nine properties: four at 256 cases and five at 48. `cargo clippy -p stack-sentinel --all-targets -- -D warnings` finished with no warnings.
 
-The final run of `cargo test -p tack-sentinel --all-targets` passed 77 tests in seven targets: unit, binary, acceptance, differential, properties, redteam and telemetry, in that order.
+The final run of `cargo test -p stack-sentinel --all-targets` passed 77 tests in seven targets: unit, binary, acceptance, differential, properties, redteam and telemetry, in that order.
 
 ```text
 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

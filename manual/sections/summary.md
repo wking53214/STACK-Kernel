@@ -1,6 +1,6 @@
 ## Summary
 
-TACK checks fail closed (682 of 692 tests pass); ANC bounds timing leaks but cannot zero them, and a t-test cannot prove one absent.
+STACK checks fail closed (682 of 692 tests pass); ANC bounds timing leaks but cannot zero them, and a t-test cannot prove one absent.
 
 *Exists today in sentinel_os: the Sentinel Hash-Chain only. New design: everything else, reference implementations compiled and tested on Rust 1.94.*
 

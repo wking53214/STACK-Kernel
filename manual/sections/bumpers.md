@@ -27,7 +27,7 @@ Terms used below:
 - **SHA-256 hex digest.** A 64-character fingerprint of some bytes. It identifies a value without revealing it.
 - **Fail closed.** Unknown or malformed input is refused, never passed.
 
-This is a new design. Only the Sentinel Hash-Chain exists today, in sentinel_os. The bumper is a standalone Rust crate, `tack-bumpers`, and no Python repository calls it yet.
+This is a new design. Only the Sentinel Hash-Chain exists today, in sentinel_os. The bumper is a standalone Rust crate, `stack-bumpers`, and no Python repository calls it yet.
 
 ### Mechanism
 
@@ -245,8 +245,8 @@ A span is a named, timed scope in a trace, and an event is one log record inside
 
 | Span or event | Level | Fields | When |
 |---|---|---|---|
-| Span `tack.bumpers.normalize` | DEBUG | `params` (entry count), `outcome`, then `corrections` or `trips` | Each `Bumper::normalize` call |
-| Span `tack.bumpers.build` | DEBUG | None | Each `Bumper::new` call |
+| Span `stack.bumpers.normalize` | DEBUG | `params` (entry count), `outcome`, then `corrections` or `trips` | Each `Bumper::normalize` call |
+| Span `stack.bumpers.build` | DEBUG | None | Each `Bumper::new` call |
 | Event `bumper trip` | DEBUG | `param` (rule name, absent for unknown keys and request-level trips), `reason`, `outcome`, `input_len`, and `input_sha256` or `input_over_cap=true` | Once per trip |
 | Event `bumper trip` (budget) | DEBUG | `corrections`, `budget`, `reason` | A request over the correction budget |
 | Event `bumper terminal breach` | WARN | `outcome`, `trips`, a count per TERMINAL reason, `retry_trips` | Exactly one per TERMINAL_BREACH request |
@@ -267,7 +267,7 @@ Alert rules are Prometheus expressions over these metrics. The histogram alert n
 
 ```yaml
 groups:
-  - name: tack-bumpers
+  - name: stack-bumpers
     rules:
       - alert: TackBumpersTerminalBreach
         expr: sum(rate(tack_bumpers_requests_total{outcome="terminal_breach"}[5m])) > 0
@@ -344,7 +344,7 @@ Known limitations:
 - **Stateless.** The bumper cannot escalate repeated `unknown_param` trips to quarantine; a caller that tracks senders must.
 - **Open questions.** Should key case drift (`Timeout` for `timeout`) be corrected? Should integer-only numbers and optional defaults be supported? Which histogram buckets should the kernel standardize?
 
-`cargo clippy -p tack-bumpers --all-targets -- -D warnings` exits 0, and the doctest passes (1 passed). The final run of `cargo test -p tack-bumpers --all-targets` passed 122 tests in eight binaries: unit, corrections, float_edges, logging, properties, redteam, spec_construction and telemetry, in that order.
+`cargo clippy -p stack-bumpers --all-targets -- -D warnings` exits 0, and the doctest passes (1 passed). The final run of `cargo test -p stack-bumpers --all-targets` passed 122 tests in eight binaries: unit, corrections, float_edges, logging, properties, redteam, spec_construction and telemetry, in that order.
 
 ```text
 test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

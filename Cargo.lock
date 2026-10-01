@@ -213,9 +213,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "lazy_static"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"
@@ -567,6 +567,184 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
+name = "stack-anc-adaptive"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "serde_json",
+ "sha2",
+ "stack-anc-harness",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "stack-anc-ceiling"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "serde_json",
+ "sha2",
+ "stack-anc-harness",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "stack-anc-harness"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "stack-anc-pipeline"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "serde_json",
+ "sha2",
+ "stack-anc-harness",
+ "subtle",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "stack-bumpers"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "sha2",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "stack-greenwave"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "stack-inlet"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "sha2",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "stack-minotaur"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "stack-sentinel"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "stack-transmission"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "stack-trident"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "stack-warm"
+version = "0.0.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "libc",
+ "metrics",
+ "metrics-util",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -592,184 +770,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tack-anc-adaptive"
-version = "0.1.0"
-dependencies = [
- "hex",
- "metrics",
- "metrics-util",
- "proptest",
- "serde_json",
- "sha2",
- "tack-anc-harness",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "tack-anc-ceiling"
-version = "0.1.0"
-dependencies = [
- "hex",
- "metrics",
- "metrics-util",
- "proptest",
- "serde_json",
- "sha2",
- "tack-anc-harness",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tack-anc-harness"
-version = "0.1.0"
-dependencies = [
- "libc",
- "metrics",
- "metrics-util",
- "proptest",
- "serde",
- "serde_json",
- "subtle",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "tack-anc-pipeline"
-version = "0.1.0"
-dependencies = [
- "hex",
- "metrics",
- "metrics-util",
- "proptest",
- "serde_json",
- "sha2",
- "subtle",
- "tack-anc-harness",
- "thiserror",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tack-bumpers"
-version = "0.1.0"
-dependencies = [
- "hex",
- "metrics",
- "metrics-util",
- "proptest",
- "sha2",
- "thiserror",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tack-greenwave"
-version = "0.1.0"
-dependencies = [
- "metrics",
- "metrics-util",
- "proptest",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tack-inlet"
-version = "0.1.0"
-dependencies = [
- "hmac",
- "metrics",
- "metrics-util",
- "proptest",
- "sha2",
- "thiserror",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tack-minotaur"
-version = "0.1.0"
-dependencies = [
- "hex",
- "metrics",
- "metrics-util",
- "proptest",
- "sha2",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tack-sentinel"
-version = "0.1.0"
-dependencies = [
- "hex",
- "hmac",
- "metrics",
- "metrics-util",
- "proptest",
- "sha2",
- "subtle",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "tack-transmission"
-version = "0.1.0"
-dependencies = [
- "metrics",
- "metrics-util",
- "proptest",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "tack-trident"
-version = "0.1.0"
-dependencies = [
- "hmac",
- "metrics",
- "metrics-util",
- "proptest",
- "serde_json",
- "sha2",
- "subtle",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "tack-warm"
-version = "0.0.0"
-dependencies = [
- "hex",
- "hmac",
- "libc",
- "metrics",
- "metrics-util",
- "proptest",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
