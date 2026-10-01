@@ -46,6 +46,7 @@
 #include "posix_deadline_timer_hardened.hpp"
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -252,12 +253,21 @@ private:
     ComputeDebtTracker<MaxDomains> debt_tracker_{};
     CapabilityMask256 active_host_capabilities_{};
     bool seccomp_sealed_{false};
+    std::atomic<uint32_t> transactions_in_flight_{0};  // Lifecycle guard
 
 public:
     GovernedMinotaurHost() noexcept = default;
 
-    void SetActiveCapabilities(const CapabilityMask256& mask) noexcept {
+    /**
+     * Set active capability mask. Guarded against mid-transaction changes.
+     * Returns false if transaction is in flight, preventing capability mutation.
+     */
+    [[nodiscard]] bool SetActiveCapabilities(const CapabilityMask256& mask) noexcept {
+        if (transactions_in_flight_.load(std::memory_order_acquire) > 0) {
+            return false;  // Transaction in flight; cannot change capabilities
+        }
         active_host_capabilities_ = mask;
+        return true;
     }
 
     [[nodiscard]] std::expected<void, HostExecutionError> InitializeAndSeal() noexcept {
@@ -285,12 +295,23 @@ public:
         uint32_t required_tokens,
         uint64_t deadline_budget_ticks,
         uint64_t hard_timeout_nanoseconds,
-        ExecutionPayload&& payload) noexcept 
+        ExecutionPayload&& payload) noexcept
     {
         if (!seccomp_sealed_) [[unlikely]] {
             auto init_res = InitializeAndSeal();
             if (!init_res.has_value()) return std::unexpected(init_res.error());
         }
+
+        // Lifecycle guard: mark transaction in flight
+        transactions_in_flight_.fetch_add(1, std::memory_order_release);
+
+        // RAII cleanup: decrement on exit
+        struct TransactionGuard {
+            std::atomic<uint32_t>& counter;
+            ~TransactionGuard() noexcept {
+                counter.fetch_sub(1, std::memory_order_release);
+            }
+        } lifecycle_guard{transactions_in_flight_};
 
         // Component 13 Check: SIMD Capability Verification
         if (!token.Validate(active_host_capabilities_)) [[unlikely]] {

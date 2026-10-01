@@ -37,6 +37,7 @@
  * ───────────────────────────────────────────────────────────────────────────
  */
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -91,9 +92,20 @@ class StaticArenaBuffer {
 private:
     alignas(64) uint8_t storage_[ArenaSize]{};
     std::size_t offset_{0};
+    std::atomic<uint32_t> allocations_in_flight_{0};  // Lifecycle guard
 
 public:
     constexpr StaticArenaBuffer() noexcept = default;
+
+    // Increment allocations counter when allocating
+    void IncAllocations() noexcept {
+        allocations_in_flight_.fetch_add(1, std::memory_order_release);
+    }
+
+    // Decrement allocations counter when done
+    void DecAllocations() noexcept {
+        allocations_in_flight_.fetch_sub(1, std::memory_order_release);
+    }
 
     /**
      * ALLOCATE: Reserve and construct one object in the arena.
@@ -127,17 +139,21 @@ public:
     }
 
     /**
-     * RESET: Rewind the allocator to the beginning.
+     * RESET: Rewind the allocator to the beginning. Guarded against mid-flight resets.
      *
      * Clears all allocations and allows the arena to be reused.
      * Destructors are NOT called on existing objects (no automatic cleanup).
      *
-     * Defect: No automatic memory zeroization. After reset, old data may
-     * persist in the arena until it is overwritten by new allocations.
-     * This is a policy defect: the mechanism is correct, but the lifecycle
-     * is the user's responsibility.
+     * Returns: true if reset succeeded, false if allocations are in flight
+     * (prevents arena wipe during active transaction use).
      */
-    void Reset() noexcept { offset_ = 0; }
+    [[nodiscard]] bool Reset() noexcept {
+        if (allocations_in_flight_.load(std::memory_order_acquire) > 0) {
+            return false;  // Allocations in flight; cannot reset
+        }
+        offset_ = 0;
+        return true;
+    }
 
     /**
      * BYTES ALLOCATED: Current high-water mark.

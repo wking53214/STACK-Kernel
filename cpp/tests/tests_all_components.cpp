@@ -4,17 +4,17 @@
 #include <vector>
 #include <iostream>
 
-#include "../include/tack_kernel.hpp"
-#include "../include/tack_kinetic_governor.hpp"
+#include "../include/stack_kernel.hpp"
+#include "../include/stack_kinetic_governor.hpp"
 #include "../include/posix_deadline_timer_hardened.hpp"
-#include "../include/tack_host_binding.hpp"
-#include "../include/tack_arena.hpp"
-#include "../include/tack_audit.hpp"
+#include "../include/stack_host_binding.hpp"
+#include "../include/stack_arena.hpp"
+#include "../include/stack_audit.hpp"
 
-using namespace tack::governor;
-using namespace tack::host;
-using namespace tack::isolation;
-using namespace tack::telemetry;
+using namespace stack::governor;
+using namespace stack::host;
+using namespace stack::isolation;
+using namespace stack::telemetry;
 
 TEST_CASE("Components 1-5: Governor & Sync Core", "[components][1-5]") {
     KineticGovernor<> gov;
@@ -47,7 +47,7 @@ TEST_CASE("Component 16 & 17: Integration & Chaos Stress", "[components][16-17]"
     std::vector<std::thread> threads;
     std::atomic<int> completed{0};
     GovernedMinotaurHost<> host;
-    host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0));
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
 
     for (int i = 0; i < num_threads; ++i) {
         threads.emplace_back([&host, &completed, i]() {

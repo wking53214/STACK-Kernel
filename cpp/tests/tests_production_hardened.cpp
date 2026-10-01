@@ -1,11 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <iostream>
 
-#include "../include/tack_kernel.hpp"
-#include "../include/tack_kinetic_governor.hpp"
+#include "../include/stack_kernel.hpp"
+#include "../include/stack_kinetic_governor.hpp"
 #include "../include/posix_deadline_timer_hardened.hpp"
-#include "../include/tack_host_binding.hpp"
-#include "../include/tack_audit.hpp"
+#include "../include/stack_host_binding.hpp"
+#include "../include/stack_audit.hpp"
 
 using namespace stack;
 
