@@ -10,7 +10,7 @@
 
 namespace tack::governor {
 
-inline constexpr int GOVERNOR_PREEMPT_SIG = SIGRTMIN + 2;
+inline int GOVERNOR_PREEMPT_SIG = SIGRTMIN + 2;
 
 struct alignas(64) PersistentThreadTimerState {
     std::atomic<uint32_t> preempted{0};
@@ -20,7 +20,7 @@ struct alignas(64) PersistentThreadTimerState {
 
 inline thread_local PersistentThreadTimerState g_thread_timer_state{};
 
-inline void HardenedPreemptSignalHandler(int sig, siginfo_t* info, void* context) noexcept {
+inline void HardenedPreemptSignalHandler(int sig, siginfo_t* info, [[maybe_unused]] void* context) noexcept {
     if (sig == GOVERNOR_PREEMPT_SIG && info) {
         auto* state = static_cast<PersistentThreadTimerState*>(info->si_value.sival_ptr);
         if (state) state->preempted.store(1, std::memory_order_release);
@@ -67,14 +67,14 @@ public:
         struct itimerspec its{};
         its.it_value.tv_sec = static_cast<time_t>(budget_nanoseconds / 1'000'000'000ULL);
         its.it_value.tv_nsec = static_cast<long>(budget_nanoseconds % 1'000'000'000ULL);
-        if (::timer_settimer(state_.timer_id, 0, &its, nullptr) != 0) [[unlikely]] return std::unexpected(std::errc::invalid_argument);
+        if (::timer_settime(state_.timer_id, 0, &its, nullptr) != 0) [[unlikely]] return std::unexpected(std::errc::invalid_argument);
         return {};
     }
 
     ~HardenedPosixPreemptionGuard() noexcept {
         if (state_.timer_initialized) {
             struct itimerspec zero_its{};
-            ::timer_settimer(state_.timer_id, 0, &zero_its, nullptr);
+            ::timer_settime(state_.timer_id, 0, &zero_its, nullptr);
         }
     }
 

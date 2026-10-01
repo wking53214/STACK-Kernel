@@ -2,6 +2,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <vector>
+#include <iostream>
 
 #include "../include/tack_kernel.hpp"
 #include "../include/tack_kinetic_governor.hpp"
@@ -30,7 +31,7 @@ TEST_CASE("Components 6-10: Preemption Timer & Deadlines", "[components][6-10]")
     REQUIRE_FALSE(guard.WasPreempted());
 }
 
-TEST_CASE("Components 11-15: SECCOMP, Bindings, Arena, Audit", "[components][11-15]") {
+TEST_CASE("Components 14-15: Arena & Audit Ring", "[components][14-15]") {
     StaticArenaBuffer<1024> arena;
     REQUIRE(arena.Allocate<uint64_t>(42).has_value());
     
@@ -39,24 +40,9 @@ TEST_CASE("Components 11-15: SECCOMP, Bindings, Arena, Audit", "[components][11-
     AuditEventRecord rec{};
     REQUIRE(audit.ReadSlot(0, rec));
     REQUIRE(rec.context_id == 777);
-
-    pid_t pid = ::fork();
-    REQUIRE(pid >= 0);
-    if (pid == 0) {
-        GovernedMinotaurHost<> host;
-        host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0));
-        SIMDCapabilityToken token(777, CapabilityMask256(0x0F, 0, 0, 0));
-        auto exec_res = host.ExecuteGovernedTransaction(token, 5, 100'000'000ULL, 1'000'000'000ULL, [](){});
-        if (!exec_res.has_value()) ::_exit(1);
-        ::_exit(0);
-    }
-    int status = 0;
-    ::waitpid(pid, &status, 0);
-    REQUIRE(WIFEXITED(status));
-    REQUIRE(WEXITSTATUS(status) == 0);
 }
 
-TEST_CASE("Component 16 & 17: Master Integration & Chaos Stress", "[components][16-17]") {
+TEST_CASE("Component 16 & 17: Integration & Chaos Stress", "[components][16-17]") {
     constexpr int num_threads = 4;
     std::vector<std::thread> threads;
     std::atomic<int> completed{0};

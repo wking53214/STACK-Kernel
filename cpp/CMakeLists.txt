@@ -18,6 +18,6 @@ target_compile_options(tack_containment INTERFACE
 # Testing
 find_package(Catch2 REQUIRED)
 add_executable(tack_tests tests/tests_all_components.cpp)
-target_link_libraries(tack_tests PRIVATE Catch2::Catch2WithMain tack_containment)
+target_link_libraries(tack_tests PRIVATE Catch2::Catch2WithMain tack_containment atomic)
 enable_testing()
 add_test(NAME TACKTests COMMAND tack_tests)
