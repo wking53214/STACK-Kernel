@@ -47,6 +47,21 @@ Timing measurements need release builds on a quiet machine:
 cargo run --release -p tack-anc-ceiling --example verify
 ```
 
+The Rust Sentinel verifier can also be checked against the real Python one. The
+cross-check runs both programs as separate processes on the same 211 recorded
+cases and fails on any difference that is not listed in the test, or when a
+listed difference stops happening. It needs a `sentinel_os` checkout and a
+Python with its dependencies, so it is ignored by default:
+
+```
+SENTINEL_OS_DIR=/path/to/sentinel_os PYTHON=/path/to/venv/bin/python \
+    cargo test -p tack-sentinel --test crosscheck -- --ignored
+```
+
+It currently reports one understood difference (an anchor that seals zero rows:
+Python says `VERIFIED`, Rust says `TRUNCATED`). The header of
+`crates/tack-sentinel/tests/crosscheck.rs` explains the rest.
+
 ## Known state
 
 - Ten red-team tests fail on purpose, all in the three ANC strategy crates (1 in Strategy 1, 3 in Strategy 2, 6 in Strategy 3).
