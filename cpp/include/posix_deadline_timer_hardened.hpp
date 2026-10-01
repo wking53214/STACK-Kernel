@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <ctime>
 #include <expected>
+#include <system_error>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <atomic>
