@@ -13,6 +13,7 @@ members = [
     "crates/tack-anc-adaptive",
     "crates/tack-anc-pipeline",
     "crates/_warm",
+    "crates/tack-ffi",
 ]
 
 [workspace.package]
