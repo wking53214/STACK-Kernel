@@ -1,0 +1,20 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.10s
+     Running `target/release/examples/verify`
+measuring harness leaky_validate (unpadded) (primary), 100000 samples per class
+measuring harness ct_validate (unpadded) (primary), 100000 samples per class
+measuring early_exit (primary), 100000 samples per class
+measuring balanced_dummy (primary), 100000 samples per class
+measuring constant_time (primary), 100000 samples per class
+measuring early_exit (primary_with_debugging_recorder), 100000 samples per class
+measuring constant_time (primary_with_debugging_recorder), 100000 samples per class
+measuring early_exit (secondary_fixed_vs_random), 100000 samples per class
+measuring balanced_dummy (secondary_fixed_vs_random), 100000 samples per class
+measuring constant_time (secondary_fixed_vs_random), 100000 samples per class
+measuring early_exit (primary_bare_validator), 100000 samples per class
+measuring balanced_dummy (primary_bare_validator), 100000 samples per class
+measuring balanced_dummy_no_black_box (primary_bare_validator), 100000 samples per class
+measuring constant_time (primary_bare_validator), 100000 samples per class
+flood early_exit: 20 fast-fail threads against max_in_flight=2 for 2s
+flood balanced_dummy: 20 fast-fail threads against max_in_flight=2 for 2s
+flood constant_time: 20 fast-fail threads against max_in_flight=2 for 2s
+disassembling /tmp/claude-0/-home-user/dc79eb2b-c581-5d0f-9c7a-4872a4d2458f/scratchpad/tack/target/release/examples/verify

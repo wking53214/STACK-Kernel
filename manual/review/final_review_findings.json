@@ -1,0 +1,258 @@
+{
+ "findings": [
+  {
+   "section": "7. Tractor Transmission > Observability and telemetry",
+   "severity": "major",
+   "quote": "ANC, the kernel's Active Timing Cancellation, pads responses so their timing reveals nothing.",
+   "problem": "Overclaim. The ANC analysis and all three strategy sections say ANC cannot make the timing difference zero, and a t-test cannot prove that no leak exists. This sentence says the opposite.",
+   "replacement": "ANC, the kernel's Active Timing Cancellation, pads responses so that their timing reveals less. It cannot bring the leak to zero, as the ANC analysis explains."
+  },
+  {
+   "section": "Architecture",
+   "severity": "major",
+   "quote": "Inlet and bumper refusals, and requests shed at admission, leave at once without padding, though the Elastic Bumpers section asks for ANC around the whole request; every outcome reached inside the ANC box, refusals included, is recorded by the Sentinel Hash-Chain and then held until its release time.",
+   "problem": "The manual contradicts itself without settling the question. The Elastic Bumpers section says ANC must wrap the whole request boundary, because the bumper is not constant time and its refusals do extra work. The diagram puts bumper refusals outside the ANC box. A reader cannot tell which design holds. The sentence is also too long for the intended reader, and the Open questions section does not list this.",
+   "replacement": "Refusals from the Inlet and the Elastic Bumpers, and requests shed at admission, leave at once without padding. Every outcome reached inside the ANC box, refusals included, is recorded by the Sentinel Hash-Chain and then held until its release time. This placement has a known cost. The bumper's refusal time varies with the input, and its own section asks for ANC around the whole request. Where the bumper sits relative to ANC is an open decision (see Open questions, Kernel-wide)."
+  },
+  {
+   "section": "Open questions > Kernel-wide",
+   "severity": "major",
+   "quote": "Should the allowed dependency list grow to admit a formal constant-time checker, the sha2 assembly feature, a confusables table or a signature scheme?",
+   "problem": "The question raised by the Architecture section and the Bumpers timing note is missing: should the Inlet and Bumpers sit inside the ANC boundary? Without it, the contradiction between the diagram and the Bumpers section has no owner.",
+   "replacement": "Should the allowed dependency list grow to admit a formal constant-time checker, the sha2 assembly feature, a confusables table or a signature scheme? [then add a new item 12:] 12. Should the Inlet and Elastic Bumpers move inside the ANC boundary? The diagram releases their refusals at once, but the bumper's refusal time varies with the input and its section asks for ANC around the whole request. Moving them inside pads every refusal, at the cost of holding a slot for each one. (Update the lead's count from 64 to 65.)"
+  },
+  {
+   "section": "ANC analysis > Trips shared by the three strategies",
+   "severity": "major",
+   "quote": "A deadline timer, not the worker, sends the reply at the ceiling, and the late verdict is discarded.",
+   "problem": "The implementation contradicts this. Strategy 1 found that a blocking worker cannot be stopped mid-task, so its overrun RETRY leaves on the retry window (64 ceilings by default), not at the ceiling. The table reads as the design in force, and it is not.",
+   "replacement": "The analysis asks a deadline timer, not the worker, to send the reply at the ceiling and discard the late verdict. Strategy 1's blocking API cannot stop the worker, so it releases the RETRY on a later public window (64 ceilings by default) instead."
+  },
+  {
+   "section": "ANC analysis > Trips shared by the three strategies",
+   "severity": "major",
+   "quote": "TERMINAL_BREACH for the controller; requests continue",
+   "problem": "Strategy 2 changed this mapping after red-team testing. A window budget spend is now RETRY, and only a lifetime spend is TERMINAL_BREACH. Strategy 2's section says this, but the analysis table still gives the old mapping.",
+   "replacement": "Window budget spent: RETRY. Lifetime budget spent: TERMINAL_BREACH. In both cases requests continue. (Strategy 2 split this after the red team showed that one slow request could otherwise force a freeze only an operator can clear.)"
+  },
+  {
+   "section": "ANC analysis > Calibration on the test machine",
+   "severity": "major",
+   "quote": "The machine was a 4-CPU Intel Xeon at 2.80 GHz.",
+   "problem": "All three strategies were measured on a different host, a 4-vCPU KVM VM at 2.10 GHz (see the Summary and each strategy's measured results). The build record confirms that the harness calibration and its 0 of 50 A/A result came from the 2.80 GHz VM. The Measures table then says calibration was 'Met on the test machine above', which suggests one machine when there were two.",
+   "replacement": "The machine was a 4-CPU Intel Xeon VM at 2.80 GHz. This is not the 2.10 GHz VM used for the strategy runs. Each strategy repeated the calibration inside its own runs on the 2.10 GHz host, and those results appear in its section."
+  },
+  {
+   "section": "ANC analysis > The measures the three strategies are judged on",
+   "severity": "minor",
+   "quote": "If it cannot see the known leak, the run proves nothing. Met on the test machine above.",
+   "problem": "'The test machine above' is the 2.80 GHz calibration VM, not the 2.10 GHz host where the strategies were measured.",
+   "replacement": "If it cannot see the known leak, the run proves nothing. Met on the 2.80 GHz calibration VM above, and again inside each strategy's own runs on the 2.10 GHz host."
+  },
+  {
+   "section": "ANC analysis > How leaks are detected",
+   "severity": "major",
+   "quote": "Proof is available only for Strategy 3.",
+   "problem": "This reads as if a proof exists. None was done: Strategy 3 says ct-verif and binsec/rel are not available under the dependency rules and that no formal verification was done. The honesty check requires that nothing claim a proof.",
+   "replacement": "A formal proof is possible in principle only for Strategy 3, and none was done for this manual."
+  },
+  {
+   "section": "Summary",
+   "severity": "major",
+   "quote": "TACK checks fail closed (682 of 692 tests pass); ANC bounds timing leaks but cannot zero them, and a t-test cannot prove one absent.",
+   "problem": "Two problems. First, the test count is offered as evidence of fail-closed behaviour, but the 10 failures are open ANC findings, not fail-open cases. Second, 'bounds' sounds like a guarantee. Only Strategy 2 gives a bound in bits, and only under a counting model. Strategies 1 and 3 show only that no leak was detected at a given sample size.",
+   "replacement": "Every TACK check is built to fail closed, and 682 of 692 tests pass; the 10 failures are open ANC findings kept as failing tests. ANC reduces timing leaks below what these tests could detect, but it cannot make them zero, and a t-test cannot prove that no leak exists."
+  },
+  {
+   "section": "5. Traffic Cop and Green Wave Routing > Red-team results",
+   "severity": "major",
+   "quote": "The red-team binary failed 3 of 14 full runs for this manual.",
+   "problem": "The section reports two run series that disagree, and both say 'for this manual'. Here it is 3 failures in 14 runs, all in the red-team binary. Further down it is 'Across 10 runs ... Three failed one test each, twice in the red-team binary and once in driver_metrics', and driver_metrics is also said to have failed '1 in 16 runs'. A reader cannot tell how flaky the suite is.",
+   "replacement": "In a first series of 14 full runs for this manual, the red-team binary failed 3 times. (Keep the rest of this bullet, then add after it:) A second series of 10 full runs, reported at the end of this section, had 3 failing runs: 2 in the red-team binary and 1 in driver_metrics."
+  },
+  {
+   "section": "Verification pipeline > Where the job stands today",
+   "severity": "minor",
+   "quote": "Two timing-sensitive suites are flaky on a loaded host. They are Strategy 1's rt04 and Green Wave's driver tests, which failed 3 of 10 earlier full runs.",
+   "problem": "As written, both suites seem to have failed 3 of 10 runs. Strategy 1's section says rt04 failed 3 of 12.",
+   "replacement": "Two timing-sensitive suites are flaky on a loaded host: Strategy 1's rt04, which failed 3 of 12 full runs, and Green Wave's driver tests, which failed in 3 of 10."
+  },
+  {
+   "section": "Summary",
+   "severity": "minor",
+   "quote": "44 of 45",
+   "problem": "Strategy 1's own section reports a final re-run of 15 passed and 2 failed in the red-team binary, which is 43 of 45, because rt04 is flaky. The Verification pipeline re-run shows 44 of 45. The summary cell should not hide the flaky test.",
+   "replacement": "44 of 45 in the latest run; rt04 is flaky (failed 3 of 12 runs)"
+  },
+  {
+   "section": "Sources",
+   "severity": "major",
+   "quote": "Five web pages and six local files were opened; seven papers the network blocked are cited only from memory and search summaries.",
+   "problem": "The manual cites more local files than six. Among them: sentinel_os ledger_postgres.py, authorized_by_attestation.py, tools/verify_receipts.py, APPLY_verdict_receipts.md (section 6), rate_limiter_v2.py, queue_schema.py and sentinel_os CLAUDE.md (rule 4). None of these is in the Local files table.",
+   "replacement": "Five web pages and thirteen local files were opened; seven papers the network blocked are cited only from memory and search summaries. (Add these Local files rows: sentinel_os governance/ledger_postgres.py, the writer, its anchor seal and verify_chain; sentinel_os governance/authorized_by_attestation.py, abv2 and abv3 signatures and seed derivation; sentinel_os tools/verify_receipts.py, the offline command and its six verdicts; sentinel_os APPLY_verdict_receipts.md, section 6, the service-key holder limitation; sentinel_os rate_limiter_v2.py, a Redis token bucket that fails open; sentinel_os queue_schema.py, one Redis list per queue and TransmissionQueue; sentinel_os CLAUDE.md, rule 4, never truncate a hash.)"
+  },
+  {
+   "section": "ANC strategy 1: deterministic ceiling padding",
+   "severity": "minor",
+   "quote": "worst max |t| 2.93; leak line 4.5",
+   "problem": "The recorded value in tack-anc-ceiling-run3-unpinned-supplementary.json is 2.92496, which rounds to 2.92, not 2.93.",
+   "replacement": "worst max |t| 2.92; leak line 4.5"
+  },
+  {
+   "section": "ANC strategy 1: deterministic ceiling padding > Verification harness",
+   "severity": "minor",
+   "quote": "1.30, 2.36, 2.93",
+   "problem": "Run 3 Hybrid harness_max_abs_t is 2.92496 in the measurement file, which rounds to 2.92.",
+   "replacement": "1.30, 2.36, 2.92"
+  },
+  {
+   "section": "Comparison: the three ANC strategies > Side by side",
+   "severity": "minor",
+   "quote": "1.30 to 2.93; all 9 padded runs, every mode, at most 2.93",
+   "problem": "Same rounding error. The measurement file gives 2.92496.",
+   "replacement": "1.30 to 2.92; all 9 padded runs, every mode, at most 2.92"
+  },
+  {
+   "section": "ANC strategy 1: deterministic ceiling padding > Verification harness",
+   "severity": "minor",
+   "quote": "My final re-run of",
+   "problem": "The manual is written in the third person everywhere else. A first-person 'My' is out of place.",
+   "replacement": "The final re-run for this manual of"
+  },
+  {
+   "section": "Verification pipeline > What the job does",
+   "severity": "minor",
+   "quote": "It measures for about 13 minutes: 232 s for Strategy 1, 453 to 511 s for Strategy 2, 9 s for Strategy 3.",
+   "problem": "232 + 453 + 9 = 694 s and 232 + 511 + 9 = 752 s, which is 11.5 to 12.5 minutes, not about 13.",
+   "replacement": "It measures for about 12 minutes: 232 s for Strategy 1, 453 to 511 s for Strategy 2, 9 s for Strategy 3."
+  },
+  {
+   "section": "Verification pipeline",
+   "severity": "minor",
+   "quote": "A build ships only if all 16 timing verdicts stay at or below |t| 4.5, at 100,000 samples per class, on the first attempt.",
+   "problem": "The count of 16 is never explained. The jq gates shown check 11 strategy verdicts: Strategy 1's 3 modes, Strategy 2's epoch_sleep, epoch_hybrid, poisoning and production budget, and Strategy 3's 4 summary rows. 16 only works if the 5 constant-time control runs are included. The false-alarm arithmetic depends on this number.",
+   "replacement": "A build ships only if all 16 timing verdicts stay at or below |t| 4.5, at 100,000 samples per class, on the first attempt: 11 strategy verdicts (3 for Strategy 1, 4 for Strategy 2, 4 for Strategy 3) and 5 constant-time control runs."
+  },
+  {
+   "section": "Open questions > ANC strategies and harness",
+   "severity": "minor",
+   "quote": "Spin was the most precise when idle (0.11 to 0.13 us late) but 850 us late at p99 with 8 threads on 4 CPUs.",
+   "problem": "850 us is an earlier builder run that the manual does not otherwise report. Strategy 1's section gives the recorded value, 1.1 ms at p99 (1,095 us in run 3), for the same 8-thread, 4-CPU flood.",
+   "replacement": "Spin was the most precise when idle (0.11 to 0.13 \u00b5s late) but about 1.1 ms late at p99 in the recorded unpinned flood, with 8 threads on 4 CPUs."
+  },
+  {
+   "section": "ANC strategy 2: adaptive rolling-average blinding > Mechanics",
+   "severity": "minor",
+   "quote": "- alert: TackAncAdaptiveOverrun",
+   "problem": "Unlike every other section, this rule block has no groups and rules wrapper and no severity labels, so Prometheus would not load it as written. The severities appear only in the prose underneath.",
+   "replacement": "groups:\n  - name: tack-anc-adaptive\n    rules:\n      - alert: TackAncAdaptiveOverrun\n        expr: sum by (controller) (rate(tack_anc_overrun_total{strategy=\"adaptive\"}[5m])) > 0\n        for: 5m\n        labels: {severity: warning}\n      - alert: TackAncLeakBudgetSpent\n        expr: increase(tack_anc_leak_budget_exhausted_total{strategy=\"adaptive\"}[10m]) > 0\n        labels: {severity: warning}\n      - alert: TackAncLeakLifetimeSpent\n        expr: max(tack_anc_controller_frozen_until_reset{strategy=\"adaptive\"}) == 1\n        labels: {severity: critical}\n      - alert: TackAncHalted\n        expr: max(tack_anc_halted{strategy=\"adaptive\"}) == 1\n        labels: {severity: critical}"
+  },
+  {
+   "section": "ANC strategy 3: instruction-level pipeline padding > Recommended Rust pattern",
+   "severity": "minor",
+   "quote": "The red team found two ways this alert misses or goes stale, listed in the last subsection.",
+   "problem": "Strategy 3 names its alerts (LeakyValidatorActive, Guessing) but never gives the Prometheus rule expressions, which kernel convention 4 asks for. The build record has all four.",
+   "replacement": "The red team found two ways this alert misses or goes stale, listed in the last subsection. The crate's four proposed rules, from its build record, follow; they were not loaded into Prometheus.\n\ngroups:\n  - name: tack-anc-pipeline\n    rules:\n      - alert: TackAncPipelineLeakyValidatorActive\n        expr: max(tack_anc_leaky_validator_active{strategy=\"pipeline\"}) > 0\n        labels: {severity: critical}\n      - alert: TackAncPipelineShedding\n        expr: rate(tack_anc_shed_total{strategy=\"pipeline\",reason=\"slots_full\"}[1m]) > 0\n        for: 5m\n        labels: {severity: warning}\n      - alert: TackAncPipelineBadLengthInput\n        expr: rate(tack_anc_shed_total{strategy=\"pipeline\",reason=~\"input_too_large|malformed\"}[5m]) > 0\n        for: 10m\n        labels: {severity: info}\n      - alert: TackAncPipelineGuessing\n        expr: sum(rate(tack_anc_token_mismatch_total{strategy=\"pipeline\"}[5m])) / clamp_min(sum(rate(tack_anc_requests_total{strategy=\"pipeline\"}[5m])), 1e-9) > 0.5\n        for: 10m\n        labels: {severity: warning}"
+  },
+  {
+   "section": "7. Sentinel Hash-Chain",
+   "severity": "minor",
+   "quote": "Edits to hashed fields, deleted rows and cut tails in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in all 211 cases.",
+   "problem": "Too broad. The section's own limitations say that a chain cut back to an older genuine anchor still verifies, so a cut tail is detectable only against a current anchor.",
+   "replacement": "Edits to hashed fields, deleted rows, and tails cut past the latest anchor in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in all 211 cases."
+  },
+  {
+   "section": "7. Sentinel Hash-Chain > Metaphor and goal",
+   "severity": "minor",
+   "quote": "The goal is persistent memory whose every alteration, reordering or truncation can be detected offline.",
+   "problem": "Read as a property of the current system, this is wrong. Unhashed columns, key holders and stale anchors are all known exceptions, as the section admits further down.",
+   "replacement": "The goal is persistent memory whose every alteration, reordering or truncation can be detected offline. Today's ledger falls short in three known ways, listed under Red-team results: unhashed columns, holders of the service key, and stale anchors."
+  },
+  {
+   "section": "5. Traffic Cop and Green Wave Routing",
+   "severity": "minor",
+   "quote": "A request that finds its lane empty is dispatched within one epoch (8 ms by default) plus poll latency, whatever other lanes do.",
+   "problem": "The lead states the bound with no condition. The section says it holds only while the driver misses no phases, and under full CPU load it does miss them.",
+   "replacement": "A request that finds its lane empty is dispatched within one epoch (8 ms by default) plus poll latency, whatever other lanes do, as long as the driver misses no phases."
+  },
+  {
+   "section": "4. Minotaur String > Failure mode and state resolution",
+   "severity": "minor",
+   "quote": "Rollback, then halt until",
+   "problem": "Kernel convention 1 asks for exactly one state resolution per trip. This row, and the LifetimeBudgetExhausted row ('Rollback, then halt'), give two.",
+   "replacement": "Halt until operator_reset (the walk is rewound to the anchor first, so nothing is left half-done)"
+  },
+  {
+   "section": "6. Tractor Transmission > Failure mode and state resolution",
+   "severity": "minor",
+   "quote": "Halt; a pending shift is also rolled back",
+   "problem": "Two resolutions in one cell, against convention 1's 'exactly one'.",
+   "replacement": "Halt (any pending shift is abandoned and the old gear stays engaged)"
+  },
+  {
+   "section": "ANC strategy 2: adaptive rolling-average blinding > Mechanics",
+   "severity": "minor",
+   "quote": "Caught, released on schedule and counted. A halt would let one request stop the pad for everyone.",
+   "problem": "Convention 1 defines quarantine as isolating the input, sender or agent for review. Nothing is isolated here: the panic is caught, released and counted, which is a reject.",
+   "replacement": "Caught, released on schedule and counted; nothing is stored or isolated, so the resolution is reject. A halt would let one request stop the pad for everyone. (Change the Resolution cell from quarantine to reject.)"
+  },
+  {
+   "section": "2. Inter-Agent Trident > Failure mode and state resolution",
+   "severity": "minor",
+   "quote": "The receiver's state may be inconsistent, so it stops.",
+   "problem": "Every other component maps halted to TERMINAL_BREACH (Minotaur, Green Wave, Transmission, ANC strategies 1 and 2). The Trident maps it to RETRY without pointing out that it differs from the rest of the kernel.",
+   "replacement": "The receiver's state may be inconsistent, so it stops. Unlike the other components, which report halted as TERMINAL_BREACH, the Trident reports RETRY, because a sender can re-issue a fresh envelope after the reset."
+  },
+  {
+   "section": "5. Traffic Cop and Green Wave Routing > Failure mode and state resolution",
+   "severity": "minor",
+   "quote": "The scheduler is never built.",
+   "problem": "The resolution cell for ConfigError says halt. Every other component calls a bad config 'reject: nothing is built'. Halt means a running component stops until an operator resets it, and no scheduler is running here.",
+   "replacement": "The scheduler is never built. (Change the Resolution cell from halt to reject: nothing is built.)"
+  },
+  {
+   "section": "ANC strategy 1: deterministic ceiling padding > Mechanics",
+   "severity": "minor",
+   "quote": "Figures come from the three release runs at a 300 microsecond (us) ceiling.",
+   "problem": "The units are inconsistent. The ANC analysis, Strategies 1 and 2, the Comparison and the Open questions write microseconds as 'us', while the component sections and Strategy 3 write '\u00b5s'. A sophomore may not know that 'us' means microseconds.",
+   "replacement": "Figures come from the three release runs at a 300 microsecond (\u00b5s) ceiling. (Replace 'us' with '\u00b5s' throughout the ANC sections, Comparison, Verification pipeline and Open questions.)"
+  },
+  {
+   "section": "6. Tractor Transmission > Failure mode and state resolution",
+   "severity": "minor",
+   "quote": "contains a panic from dropping the replaced gear.",
+   "problem": "'Contains' is ambiguous for a general reader: it could mean the function holds a panic, not that it catches one.",
+   "replacement": "catches and counts a panic from dropping the replaced gear."
+  },
+  {
+   "section": "ANC strategy 3: instruction-level pipeline padding > Anti-DoS mitigation",
+   "severity": "minor",
+   "quote": "CPU per request rose from 575 to 691 ns pinned to 3.1 to 3.5 \u00b5s unpinned.",
+   "problem": "Two ranges joined by 'from ... to ... to' are hard to parse.",
+   "replacement": "CPU per request was 575 to 691 ns pinned, and rose to 3.1 to 3.5 \u00b5s unpinned."
+  },
+  {
+   "section": "4. Minotaur String > Mechanism",
+   "severity": "minor",
+   "quote": "holds up to 256 states the full map could not hold, the smaller of",
+   "problem": "The trailing clause reads as if 256 is the smaller of two states. It is the smaller of two config values.",
+   "replacement": "holds up to 256 of the states the full map could not hold (its size is the smaller of"
+  },
+  {
+   "section": "Architecture",
+   "severity": "minor",
+   "quote": "One request crosses six components in a fixed order, while the seventh, the Tractor Transmission, runs in a side lane and changes the configuration only when no request is in flight.",
+   "problem": "The order is given only in the diagram, and it differs from the numbering of the sections (the Trident is section 2 but comes fifth on the path). A reader using text alone, or a screen reader, cannot find the order.",
+   "replacement": "One request crosses six components in a fixed order: Inlet Winnowing Filter, Elastic Bumpers, Traffic Cop and Green Wave, Minotaur String, Inter-Agent Trident (on every handoff), and Sentinel Hash-Chain. The seventh, the Tractor Transmission, runs in a side lane and changes the configuration only when no request is in flight. The sections below are numbered differently from this path."
+  },
+  {
+   "section": "Document metadata",
+   "severity": "minor",
+   "quote": "\u2261TACK Governance Kernel: Purple-Team Implementation Manual",
+   "problem": "The H1 is correct, but the doc's project name and its only tab are both still 'Untitled', which is what the gallery and the share link show.",
+   "replacement": "Rename the doc and its tab to: \u2261TACK Governance Kernel: Purple-Team Implementation Manual"
+  }
+ ],
+ "missing_required_parts": [],
+ "verdict": "Nearly ready to publish. Every required part is present: all 7 components have metaphor and goal, mechanism, failure mode and state resolution, and observability, and all 3 ANC strategies have mechanics, pros and cons, Rust pattern, anti-DoS mitigation and verification harness. No section is still a pending block (doc rev 19). No em or en dashes appear anywhere.\n\nAccuracy is high:\n- Every one of about 50 Rust excerpts matches the crate source line for line.\n- All 90 tack_* metric names in the text and alerts exist in the crates.\n- Test totals add up to the per-binary output in every section.\n- Spot-checked ANC numbers match the measurement JSON: calibration t, padded max |t|, delta_min, KS p, n counts, wall times and flood figures. The one exception is a rounding slip, 2.93 where the file gives 2.92.\n\nThe major findings fall into three groups:\n1. **Overclaims of certainty (three):** Transmission's 'reveals nothing', 'Proof is available only for Strategy 3', and the Summary's 'ANC bounds' and fail-closed framing.\n2. **Contradictions inside the manual (four):**\n   - The Architecture diagram releases bumper refusals outside ANC, while the Bumpers section requires ANC around the whole request, and Open questions does not list it.\n   - The ANC analysis shared-trips table still gives the overrun-at-ceiling and budget-TERMINAL rules that Strategies 1 and 2 changed.\n   - Harness calibration ran on a 2.80 GHz VM, while the strategies ran on the 2.10 GHz VM, and the text implies one machine.\n   - Green Wave gives two run series that disagree.\n3. **An incomplete Sources list:** seven local files cited in the text are missing from it.\n\nThe minor findings cover resolution vocabulary consistency, mixed 'us' and '\u00b5s' units, a few hard-to-parse sentences, alerts not written as Prometheus rule expressions (Strategy 2 lacks a group wrapper and severities; Strategy 3 gives names only), and the doc and tab names still being 'Untitled'. Readability suits an informed sophomore: jargon is defined on first use, purpose comes before mechanism, and facts are kept apart from assumptions. Some paragraphs are dense, but none needs restructuring."
+}

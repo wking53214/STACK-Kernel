@@ -1,0 +1,56 @@
+groups:
+  - name: tack-minotaur
+    rules:
+      - alert: TackMinotaurHalted
+        expr: increase(tack_minotaur_halts_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A Thread halted after max_trips_before_halt trips or its lifetime budget, and refuses work until operator_reset."
+      - alert: TackMinotaurWorkAgainstHaltedThread
+        expr: sum(rate(tack_minotaur_trips_total{reason="halted"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Callers keep sending work to a halted Thread: the orchestrator ignores TERMINAL_BREACH, or no operator has acted."
+      - alert: TackMinotaurStaleGuardSpin
+        expr: sum(rate(tack_minotaur_trips_total{reason="stale_guard"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A caller keeps working through stale guards instead of unwinding to the root. These refusals never escalate to a halt."
+      - alert: TackMinotaurLoopStorm
+        expr: sum(rate(tack_minotaur_loops_detected_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Walks are looping at a sustained rate, for example an agent stuck in tool-call loops."
+      - alert: TackMinotaurRunawayRecursion
+        expr: sum(rate(tack_minotaur_trips_total{reason="depth_exceeded"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained depth trips: recursion or sub-agent nesting is running away."
+      - alert: TackMinotaurStateSpaceExhausted
+        expr: increase(tack_minotaur_trips_total{reason="state_space_exhausted"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A walk kept reaching new states after the exact map filled: a state-space explosion, or a loop with long gaps."
+      - alert: TackMinotaurLifetimeBudgetHalt
+        expr: increase(tack_minotaur_trips_total{reason="lifetime_budget_exhausted"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A Thread used its lifetime budget: walks are being replayed, or a long-lived Thread lacks a periodic operator reset."
+      - alert: TackMinotaurDegradedOften
+        expr: sum(rate(tack_minotaur_degraded_total[15m])) / clamp_min(sum(rate(tack_minotaur_walk_steps_count[15m])), 1e-9) > 0.5
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "Over half of walks fill the exact map, so max_distinct_states is probably too small and detection runs in the less precise degraded mode."
