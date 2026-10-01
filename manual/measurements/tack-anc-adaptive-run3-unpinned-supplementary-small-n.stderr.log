@@ -1,0 +1,4 @@
+start 2026-10-01T08:45:11Z load 0.81 1.24 0.95 1/104 4092 cmd: TACK_ADAPTIVE_N_PER_CLASS=10000 TACK_ADAPTIVE_POISON_PROBES=10000 TACK_ADAPTIVE_TRAJ_N=1000 cargo run --release -p tack-anc-adaptive --example verify (unpinned)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.05s
+     Running `target/release/examples/verify`
+exit 0 end 2026-10-01T08:46:38Z elapsed_s 87 load 1.15 1.28 1.00 1/104 4994

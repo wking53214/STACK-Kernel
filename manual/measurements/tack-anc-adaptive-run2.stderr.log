@@ -1,0 +1,4 @@
+start 2026-10-01T08:36:52Z load 0.86 1.08 0.61 1/105 1687 cmd: taskset -c 3 cargo run --release -p tack-anc-adaptive --example verify
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.14s
+     Running `target/release/examples/verify`
+exit 0 end 2026-10-01T08:44:45Z elapsed_s 473 load 1.02 1.31 0.96 1/110 3098
