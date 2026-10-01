@@ -12,7 +12,7 @@
 //! file once, then runs:
 //!
 //! * `$PYTHON $SENTINEL_OS_DIR/tools/verify_receipts.py ...`
-//! * the `tack-sentinel-verify` binary Cargo built for this test, same flags.
+//! * the `stack-sentinel-verify` binary Cargo built for this test, same flags.
 //!
 //! and compares the four things a caller can rely on: the exit code, the
 //! verdict word, the failing row, and whether an `also:` line was printed.
@@ -33,7 +33,7 @@
 //!
 //! ```text
 //! SENTINEL_OS_DIR=/path/to/sentinel_os PYTHON=/path/to/venv/bin/python \
-//!     cargo test -p tack-sentinel --test crosscheck -- --ignored
+//!     cargo test -p stack-sentinel --test crosscheck -- --ignored
 //! ```
 //!
 //! Every key written here is a TEST FIXTURE from the manifest, never a real
@@ -50,8 +50,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tack_sentinel::canonical::sha256_hex;
-use tack_sentinel::pyjson::{dumps, Object, Separators, Value};
+use stack_sentinel::canonical::sha256_hex;
+use stack_sentinel::pyjson::{dumps, Object, Separators, Value};
 
 /// What a caller can rely on from one run of either verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +178,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("tack-crosscheck-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("stack-crosscheck-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -256,7 +256,7 @@ fn live_python_and_rust_binaries_agree_on_every_case() {
     let tool = Path::new(&os_dir).join("tools").join("verify_receipts.py");
     assert!(tool.is_file(), "{} does not exist; is SENTINEL_OS_DIR a sentinel_os checkout?", tool.display());
     let tool = tool.to_str().unwrap().to_owned();
-    let rust = env!("CARGO_BIN_EXE_tack-sentinel-verify");
+    let rust = env!("CARGO_BIN_EXE_stack-sentinel-verify");
 
     let cases = load_cases();
     assert!(cases.len() >= 200, "expected at least 200 cases, found {}", cases.len());

@@ -76,14 +76,14 @@ pub const STREAMS_ABANDONED_TOTAL: &str = "tack_inlet_streams_abandoned_total";
 /// Span names.
 pub mod spans {
     /// One-shot check of an in-memory input.
-    pub const WINNOW: &str = "tack.inlet.winnow";
+    pub const WINNOW: &str = "stack.inlet.winnow";
     /// Check of a declared length before the body is read.
-    pub const PRECHECK: &str = "tack.inlet.precheck";
+    pub const PRECHECK: &str = "stack.inlet.precheck";
     /// A streaming scan, from `Inlet::scanner` to `Scanner::finish` (or to
     /// the drop of an abandoned scanner). The span is entered only when the
     /// verdict is reached, not on every chunk, and records the number of
     /// chunks fed as the field `chunks`.
-    pub const STREAM: &str = "tack.inlet.stream";
+    pub const STREAM: &str = "stack.inlet.stream";
 }
 
 /// Register descriptions and units with the installed recorder. Optional;
@@ -125,7 +125,7 @@ impl LogKey {
 
     /// Domain separation for the log tag, so the tag cannot be confused with
     /// any other HMAC made under the same key.
-    const DOMAIN: &'static [u8] = b"tack.inlet.log.v1\0";
+    const DOMAIN: &'static [u8] = b"stack.inlet.log.v1\0";
 
     /// Build a key from secret bytes.
     ///

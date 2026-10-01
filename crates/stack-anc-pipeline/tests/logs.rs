@@ -63,7 +63,7 @@ fn logs_carry_length_and_full_digest_never_raw_input() {
     assert!(text.contains("input_len=32"), "{text}");
     assert!(text.contains("input_len=100"), "{text}");
     assert!(
-        text.contains("tack.anc.pipeline_check"),
+        text.contains("stack.anc.pipeline_check"),
         "span name: {text}"
     );
     assert!(

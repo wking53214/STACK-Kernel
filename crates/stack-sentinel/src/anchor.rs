@@ -1,4 +1,4 @@
-//! The external head anchor (`twin_custody.py`, TACK Layer 5 step 2.6).
+//! The external head anchor (`twin_custody.py`, STACK Layer 5 step 2.6).
 //!
 //! A hash chain checked link by link catches an edited or deleted middle
 //! row, but a chain cut at the tail and rebuilt from there is internally

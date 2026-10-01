@@ -12,7 +12,7 @@ A governed service has operating modes: the policy version in force, the current
 
 The goal is that a mode changes only while no request is running. Every request then reads exactly one mode from start to finish.
 
-This is a new design. No TACK repository contains it today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The `tack-transmission` crate is its first implementation.
+This is a new design. No STACK repository contains it today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The `stack-transmission` crate is its first implementation.
 
 One name clash needs flagging. In sentinel_os, `queue_schema.py` calls its Redis job queue "the transmission" (`TransmissionQueue`). That queue moves jobs to workers and does not gate mode changes, and no code connects it to this crate.
 
@@ -244,9 +244,9 @@ Gauges are written while the state lock is held, so two racing threads cannot le
 
 **Spans.** A span is a timed, named stretch of work that tracing tools draw as one bar.
 
-- `tack.transmission.engage` at DEBUG, because it is on the hot path. Fields: `timeout_ms`, `epoch`, `outcome`, `reason`.
-- `tack.transmission.shift` at INFO. Fields: `timeout_ms`, `from_epoch`, `to_epoch`, `clutch_held_ms`, `cooldown_wait_ms`, `outcome`, `reason`.
-- `tack.transmission.operator_halt` and `tack.transmission.operator_reset` at INFO.
+- `stack.transmission.engage` at DEBUG, because it is on the hot path. Fields: `timeout_ms`, `epoch`, `outcome`, `reason`.
+- `stack.transmission.shift` at INFO. Fields: `timeout_ms`, `from_epoch`, `to_epoch`, `clutch_held_ms`, `cooldown_wait_ms`, `outcome`, `reason`.
+- `stack.transmission.operator_halt` and `stack.transmission.operator_reset` at INFO.
 
 Log events carry only epochs, causes and reasons. ERROR marks each halt and each contained gear-drop panic. WARN marks a rollback, a guard released during a panic and an operator reset; INFO marks "gear shifted"; DEBUG marks the other refusals.
 
@@ -254,7 +254,7 @@ Log events carry only epochs, causes and reasons. ERROR marks each halt and each
 
 ```yaml
 groups:
-  - name: tack-transmission
+  - name: stack-transmission
     rules:
       - alert: TackTransmissionHalted
         expr: max(tack_transmission_halted) == 1
@@ -348,7 +348,7 @@ A property test checks single-threaded operation sequences against a simple mode
 
 A stress test runs 8 workers with 1,500 successful engages each, plus 2 racing shifters. A rerun printed "stress: 48739 operations, 36268 engage retries, 420 shifts".
 
-`cargo clippy -p tack-transmission --all-targets -- -D warnings` finished with no warnings. The final run of `cargo test -p tack-transmission --all-targets` passed 45 tests in five binaries: unit, model, redteam, telemetry and threads, in that order.
+`cargo clippy -p stack-transmission --all-targets -- -D warnings` finished with no warnings. The final run of `cargo test -p stack-transmission --all-targets` passed 45 tests in five binaries: unit, model, redteam, telemetry and threads, in that order.
 
 ```text
 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s

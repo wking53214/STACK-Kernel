@@ -57,15 +57,15 @@ pub const WALK_DURATION_SECONDS: &str = "tack_minotaur_walk_duration_seconds";
 /// Span names.
 pub mod spans {
     /// One `descend` call (trace level).
-    pub const DESCEND: &str = "tack.minotaur.descend";
+    pub const DESCEND: &str = "stack.minotaur.descend";
     /// One `record` call (trace level).
-    pub const RECORD: &str = "tack.minotaur.record";
+    pub const RECORD: &str = "stack.minotaur.record";
     /// Handling a trip: rewind, metrics, log event (info level).
-    pub const TRIP: &str = "tack.minotaur.trip";
+    pub const TRIP: &str = "stack.minotaur.trip";
     /// A caller-initiated rewind to the anchor (debug level).
-    pub const REWIND: &str = "tack.minotaur.rewind";
+    pub const REWIND: &str = "stack.minotaur.rewind";
     /// An operator reset that clears a halt (info level).
-    pub const OPERATOR_RESET: &str = "tack.minotaur.operator_reset";
+    pub const OPERATOR_RESET: &str = "stack.minotaur.operator_reset";
 }
 
 /// How a walk ended; the `end` label on walk histograms.
@@ -150,7 +150,7 @@ pub(crate) fn walk_ended(end: WalkEnd, s: WalkStats) {
 pub(crate) fn degraded(tracked: usize, steps: u64) {
     counter!(DEGRADED_TOTAL).increment(1);
     tracing::info!(
-        target: "tack.minotaur",
+        target: "stack.minotaur",
         tracked,
         steps,
         "exact revisit set full; degrading to Brent cycle detection"
@@ -159,7 +159,7 @@ pub(crate) fn degraded(tracked: usize, steps: u64) {
 
 pub(crate) fn operator_reset(was_halted: bool, trips: u32) {
     counter!(OPERATOR_RESETS_TOTAL).increment(1);
-    tracing::info!(target: "tack.minotaur", was_halted, trips, "operator reset");
+    tracing::info!(target: "stack.minotaur", was_halted, trips, "operator reset");
 }
 
 /// Full SHA-256 hex of the concatenated bytes of `padded`, the breadcrumb
@@ -197,7 +197,7 @@ pub(crate) fn trip(t: &Trip, halted_now: bool, digest: Option<&str>) {
     if refusal {
         // A halted Thread under load, or a caller spinning on a stale guard,
         // would otherwise flood the log at warn.
-        tracing::debug!(target: "tack.minotaur", reason, outcome, "refused; nothing changed");
+        tracing::debug!(target: "stack.minotaur", reason, outcome, "refused; nothing changed");
         return;
     }
     let path_sha256 = digest.unwrap_or_default();
@@ -205,16 +205,16 @@ pub(crate) fn trip(t: &Trip, halted_now: bool, digest: Option<&str>) {
     let resolution = t.resolution.as_str();
     if halted_now {
         tracing::error!(
-            target: "tack.minotaur",
+            target: "stack.minotaur",
             reason, outcome, resolution, period,
             depth = t.depth, steps = t.steps,
             path_len = t.path.len(),
             path_sha256,
             "minotaur trip; thread halted until operator reset"
         );
-    } else if tracing::enabled!(target: "tack.minotaur", tracing::Level::WARN) {
+    } else if tracing::enabled!(target: "stack.minotaur", tracing::Level::WARN) {
         tracing::warn!(
-            target: "tack.minotaur",
+            target: "stack.minotaur",
             reason, outcome, resolution, period,
             depth = t.depth, steps = t.steps,
             path_len = t.path.len(),

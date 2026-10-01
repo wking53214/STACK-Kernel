@@ -232,7 +232,7 @@ impl<T, C: Clock> TrafficCop<T, C> {
     /// Any [`ConfigError`]. Counted in `tack_greenwave_config_rejected_total`.
     pub fn new(config: &GreenWaveConfig, clock: C) -> Result<Self, ConfigError> {
         let span = tracing::info_span!(
-            "tack.greenwave.build",
+            "stack.greenwave.build",
             lanes = config.lanes.len(),
             phases = config.phases_per_epoch,
             stages = config.stage_offsets.len()
@@ -401,7 +401,7 @@ impl<T, C: Clock> TrafficCop<T, C> {
     ///   TERMINAL_BREACH, halt.
     /// - [`TripReason::Overflow`]: TERMINAL_BREACH, reject.
     pub fn admit(&mut self, lane: LaneId, payload: T) -> Result<Admitted, Refused<T>> {
-        let _guard = tracing::debug_span!("tack.greenwave.admit", lane = lane.index()).entered();
+        let _guard = tracing::debug_span!("stack.greenwave.admit", lane = lane.index()).entered();
         match self.try_admit(lane) {
             Ok((now, id, position)) => {
                 if let Some(q) = self.lanes.get_mut(lane.index()) {
@@ -489,7 +489,7 @@ impl<T, C: Clock> TrafficCop<T, C> {
     /// # Errors
     /// As [`TrafficCop::poll`].
     pub(crate) fn poll_limited(&mut self, limit: u32) -> Result<Vec<Dispatched<T>>, Trip> {
-        let _guard = tracing::debug_span!("tack.greenwave.poll").entered();
+        let _guard = tracing::debug_span!("stack.greenwave.poll").entered();
         let now = match self.observe(Op::Poll) {
             Ok(n) => n,
             Err(trip) => {
@@ -585,7 +585,7 @@ impl<T, C: Clock> TrafficCop<T, C> {
     ///   TERMINAL_BREACH, halt.
     pub fn stage_check(&mut self, ticket: &DispatchTicket, stage: usize) -> Result<StageClearance, Trip> {
         let _guard =
-            tracing::trace_span!("tack.greenwave.stage_check", seq = ticket.id.seq, stage).entered();
+            tracing::trace_span!("stack.greenwave.stage_check", seq = ticket.id.seq, stage).entered();
         let result = self.try_stage_check(ticket, stage);
         match &result {
             Ok(c) => {
@@ -631,7 +631,7 @@ impl<T, C: Clock> TrafficCop<T, C> {
     /// - [`TripReason::ClockRegressed`], [`TripReason::Halted`]:
     ///   TERMINAL_BREACH, halt.
     pub fn complete(&mut self, ticket: &DispatchTicket) -> Result<Release, Trip> {
-        let _guard = tracing::trace_span!("tack.greenwave.complete", seq = ticket.id.seq).entered();
+        let _guard = tracing::trace_span!("stack.greenwave.complete", seq = ticket.id.seq).entered();
         let result = self.try_complete(ticket);
         match &result {
             Ok(r) => {
@@ -695,7 +695,7 @@ impl<T, C: Clock> TrafficCop<T, C> {
     ///   counters are kept, so a reset cannot refresh a phase's dispatch
     ///   budget.
     pub fn reset(&mut self) {
-        let _guard = tracing::info_span!("tack.greenwave.reset", was_halted = self.halted).entered();
+        let _guard = tracing::info_span!("stack.greenwave.reset", was_halted = self.halted).entered();
         let now = self.clock.now();
         if !self.halted {
             if now < self.last_now {

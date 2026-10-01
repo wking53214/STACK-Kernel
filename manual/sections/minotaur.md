@@ -8,7 +8,7 @@ The Minotaur String caps every walk at 64 levels of nesting and 100,000 steps by
 
 In the myth, Ariadne gives Theseus a ball of string before he enters the Minotaur's labyrinth. He ties one end at the entrance and lets it out as he walks. At any moment the string tells him how deep he is, whether he is crossing his own path, and how to get back out.
 
-The crate `tack-minotaur` gives a program the same string, called a `Thread`. Its tied end is the anchor: depth 0, no steps taken. A walk is one run of work from the anchor, such as an agent's chain of tool calls or a recursive planner.
+The crate `stack-minotaur` gives a program the same string, called a `Thread`. Its tied end is the anchor: depth 0, no steps taken. A walk is one run of work from the anchor, such as an agent's chain of tool calls or a recursive planner.
 
 Going one level deeper, such as a recursive call or a sub-agent, is a descend. Moving to a new state, such as a tool call with its arguments, is a record. Each record carries a fingerprint, a 32-byte SHA-256 digest that stands for that state.
 
@@ -21,7 +21,7 @@ The goal is to stop four failure patterns before they consume the machine, while
 | State-space explosion | A search keeps finding new states forever | `max_steps` and `max_untracked_transitions` |
 | Replay | The orchestrator rewinds and resubmits just before each cap | The lifetime budget |
 
-Facts first: the Minotaur String existed in no TACK repository before this crate. Nothing in sentinel_os, CNS, observe-perceive, ghost_tools or Resume_OS calls it yet, and no Python version exists. The default caps are engineering guesses, not values measured from real agent traces.
+Facts first: the Minotaur String existed in no STACK repository before this crate. Nothing in sentinel_os, CNS, observe-perceive, ghost_tools or Resume_OS calls it yet, and no Python version exists. The default caps are engineering guesses, not values measured from real agent traces.
 
 ### Mechanism
 
@@ -245,13 +245,13 @@ The crate opens five spans.
 
 | Span | Level | Covers |
 |---|---|---|
-| `tack.minotaur.descend` | trace | Every descend call |
-| `tack.minotaur.record` | trace | Every record call |
-| `tack.minotaur.trip` | info | Trip handling: rewind, metrics and the log event |
-| `tack.minotaur.rewind` | debug | An orchestrator rewind |
-| `tack.minotaur.operator_reset` | info | An operator reset |
+| `stack.minotaur.descend` | trace | Every descend call |
+| `stack.minotaur.record` | trace | Every record call |
+| `stack.minotaur.trip` | info | Trip handling: rewind, metrics and the log event |
+| `stack.minotaur.rewind` | debug | An orchestrator rewind |
+| `stack.minotaur.operator_reset` | info | An operator reset |
 
-Log events use the target `tack.minotaur`. A trip logs at warn, or at error when it halts the Thread, with reason, outcome, resolution, period, depth, steps, `path_len` and `path_sha256`. Refusals log "refused; nothing changed" at debug, and degrading and operator resets log at info.
+Log events use the target `stack.minotaur`. A trip logs at warn, or at error when it halts the Thread, with reason, outcome, resolution, period, depth, steps, `path_len` and `path_sha256`. Refusals log "refused; nothing changed" at debug, and degrading and operator resets log at info.
 
 No event carries a fingerprint or a state. `path_sha256` is the full 64-hex SHA-256 of the padded breadcrumb path, so two log lines can be matched without revealing the path.
 
@@ -259,7 +259,7 @@ The alert rules below are proposed and are not shipped in the crate. They were p
 
 ```yaml
 groups:
-  - name: tack-minotaur
+  - name: stack-minotaur
     rules:
       - alert: TackMinotaurHalted
         expr: increase(tack_minotaur_halts_total[5m]) > 0
@@ -340,10 +340,10 @@ An independent red-team wrote 11 attacks and 2 control tests, each asserting the
 
 Four red-team tests were edited after the fixes, mainly because their attack lines no longer compiled. The compile errors are pinned by doctests instead, and each edit is listed in the fix record.
 
-Final run of `cargo test -p tack-minotaur --all-targets` (debug build): 60 tests in six targets, all passing. `cargo test -p tack-minotaur --doc` passed 6 of 6, including 4 compile_fail doctests, and clippy with `-D warnings` was clean.
+Final run of `cargo test -p stack-minotaur --all-targets` (debug build): 60 tests in six targets, all passing. `cargo test -p stack-minotaur --doc` passed 6 of 6, including 4 compile_fail doctests, and clippy with `-D warnings` was clean.
 
 ```text
-$ cargo test -p tack-minotaur --all-targets   (summary lines only)
+$ cargo test -p stack-minotaur --all-targets   (summary lines only)
      Running unittests src/lib.rs (target/debug/deps/tack_minotaur-8585c0e493b6235e)
 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
      Running tests/async_use.rs (target/debug/deps/async_use-daeb62f68e0af4b3)
@@ -356,6 +356,6 @@ test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
      Running tests/thread.rs (target/debug/deps/thread-33a6808a0fd668f3)
 test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
-$ cargo test -p tack-minotaur --doc
+$ cargo test -p stack-minotaur --doc
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
 ```

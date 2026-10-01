@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "TACK ANC strategy 3: instruction-level pipeline padding. Three 32-byte token validators (early exit, balanced dummy work, constant time) behind one admission gate. New design."
+description = "STACK ANC strategy 3: instruction-level pipeline padding. Three 32-byte token validators (early exit, balanced dummy work, constant time) behind one admission gate. New design."
 
 [dependencies]
 tracing.workspace = true

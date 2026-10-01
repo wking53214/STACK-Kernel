@@ -26,11 +26,11 @@ Terms used below:
 - **Replay.** A genuine envelope, captured and sent again.
 - **Canonical encoding.** One exact byte form for every value, so sender and receiver hash identical bytes.
 
-This is a new design. No TACK repository has a Trident today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The crate borrows two things that do exist: the TRANSPLANTED check from sentinel_os and the gate vocabulary from CNS.
+This is a new design. No STACK repository has a Trident today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The crate borrows two things that do exist: the TRANSPLANTED check from sentinel_os and the gate vocabulary from CNS.
 
 ### Mechanism
 
-**The envelope.** A handoff travels as a JSON object with exactly ten fields. The producer fills them with `seal` or `seal_for`, and the receiver checks them with the `Trident` type in the `tack-trident` crate.
+**The envelope.** A handoff travels as a JSON object with exactly ten fields. The producer fills them with `seal` or `seal_for`, and the receiver checks them with the `Trident` type in the `stack-trident` crate.
 
 | Field | Meaning |
 |---|---|
@@ -45,7 +45,7 @@ This is a new design. No TACK repository has a Trident today; of the seven compo
 | `payload` | The content the sender's gate judged, any JSON |
 | `mac` | HMAC-SHA256 tag over the other nine fields |
 
-A fingerprint is the SHA-256 of `tack-trident/fingerprint/v1`, a newline and the key bytes. That fixed prefix is a domain separator: it stops a hash made for one purpose from matching a hash made for another. The MAC input likewise starts with `tack-trident/mac/v1` and a newline.
+A fingerprint is the SHA-256 of `stack-trident/fingerprint/v1`, a newline and the key bytes. That fixed prefix is a domain separator: it stops a hash made for one purpose from matching a hash made for another. The MAC input likewise starts with `stack-trident/mac/v1` and a newline.
 
 **Four stages.** The receiver runs four stages in order. The first two are cheap, depend only on public facts and return early. The prongs then always run in full.
 
@@ -250,21 +250,21 @@ Metrics go through the `metrics` facade, and every label value comes from a clos
 
 The two gauges carry no suffix, because the kernel convention defines suffixes only for counters and duration histograms.
 
-Spans, named `tack.trident.<operation>`:
+Spans, named `stack.trident.<operation>`:
 
-- `tack.trident.verify` (INFO). Fields: `path` (wire or in_process), `input_len`, `input_sha256`, `outcome`, `resolution`. It holds one event: WARN `tack.trident refused handoff` with the reason codes, or DEBUG `tack.trident accepted handoff`.
-- On a breaker trip, the verify span adds WARN `tack.trident sender quarantined by breaker`, naming the validated ring fingerprint in full. On a first halt it adds ERROR `tack.trident halted; operator reset required` with the cause.
-- `tack.trident.seal` (DEBUG). Producer-side sealing.
-- `tack.trident.release` (INFO). Field `sender`, the full fingerprint. Event INFO `tack.trident quarantine released by operator`.
-- `tack.trident.reset` (INFO). Event WARN `tack.trident reset by operator` with `epoch_floor_ms`.
-- `tack.trident.halt` (WARN). Wraps `operator_halt`.
-- `tack.trident.replace_keyring` (INFO). Field `keys`, the ring size.
+- `stack.trident.verify` (INFO). Fields: `path` (wire or in_process), `input_len`, `input_sha256`, `outcome`, `resolution`. It holds one event: WARN `stack.trident refused handoff` with the reason codes, or DEBUG `stack.trident accepted handoff`.
+- On a breaker trip, the verify span adds WARN `stack.trident sender quarantined by breaker`, naming the validated ring fingerprint in full. On a first halt it adds ERROR `stack.trident halted; operator reset required` with the cause.
+- `stack.trident.seal` (DEBUG). Producer-side sealing.
+- `stack.trident.release` (INFO). Field `sender`, the full fingerprint. Event INFO `stack.trident quarantine released by operator`.
+- `stack.trident.reset` (INFO). Event WARN `stack.trident reset by operator` with `epoch_floor_ms`.
+- `stack.trident.halt` (WARN). Wraps `operator_halt`.
+- `stack.trident.replace_keyring` (INFO). Field `keys`, the ring size.
 
 The verify span records the input's length and full 64-character SHA-256 digest, never the input itself. An input over the size cap is logged by length only, because hashing it is the work the cap prevents. On the in-process path the digest covers the canonical MAC input, since there are no raw bytes.
 
 ```yaml
 groups:
-  - name: tack-trident
+  - name: stack-trident
     rules:
       - alert: TridentSenderQuarantined
         expr: increase(tack_trident_quarantine_trips_total[5m]) > 0
@@ -365,9 +365,9 @@ Known limitations that remain:
 - **Key zeroing.** `SecretKey` zeroes its bytes on drop as a best effort only, because the write cannot be volatile without `unsafe`.
 - **Timing evidence.** Equal work is shown by hashed-byte counts, not by a wall-clock measurement.
 
-Three property tests ran 512 cases each: a one-byte flip of a sealed envelope is refused, sealed envelopes pass, and re-encoding is stable. `cargo clippy -p tack-trident --all-targets -- -D warnings` exits 0 with no warnings.
+Three property tests ran 512 cases each: a one-byte flip of a sealed envelope is refused, sealed envelopes pass, and re-encoding is stable. `cargo clippy -p stack-trident --all-targets -- -D warnings` exits 0 with no warnings.
 
-The final run of `cargo test -p tack-trident --all-targets` passed 93 tests in five binaries: unit, properties, redteam, telemetry and trident, in that order.
+The final run of `cargo test -p stack-trident --all-targets` passed 93 tests in five binaries: unit, properties, redteam, telemetry and trident, in that order.
 
 ```text
 test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s

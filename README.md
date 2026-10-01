@@ -1,6 +1,6 @@
-# tack-kernel
+# stack-kernel
 
-Reference implementations of the TACK governance kernel, written in Rust and
+Reference implementations of the STACK governance kernel, written in Rust and
 purple-teamed. Each component was built, attacked by a separate red-team
 agent, fixed, measured and documented. The manual that describes all of it is
 in `manual/`.
@@ -14,17 +14,17 @@ repository public without clearing that first.
 
 | Crate | Component |
 |---|---|
-| `tack-inlet` | 1. Inlet Winnowing Filter |
-| `tack-trident` | 2. Inter-Agent Trident |
-| `tack-bumpers` | 3. Elastic Bumpers |
-| `tack-minotaur` | 4. Minotaur String |
-| `tack-greenwave` | 5. Traffic Cop and Green Wave Routing |
-| `tack-transmission` | 6. Tractor Transmission |
-| `tack-sentinel` | 7. Sentinel Hash-Chain (Rust verifier; the ledger itself lives in sentinel_os) |
-| `tack-anc-ceiling` | ANC strategy 1: deterministic ceiling padding |
-| `tack-anc-adaptive` | ANC strategy 2: adaptive rolling-average blinding |
-| `tack-anc-pipeline` | ANC strategy 3: instruction-level pipeline padding |
-| `tack-anc-harness` | Timing measurement harness (Welch t-test), test tooling |
+| `stack-inlet` | 1. Inlet Winnowing Filter |
+| `stack-trident` | 2. Inter-Agent Trident |
+| `stack-bumpers` | 3. Elastic Bumpers |
+| `stack-minotaur` | 4. Minotaur String |
+| `stack-greenwave` | 5. Traffic Cop and Green Wave Routing |
+| `stack-transmission` | 6. Tractor Transmission |
+| `stack-sentinel` | 7. Sentinel Hash-Chain (Rust verifier; the ledger itself lives in sentinel_os) |
+| `stack-anc-ceiling` | ANC strategy 1: deterministic ceiling padding |
+| `stack-anc-adaptive` | ANC strategy 2: adaptive rolling-average blinding |
+| `stack-anc-pipeline` | ANC strategy 3: instruction-level pipeline padding |
+| `stack-anc-harness` | Timing measurement harness (Welch t-test), test tooling |
 | `_warm` | Dependency warm-up crate, not part of the kernel |
 
 `manual/sections/` holds the manual's sections as markdown. `manual/measurements/`
@@ -44,7 +44,7 @@ cargo test --workspace --all-targets --no-fail-fast
 Timing measurements need release builds on a quiet machine:
 
 ```
-cargo run --release -p tack-anc-ceiling --example verify
+cargo run --release -p stack-anc-ceiling --example verify
 ```
 
 The Rust Sentinel verifier can also be checked against the real Python one. The
@@ -55,12 +55,12 @@ Python with its dependencies, so it is ignored by default:
 
 ```
 SENTINEL_OS_DIR=/path/to/sentinel_os PYTHON=/path/to/venv/bin/python \
-    cargo test -p tack-sentinel --test crosscheck -- --ignored
+    cargo test -p stack-sentinel --test crosscheck -- --ignored
 ```
 
 It currently reports one understood difference (an anchor that seals zero rows:
 Python says `VERIFIED`, Rust says `TRUNCATED`). The header of
-`crates/tack-sentinel/tests/crosscheck.rs` explains the rest.
+`crates/stack-sentinel/tests/crosscheck.rs` explains the rest.
 
 ## Known state
 
