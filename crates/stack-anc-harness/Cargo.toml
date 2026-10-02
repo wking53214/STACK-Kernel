@@ -1,0 +1,24 @@
+[package]
+name = "stack-anc-harness"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Statistical timing-leak harness (dudect-style Welch t, second-order t, KS) used to verify TACK ANC strategies. Test-only tooling."
+
+[dependencies]
+tracing.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+subtle.workspace = true
+libc.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+metrics-util.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
