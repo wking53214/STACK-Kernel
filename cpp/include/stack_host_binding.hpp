@@ -427,6 +427,18 @@ public:
             return std::unexpected(HostExecutionError::TimerInitializationFailed);
         }
 
+        // LAYER 8 FIX: Re-validate capabilities before payload execution
+        // Between snapshot and execution, the host may have revoked capabilities.
+        // Re-check under lock to ensure Minotaur still has required permissions.
+        {
+            std::lock_guard<std::mutex> lock(capability_lock_);
+            if (!token.Validate(active_host_capabilities_)) [[unlikely]] {
+                // LAYER 5 FIX: Record capability violation event
+                audit_ring_.Push(AuditEventType::CapabilityViolation, domain_id, 0);
+                return std::unexpected(HostExecutionError::CapabilityValidationFailed);
+            }
+        }
+
         // Component 6 Check: Software Deadline Scope
         bool software_overrun = false;
         {
