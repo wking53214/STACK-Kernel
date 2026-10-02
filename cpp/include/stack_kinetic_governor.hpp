@@ -431,7 +431,22 @@ public:
         PackedBucket64 next;
 
         do {
-            uint64_t elapsed = (now > current.timestamp) ? (now - current.timestamp) : 0;
+            // LAYER 7 FIX: Detect and handle clock wraparound
+            // If now < timestamp, the hardware clock wrapped. Conservatively treat as no time elapsed.
+            uint64_t elapsed;
+            if (now >= current.timestamp) {
+                elapsed = now - current.timestamp;
+                // Cap elapsed to prevent overflow in generated token calculation
+                // Max reasonable: 2^48 ticks (overflow detection threshold)
+                constexpr uint64_t MAX_REASONABLE_ELAPSED = (1ULL << 48);
+                if (elapsed > MAX_REASONABLE_ELAPSED) {
+                    elapsed = MAX_REASONABLE_ELAPSED;  // Conservative: assume max reasonable time
+                }
+            } else {
+                // Clock wrapped: treat as zero elapsed time
+                elapsed = 0;
+            }
+
             uint64_t generated = elapsed / TicksPerToken;
             uint64_t available = std::min(static_cast<uint64_t>(MaxCapacity),
                                           current.tokens + generated);
