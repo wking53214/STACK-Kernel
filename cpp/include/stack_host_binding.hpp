@@ -44,6 +44,7 @@
 #include "stack_kernel.hpp"
 #include "stack_kinetic_governor.hpp"
 #include "posix_deadline_timer_hardened.hpp"
+#include "stack_audit.hpp"
 
 #include <array>
 #include <atomic>
@@ -71,6 +72,7 @@
 namespace stack::host {
 
 using namespace stack::governor;
+using namespace stack::telemetry;
 
 /**
  * CAPABILITY MASK: 256-bit Permission Vector
@@ -314,6 +316,7 @@ private:
     std::atomic<uint32_t> transactions_in_flight_{0};  // Lifecycle guard
     mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
     mutable std::mutex capability_lock_{};  // Protects active_host_capabilities_
+    SeccompAuditRing<8192> audit_ring_{};  // Layer 5: Governance audit trail (DEFECT #1 FIX)
 
 public:
     GovernedMinotaurHost() noexcept = default;
@@ -384,6 +387,9 @@ public:
             snapshot_capabilities = active_host_capabilities_;
         }
 
+        // Extract domain ID early for audit logging
+        const uint64_t domain_id = token.GetContextId();
+
         // Lifecycle guard: mark transaction in flight
         transactions_in_flight_.fetch_add(1, std::memory_order_release);
 
@@ -397,15 +403,17 @@ public:
 
         // Component 13 Check: SIMD Capability Verification (against snapshot)
         if (!token.Validate(snapshot_capabilities)) [[unlikely]] {
+            // LAYER 5 FIX: Record capability violation event
+            audit_ring_.Push(AuditEventType::CapabilityViolation, domain_id, 0);
             return std::unexpected(HostExecutionError::CapabilityValidationFailed);
         }
-
-        const uint64_t domain_id = token.GetContextId();
         const uint64_t start_tick = HardwareClock::ReadTicks();
 
         // Component 2-5 Check: Kinetic Governor
         auto consume_res = governor_.Consume(required_tokens, PriorityClass::Standard, start_tick);
         if (!consume_res.has_value()) [[unlikely]] {
+            // LAYER 5 FIX: Record rate limit event
+            audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, required_tokens);
             return std::unexpected(HostExecutionError::RateLimitExceeded);
         }
 
@@ -428,10 +436,14 @@ public:
         const uint64_t elapsed_ticks = HardwareClock::ReadTicks() - start_tick;
 
         if (timer_guard.WasPreempted()) [[unlikely]] {
+            // LAYER 5 FIX: Record hardware timer preemption event
+            audit_ring_.Push(AuditEventType::HardwareTimerPreempted, domain_id, required_tokens);
             return std::unexpected(HostExecutionError::PreemptionTriggered);
         }
 
         if (software_overrun) [[unlikely]] {
+            // LAYER 5 FIX: Record software deadline exceeded event
+            audit_ring_.Push(AuditEventType::SoftwareDeadlineExceeded, domain_id, required_tokens);
             return std::unexpected(HostExecutionError::DeadlineExceeded);
         }
 
@@ -439,10 +451,15 @@ public:
         guard.accrued_ticks = elapsed_ticks;
         auto debt_res = debt_tracker_.AccrueDebt(domain_id, elapsed_ticks);
         if (!debt_res.has_value()) [[unlikely]] {
+            // LAYER 5 FIX: Record debt ceiling exceeded event
+            audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, required_tokens);
             return std::unexpected(HostExecutionError::DebtCeilingExceeded);
         }
 
         guard.Commit();
+
+        // LAYER 5 FIX: Record successful transaction completion
+        audit_ring_.Push(AuditEventType::TransactionCompleted, domain_id, required_tokens);
         return {};
     }
 };
