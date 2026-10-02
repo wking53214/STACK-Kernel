@@ -173,15 +173,22 @@ public:
      *
      * Flags:
      *   SA_SIGINFO:  Handler receives full siginfo_t (including sival_ptr)
-     *   SA_NODEFER:  Handler can be re-entered (timer can fire while handler runs)
      *   SA_RESTART:  Interrupted system calls are restarted (not aborted)
+     *
+     * P2 FIX: Removed SA_NODEFER to prevent signal handler reentrancy.
+     * Without SA_NODEFER, the kernel automatically blocks GOVERNOR_PREEMPT_SIG
+     * during handler execution. If the deadline fires again while the handler
+     * runs, the signal is queued and delivered after the handler returns.
+     * This prevents concurrent execution of the handler, which is safer and
+     * eliminates reentrancy bugs even though the handler's atomic operation
+     * is technically safe.
      *
      * Returns: std::errc::operation_not_permitted if sigaction() fails.
      */
     static std::expected<void, std::errc> RegisterSignalHandler() noexcept {
         struct sigaction sa{};
         sa.sa_sigaction = HardenedPreemptSignalHandler;
-        sa.sa_flags = SA_SIGINFO | SA_NODEFER | SA_RESTART;
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
         ::sigemptyset(&sa.sa_mask);
         if (::sigaction(GOVERNOR_PREEMPT_SIG, &sa, nullptr) != 0) [[unlikely]] {
             return std::unexpected(std::errc::operation_not_permitted);
