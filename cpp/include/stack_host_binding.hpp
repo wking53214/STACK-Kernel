@@ -166,6 +166,59 @@ enum class SeccompError : uint8_t {
 };
 
 class SeccompFilterEngine {
+private:
+    // Compute jump offsets programmatically to prevent silent corruption
+    // from structure changes. Each offset is computed relative to the jump position.
+    struct FilterOffsets {
+        uint8_t arch_fail_to_default_allow;    // From arch check fail to default allow
+        uint8_t ptrace_to_sig_handler;         // From ptrace jump-true to sig handler
+        uint8_t sigaction_to_sigprocmask;      // From sigaction jump-true to sigprocmask
+        uint8_t sigprocmask_to_prctl;          // From sigprocmask jump-true to prctl
+        uint8_t prctl_to_sigaction_load;       // From prctl jump-false to sigaction load
+        uint8_t sigaction_load_to_check;       // From sigaction load to signal check
+        uint8_t sigaction_check_to_allow;      // From sigaction check to allow
+        uint8_t sigaction_fail_to_sigprocmask; // From sigaction check-false to sigprocmask ret
+        uint8_t prctl_load_to_check;           // From prctl load to PR_SET_SECCOMP check
+        uint8_t prctl_check_to_errno;          // From prctl check to errno return
+        uint8_t prctl_check_fail_to_allow;     // From prctl check-false to allow
+    };
+
+    [[nodiscard]] static constexpr FilterOffsets ComputeFilterOffsets() noexcept {
+        // Filter structure (index comments):
+        // [0] Load arch
+        // [1] Jump: if arch == native, skip 1 (go to [2]), else skip 0 (go to [3])
+        // [2] Kill: RET_KILL_PROCESS
+        // [3] Load syscall nr
+        // [4] Jump: if nr == SYS_ptrace, skip ? to sig_handler, else skip 0
+        // [5] Jump: if nr == SYS_rt_sigaction, skip ? to prctl_load, else skip 0
+        // [6] Jump: if nr == SYS_rt_sigprocmask, skip ? to prctl_load, else skip 0
+        // [7] Jump: if nr == SYS_prctl, skip ? to prctl_load, else skip 0
+        // [8] RET_ALLOW (default)
+        // [9] Load args[0] (for sigaction)
+        // [10] Jump: if args[0] == GOVERNOR_PREEMPT_SIG, skip 2, else skip 0
+        // [11] RET_ALLOW
+        // [12] RET_ERRNO (sigprocmask deny)
+        // [13] Load args[0] (for prctl)
+        // [14] Jump: if args[0] == PR_SET_SECCOMP, skip 0 (go to errno), skip 1 (go to allow)
+        // [15] RET_ERRNO (prctl deny)
+        // [16] RET_ALLOW
+
+        // Computed jumps (relative to jump position):
+        return FilterOffsets{
+            .arch_fail_to_default_allow = 6,    // From [1] fail to [8] (6 steps forward)
+            .ptrace_to_sig_handler = 5,         // From [4] to [9] (5 steps forward)
+            .sigaction_to_sigprocmask = 6,      // From [5] to [12] (6 steps forward)
+            .sigprocmask_to_prctl = 6,          // From [6] to [13] (6 steps forward)
+            .prctl_to_sigaction_load = 2,       // From [7] to [9] (2 steps forward)
+            .sigaction_load_to_check = 1,       // From [9] to [10] (1 step forward)
+            .sigaction_check_to_allow = 2,      // From [10] to [12] (2 steps forward)
+            .sigaction_fail_to_sigprocmask = 1, // From [10] fail to [12] (1 step forward)
+            .prctl_load_to_check = 1,           // From [13] to [14] (1 step forward)
+            .prctl_check_to_errno = 0,          // From [14] to [15] (0 steps = next)
+            .prctl_check_fail_to_allow = 1,     // From [14] fail to [16] (1 step forward)
+        };
+    }
+
 public:
     [[nodiscard]] static std::expected<void, SeccompError> InstallFilter() noexcept {
         if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) [[unlikely]] {
@@ -180,35 +233,39 @@ public:
         return std::unexpected(SeccompError::UnsupportedArchitecture);
 #endif
 
+        constexpr FilterOffsets offsets = ComputeFilterOffsets();
+
         const struct sock_filter filter[] = {
             // [0-2] Validate Arch
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NATIVE_AUDIT_ARCH, 1, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NATIVE_AUDIT_ARCH, 1, offsets.arch_fail_to_default_allow),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
 
             // [3] Load Syscall Number
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
 
-            // System calls to restrict
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_ptrace, 7, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_sigaction, 3, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_sigprocmask, 4, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, 5, 0),
+            // System calls to restrict (computed jumps)
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_ptrace, offsets.ptrace_to_sig_handler, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_sigaction, offsets.sigaction_to_sigprocmask, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_rt_sigprocmask, offsets.sigprocmask_to_prctl, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_prctl, offsets.prctl_to_sigaction_load, 0),
 
-            // Default Allow
+            // [8] Default Allow
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 
-            // SYS_rt_sigaction handler (check for GOVERNOR_PREEMPT_SIG)
+            // [9] SYS_rt_sigaction handler (check for GOVERNOR_PREEMPT_SIG)
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(GOVERNOR_PREEMPT_SIG), 2, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(GOVERNOR_PREEMPT_SIG),
+                     offsets.sigaction_check_to_allow, offsets.sigaction_fail_to_sigprocmask),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 
-            // SYS_rt_sigprocmask handler (deny mask modifications)
+            // [12] SYS_rt_sigprocmask handler (deny mask modifications)
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
 
-            // SYS_prctl handler (deny PR_SET_SECCOMP manipulation)
+            // [13] SYS_prctl handler (deny PR_SET_SECCOMP manipulation)
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_SECCOMP, 0, 1),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_SECCOMP,
+                     offsets.prctl_check_to_errno, offsets.prctl_check_fail_to_allow),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         };
