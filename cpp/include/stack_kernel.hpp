@@ -129,10 +129,11 @@ struct alignas(64) HardwareClock {
         return val;
 
 #else
-        // DEFECT VISIBLE: Unsupported architecture.
-        // Timing measurements will be 0, making rate limiting and deadline
-        // enforcement inert. See docstring above.
-        return 0;
+        // FIX LAYER 1: Unsupported architecture now fails at compile time.
+        // Previously: returned 0 (silent defect, breaks containment).
+        // Now: compilation error prevents deployment to unsupported platforms.
+        // This prevents the entire timing layer from being disabled without notice.
+#error "≡TACK kernel requires x86_64 (with RDTSCP) or ARM64 (with ISB+cntvct_el0). Unsupported architecture."
 #endif
     }
 };
