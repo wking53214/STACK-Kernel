@@ -410,7 +410,8 @@ public:
         const uint64_t start_tick = HardwareClock::ReadTicks();
 
         // Component 2-5 Check: Kinetic Governor
-        auto consume_res = governor_.Consume(required_tokens, PriorityClass::Standard, start_tick);
+        // LAYER 7 FIX: Consume now reads clock internally (removed caller-supplied time parameter)
+        auto consume_res = governor_.Consume(required_tokens, PriorityClass::Standard);
         if (!consume_res.has_value()) [[unlikely]] {
             // LAYER 5 FIX: Record rate limit event
             audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, required_tokens);

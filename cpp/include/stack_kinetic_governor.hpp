@@ -411,27 +411,35 @@ public:
      * Atomically checks available tokens and deducts the requested amount.
      * Tokens are regenerated based on elapsed time since last update.
      *
+     * LAYER 7 CRITICAL FIX: Clock is read internally by the kernel, not supplied
+     * by the caller. This prevents untrusted code (Minotaur) from manipulating
+     * time and bypassing rate limiting. Previously, accepting caller-supplied
+     * timestamps allowed complete rate-limit bypass via time jumping.
+     *
      * Parameters:
      *   amount:   Number of tokens requested.
      *   prio:     Priority class (Root or Standard).
-     *   now:      Current tick counter (from HardwareClock).
      *
      * Returns:
      *   GovernorError::None if tokens consumed.
      *   GovernorError::RateLimited if insufficient tokens.
      *
      * Thread-safe via CAS loop on atomic bucket state.
+     * Time reading is performed inside the kernel-controlled boundary.
      */
     [[nodiscard]] std::expected<void, GovernorError> Consume(
         uint32_t amount,
-        PriorityClass prio,
-        uint64_t now) noexcept {
+        PriorityClass prio) noexcept {
+
+        // LAYER 7 CRITICAL FIX: Read clock inside kernel boundary
+        // Minotaur cannot control time; governor controls time reading
+        uint64_t now = HardwareClock::ReadTicks();
 
         PackedBucket64 current = bucket_.load(std::memory_order_acquire);
         PackedBucket64 next;
 
         do {
-            // LAYER 7 FIX: Detect and handle clock wraparound
+            // Detect and handle clock wraparound
             // If now < timestamp, the hardware clock wrapped. Conservatively treat as no time elapsed.
             uint64_t elapsed;
             if (now >= current.timestamp) {

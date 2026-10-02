@@ -18,7 +18,7 @@ using namespace stack::telemetry;
 
 TEST_CASE("Components 1-5: Governor & Sync Core", "[components][1-5]") {
     KineticGovernor<> gov;
-    auto res = gov.Consume(10, PriorityClass::Standard, HardwareClock::ReadTicks());
+    auto res = gov.Consume(10, PriorityClass::Standard);
     REQUIRE(res.has_value());
     gov.Refund(10);
 }
@@ -71,7 +71,7 @@ TEST_CASE("Component 12: Layer 4 - Debt Refund Asymmetry Fix", "[layer-4][defect
         ComputeDebtTracker<256> tracker;
 
         // Verify initial token consumption succeeds
-        auto consume_res = gov.Consume(100, PriorityClass::Standard, HardwareClock::ReadTicks());
+        auto consume_res = gov.Consume(100, PriorityClass::Standard);
         REQUIRE(consume_res.has_value());
 
         {
@@ -92,7 +92,7 @@ TEST_CASE("Component 12: Layer 4 - Debt Refund Asymmetry Fix", "[layer-4][defect
         KineticGovernor<> gov;
         ComputeDebtTracker<256> tracker;
 
-        auto consume_res = gov.Consume(50, PriorityClass::Standard, HardwareClock::ReadTicks());
+        auto consume_res = gov.Consume(50, PriorityClass::Standard);
         REQUIRE(consume_res.has_value());
 
         {
