@@ -37,6 +37,7 @@
  * ───────────────────────────────────────────────────────────────────────────
  */
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -93,6 +94,7 @@ private:
     alignas(64) uint8_t storage_[ArenaSize]{};
     std::size_t offset_{0};
     std::atomic<uint32_t> allocations_in_flight_{0};  // Lifecycle guard
+    std::atomic<uint32_t> generation_{0};  // LAYER 6 FIX: Generation counter for isolation
 
 public:
     constexpr StaticArenaBuffer() noexcept = default;
@@ -144,6 +146,10 @@ public:
      * Clears all allocations and allows the arena to be reused.
      * Destructors are NOT called on existing objects (no automatic cleanup).
      *
+     * LAYER 6 FIX: Invalidate stale pointers by:
+     * 1. Zeroing the entire arena (defensive memory scrub)
+     * 2. Incrementing generation counter (makes old pointers logically invalid)
+     *
      * Returns: true if reset succeeded, false if allocations are in flight
      * (prevents arena wipe during active transaction use).
      */
@@ -151,8 +157,22 @@ public:
         if (allocations_in_flight_.load(std::memory_order_acquire) > 0) {
             return false;  // Allocations in flight; cannot reset
         }
+
+        // LAYER 6 FIX: Zero memory to prevent leakage through stale pointer access
+        std::fill(storage_.begin(), storage_.end(), uint8_t{0});
+
         offset_ = 0;
+        generation_.fetch_add(1, std::memory_order_release);  // Invalidate old pointers
         return true;
+    }
+
+    /**
+     * CURRENT GENERATION: Logical epoch for isolation.
+     * LAYER 6 FIX: Incremented on each Reset(). Allocations from generation N
+     * become stale after Reset() advances to N+1.
+     */
+    [[nodiscard]] uint32_t CurrentGeneration() const noexcept {
+        return generation_.load(std::memory_order_acquire);
     }
 
     /**
