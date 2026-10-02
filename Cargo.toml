@@ -1,19 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/tack-inlet",
-    "crates/tack-trident",
-    "crates/tack-bumpers",
-    "crates/tack-minotaur",
-    "crates/tack-greenwave",
-    "crates/tack-transmission",
-    "crates/tack-sentinel",
-    "crates/tack-anc-harness",
-    "crates/tack-anc-ceiling",
-    "crates/tack-anc-adaptive",
-    "crates/tack-anc-pipeline",
+    "crates/stack-inlet",
+    "crates/stack-trident",
+    "crates/stack-bumpers",
+    "crates/stack-minotaur",
+    "crates/stack-greenwave",
+    "crates/stack-transmission",
+    "crates/stack-sentinel",
+    "crates/stack-anc-harness",
+    "crates/stack-anc-ceiling",
+    "crates/stack-anc-adaptive",
+    "crates/stack-anc-pipeline",
+    "crates/stack-p3-2",
     "crates/_warm",
-    "crates/tack-ffi",
+    "crates/stack-ffi",
 ]
 
 [workspace.package]
