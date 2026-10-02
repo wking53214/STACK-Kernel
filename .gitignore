@@ -3,3 +3,10 @@
 
 # C++ build artifacts
 cpp/build/
+cpp/CMakeCache.txt
+cpp/CMakeFiles/
+cpp/cmake_install.cmake
+cpp/Makefile
+cpp/**/*.gch
+cpp/**/*.o
+cpp/**/*.a

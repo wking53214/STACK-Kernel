@@ -1,0 +1,24 @@
+[package]
+name = "stack-anc-adaptive"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "TACK ANC strategy 2: adaptive padding target. A naive rolling-average controller (the brief's design, kept to show its leaks) and an epoch-quantized predictive controller (the fix). New design."
+
+[dependencies]
+tracing.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+metrics-util.workspace = true
+serde_json.workspace = true
+stack-anc-harness = { path = "../stack-anc-harness" }
+
+[lints]
+workspace = true
