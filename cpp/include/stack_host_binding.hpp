@@ -256,6 +256,7 @@ private:
     std::atomic<bool> seccomp_sealed_{false};
     std::atomic<uint32_t> transactions_in_flight_{0};  // Lifecycle guard
     mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
+    mutable std::mutex capability_lock_{};  // Protects active_host_capabilities_
 
 public:
     GovernedMinotaurHost() noexcept = default;
@@ -263,11 +264,15 @@ public:
     /**
      * Set active capability mask. Guarded against mid-transaction changes.
      * Returns false if transaction is in flight, preventing capability mutation.
+     *
+     * Thread safety: Acquires capability_lock_ to ensure atomicity with
+     * concurrent reads in ExecuteGovernedTransaction().
      */
     [[nodiscard]] bool SetActiveCapabilities(const CapabilityMask256& mask) noexcept {
         if (transactions_in_flight_.load(std::memory_order_acquire) > 0) {
             return false;  // Transaction in flight; cannot change capabilities
         }
+        std::lock_guard<std::mutex> lock(capability_lock_);
         active_host_capabilities_ = mask;
         return true;
     }
@@ -315,6 +320,13 @@ public:
             if (!init_res.has_value()) return std::unexpected(init_res.error());
         }
 
+        // Snapshot active capabilities to prevent torn reads during concurrent mutations
+        CapabilityMask256 snapshot_capabilities{};
+        {
+            std::lock_guard<std::mutex> lock(capability_lock_);
+            snapshot_capabilities = active_host_capabilities_;
+        }
+
         // Lifecycle guard: mark transaction in flight
         transactions_in_flight_.fetch_add(1, std::memory_order_release);
 
@@ -326,8 +338,8 @@ public:
             }
         } lifecycle_guard{transactions_in_flight_};
 
-        // Component 13 Check: SIMD Capability Verification
-        if (!token.Validate(active_host_capabilities_)) [[unlikely]] {
+        // Component 13 Check: SIMD Capability Verification (against snapshot)
+        if (!token.Validate(snapshot_capabilities)) [[unlikely]] {
             return std::unexpected(HostExecutionError::CapabilityValidationFailed);
         }
 
