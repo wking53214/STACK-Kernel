@@ -238,13 +238,17 @@ public:
                 return std::unexpected(GovernorError::DebtCeilingExceeded);
             }
 
+            // P2 FIX: Use acquire semantics on CAS failure to ensure retry loop
+            // sees latest values written by concurrent Accrue/Refund operations.
+            // This creates a release-acquire pair with other threads' updates.
             if (debt.compare_exchange_weak(current, current + ticks,
                                           std::memory_order_release,
-                                          std::memory_order_relaxed)) {
+                                          std::memory_order_acquire)) {
                 break;  // CAS succeeded, debt has been updated
             }
 
             // CAS failed; another thread modified the counter. Retry.
+            // memory_order_acquire in failure path ensures we see their writes.
             BackpressureController::YieldCpu();
         }
 
@@ -292,13 +296,17 @@ public:
                 return std::unexpected(GovernorError::DebtCeilingExceeded);
             }
 
+            // P2 FIX: Use acquire semantics on CAS failure to ensure retry loop
+            // sees latest values written by concurrent Accrue/Refund operations.
+            // This creates a release-acquire pair with other threads' updates.
             if (debt.compare_exchange_weak(current, current - ticks,
                                           std::memory_order_release,
-                                          std::memory_order_relaxed)) {
+                                          std::memory_order_acquire)) {
                 break;  // CAS succeeded, debt has been refunded
             }
 
             // CAS failed; another thread modified the counter. Retry.
+            // memory_order_acquire in failure path ensures we see their writes.
             BackpressureController::YieldCpu();
         }
 
