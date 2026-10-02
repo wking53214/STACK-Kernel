@@ -118,19 +118,43 @@ inline void HardenedPreemptSignalHandler(int sig, siginfo_t* info, [[maybe_unuse
 }
 
 /**
- * HARDENED POSIX PREEMPTION GUARD: Per-Thread Deadline Enforcement.
+ * DEADLINE DETECTION GUARD: Per-Thread Reactive Deadline Enforcement.
  *
  * Manages a POSIX interval timer for one thread's execution deadline.
  * Registers a signal handler, initializes the timer, arms it with a budget,
  * and checks after execution whether the deadline was exceeded.
  *
- * NOTE ON NAMING: Despite the name "PreemptionGuard," this does not preempt
- * execution. It detects deadline breach after the fact. See the architectural
- * notes above.
+ * CRITICAL CONTRACT:
+ *
+ * This is NOT execution preemption. This is deadline-breach detection.
+ *
+ * The signal handler sets a flag; execution continues. Only after the
+ * payload returns does WasPreempted() check whether the deadline was exceeded.
+ *
+ * Implications:
+ *   - Payloads with infinite loops will NOT be preempted
+ *   - Deadline enforcement is reactive (post-execution), not preventive
+ *   - WasPreempted() MUST be called AFTER Arm() scope completes
+ *   - Do not call WasPreempted() before Arm() completes (reads stale state)
+ *
+ * USAGE PATTERN (Correct):
+ *   {
+ *     HardenedPosixPreemptionGuard guard;
+ *     guard.Arm(deadline_ns);
+ *     payload();  // Execution continues even if deadline fires
+ *   }
+ *   if (guard.WasPreempted()) { handle_overrun(); }
+ *
+ * USAGE PATTERN (WRONG - do not do this):
+ *   HardenedPosixPreemptionGuard guard;
+ *   guard.Arm(deadline_ns);
+ *   if (guard.WasPreempted()) { ... }  // BUG: stale state, Arm not complete
+ *   payload();
  */
 class HardenedPosixPreemptionGuard {
 private:
     PersistentThreadTimerState& state_{g_thread_timer_state};
+    bool armed_{false};  // Guard: ensures WasPreempted() only called after Arm()
 
     /**
      * Get the kernel thread ID (gettid syscall).
@@ -195,9 +219,10 @@ public:
     }
 
     /**
-     * CONSTRUCTION: Create a preemption guard (no initialization needed).
+     * CONSTRUCTION: Create a deadline detection guard (not armed yet).
+     * Must call Arm() before checking WasPreempted().
      */
-    HardenedPosixPreemptionGuard() noexcept = default;
+    HardenedPosixPreemptionGuard() noexcept : armed_(false) {}
 
     /**
      * ARM: Set the deadline timer with a budget in nanoseconds.
@@ -206,7 +231,11 @@ public:
      * time have elapsed. When it fires, the signal handler sets preempted=1.
      *
      * If budget_nanoseconds is 0, returns success without arming (allows zero-
-     * budget transactions to proceed undeadlined).
+     * budget transactions to proceed undeadlined). armed_ flag is NOT set for
+     * zero-budget (WasPreempted() will report no preemption).
+     *
+     * FIX LAYER 2: Sets armed_=true only after successful timer_settime().
+     * This prevents WasPreempted() from being called before Arm() completes.
      *
      * Clears preempted flag to 0 before arming, so repeated Arm() calls start
      * fresh.
@@ -218,6 +247,7 @@ public:
      *          (usually: invalid timer or invalid timespec).
      */
     [[nodiscard]] std::expected<void, std::errc> Arm(uint64_t budget_nanoseconds) noexcept {
+        armed_ = false;  // Reset to prevent stale WasPreempted() checks
         if (budget_nanoseconds == 0) return {};
 
         if (!state_.timer_initialized) [[unlikely]] {
@@ -235,6 +265,7 @@ public:
         if (::timer_settime(state_.timer_id, 0, &its, nullptr) != 0) [[unlikely]] {
             return std::unexpected(std::errc::invalid_argument);
         }
+        armed_ = true;  // FIX: Only set after successful timer setup
         return {};
     }
 
@@ -259,6 +290,12 @@ public:
      *
      * Returns true if the preempted flag is set (deadline was exceeded).
      *
+     * PRECONDITION: Arm() must have been called and completed successfully.
+     * Calling WasPreempted() before Arm() is complete returns stale state.
+     *
+     * FIX LAYER 2: Returns false if called before Arm() completes.
+     * This prevents misuse where WasPreempted() is checked during payload.
+     *
      * ARCHITECTURAL NOTE: This is a reactive check. The deadline may have
      * been exceeded while the payload was executing, but the execution was
      * not actually stopped. This check happens AFTER the payload completes.
@@ -267,6 +304,10 @@ public:
      * See the layer 2 architectural notes for why this is a limitation.
      */
     [[nodiscard]] bool WasPreempted() const noexcept {
+        // FIX: Guard against calling before Arm() completes
+        if (!armed_) {
+            return false;  // Not armed yet; no preemption possible
+        }
         return state_.preempted.load(std::memory_order_acquire) != 0;
     }
 };
