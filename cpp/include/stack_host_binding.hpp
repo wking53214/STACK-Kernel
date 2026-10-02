@@ -268,7 +268,7 @@ template <
 >
 class GovernedMinotaurHost {
 private:
-    KineticGovernor<MaxCapacity, ReservedTokens, MaxBurstTokens, TicksPerToken> governor_{};
+    KineticGovernor<MaxCapacity, ReservedTokens, MaxBurstTokens, TicksPerToken, MaxDomains> governor_{};
     ComputeDebtTracker<MaxDomains> debt_tracker_{};
     CapabilityMask256 active_host_capabilities_{};
     std::atomic<bool> seccomp_sealed_{false};
@@ -370,7 +370,8 @@ public:
 
         // Component 2-5 Check: Kinetic Governor
         // LAYER 7 FIX: Consume now reads clock internally (removed caller-supplied time parameter)
-        auto consume_res = governor_.Consume(required_tokens, PriorityClass::Standard);
+        // P3.1 FIX: Consume now accepts domain_id for per-domain rate limiting
+        auto consume_res = governor_.Consume(domain_id, required_tokens, PriorityClass::Standard);
         if (!consume_res.has_value()) [[unlikely]] {
             // LAYER 5 FIX: Record rate limit event
             audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, required_tokens);
