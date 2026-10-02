@@ -275,6 +275,24 @@ public:
      * Called when the guard goes out of scope or is destroyed. Sets the timer
      * to zero (expires immediately with zero budget), which disarms it.
      *
+     * CRITICAL FIX (Layer 2 P1): After disarm, clear the preempted flag with
+     * release semantics. This prevents a signal that fires during the disarm
+     * window (TOCTOU race) from poisoning the next transaction using the same
+     * thread-local state.
+     *
+     * Sequence that triggered the defect:
+     *   1. Transaction 1: deadline fires, signal handler sets preempted=1
+     *   2. Destructor: calls timer_settime(zero) to disarm
+     *   3. RACE WINDOW: signal fires again before disarm completes
+     *   4. Signal handler: sets preempted=1 again (in thread-local state)
+     *   5. Transaction 2 starts on same thread, Arm() clears preempted=0
+     *   6. But the second signal from step 3 delivers after Arm() returns
+     *   7. Signal handler: sets preempted=1, poisoning transaction 2
+     *
+     * The fix: clear with release semantics after disarm, ensuring any
+     * signal that fires during disarm cannot race past the destructor's
+     * store and into the next transaction.
+     *
      * Does not throw. Silently succeeds or fails; timer cleanup is a best-effort
      * operation.
      */
@@ -282,6 +300,10 @@ public:
         if (state_.timer_initialized) {
             struct itimerspec zero_its{};
             ::timer_settime(state_.timer_id, 0, &zero_its, nullptr);
+            // FIX LAYER 2 P1: Clear preempted flag after disarm to prevent
+            // signals that fire during the disarm window from poisoning the
+            // next transaction on the same thread.
+            state_.preempted.store(0, std::memory_order_release);
         }
     }
 
