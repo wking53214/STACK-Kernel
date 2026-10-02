@@ -94,7 +94,7 @@ private:
     alignas(64) uint8_t storage_[ArenaSize]{};
     std::size_t offset_{0};
     std::atomic<uint32_t> allocations_in_flight_{0};  // Lifecycle guard
-    std::atomic<uint32_t> generation_{0};  // LAYER 6 FIX: Generation counter for isolation
+    std::atomic<uint64_t> generation_{0};  // LAYER 6 P1 FIX: uint64 to prevent wraparound over decades
 
 public:
     constexpr StaticArenaBuffer() noexcept = default;
@@ -159,7 +159,7 @@ public:
         }
 
         // LAYER 6 FIX: Zero memory to prevent leakage through stale pointer access
-        std::fill(storage_.begin(), storage_.end(), uint8_t{0});
+        std::fill(storage_, storage_ + ArenaSize, uint8_t{0});
 
         offset_ = 0;
         generation_.fetch_add(1, std::memory_order_release);  // Invalidate old pointers
@@ -168,10 +168,11 @@ public:
 
     /**
      * CURRENT GENERATION: Logical epoch for isolation.
-     * LAYER 6 FIX: Incremented on each Reset(). Allocations from generation N
-     * become stale after Reset() advances to N+1.
+     * LAYER 6 P1 FIX: Returns uint64_t (extended from uint32_t) to match the
+     * generation counter size. This prevents wraparound over decades of operation.
+     * Allocations from generation N become stale after Reset() advances to N+1.
      */
-    [[nodiscard]] uint32_t CurrentGeneration() const noexcept {
+    [[nodiscard]] uint64_t CurrentGeneration() const noexcept {
         return generation_.load(std::memory_order_acquire);
     }
 
