@@ -52,6 +52,7 @@
 #include <cstdint>
 #include <csignal>
 #include <expected>
+#include <mutex>
 #include <utility>
 
 #include <sys/prctl.h>
@@ -252,8 +253,9 @@ private:
     KineticGovernor<MaxCapacity, ReservedTokens, MaxBurstTokens, TicksPerToken> governor_{};
     ComputeDebtTracker<MaxDomains> debt_tracker_{};
     CapabilityMask256 active_host_capabilities_{};
-    bool seccomp_sealed_{false};
+    std::atomic<bool> seccomp_sealed_{false};
     std::atomic<uint32_t> transactions_in_flight_{0};  // Lifecycle guard
+    mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
 
 public:
     GovernedMinotaurHost() noexcept = default;
@@ -271,7 +273,18 @@ public:
     }
 
     [[nodiscard]] std::expected<void, HostExecutionError> InitializeAndSeal() noexcept {
-        if (seccomp_sealed_) return {};
+        // Double-checked locking: fast path (no lock)
+        if (seccomp_sealed_.load(std::memory_order_acquire)) [[likely]] {
+            return {};
+        }
+
+        // Slow path: acquire lock for initialization
+        std::lock_guard<std::mutex> lock(initialization_lock_);
+
+        // Recheck after acquiring lock: another thread may have initialized
+        if (seccomp_sealed_.load(std::memory_order_acquire)) [[likely]] {
+            return {};
+        }
 
         if (!HardenedPosixPreemptionGuard::RegisterSignalHandler().has_value()) [[unlikely]] {
             return std::unexpected(HostExecutionError::SignalHandlerRegistrationFailed);
@@ -285,7 +298,7 @@ public:
             return std::unexpected(HostExecutionError::SeccompInitializationFailed);
         }
 
-        seccomp_sealed_ = true;
+        seccomp_sealed_.store(true, std::memory_order_release);
         return {};
     }
 

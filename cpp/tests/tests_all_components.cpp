@@ -42,6 +42,74 @@ TEST_CASE("Components 14-15: Arena & Audit Ring", "[components][14-15]") {
     REQUIRE(rec.context_id == 777);
 }
 
+TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][defect-1]") {
+    // RED TEAM: Test 1 - Concurrent InitializeAndSeal calls (no double initialization)
+    {
+        constexpr int num_threads = 6;
+        std::vector<std::thread> threads;
+        std::atomic<int> success_count{0};
+        std::atomic<int> error_count{0};
+        GovernedMinotaurHost<> host;
+
+        for (int i = 0; i < num_threads; ++i) {
+            threads.emplace_back([&host, &success_count, &error_count]() {
+                auto res = host.InitializeAndSeal();
+                if (res.has_value()) {
+                    success_count++;
+                } else {
+                    error_count++;
+                }
+            });
+        }
+
+        for (auto& t : threads) t.join();
+
+        // All threads should report success (idempotent init)
+        REQUIRE(success_count.load() == num_threads);
+        REQUIRE(error_count.load() == 0);
+    }
+
+    // RED TEAM: Test 2 - Sealed state visible across threads
+    {
+        GovernedMinotaurHost<> host;
+        std::atomic<bool> thread1_sealed{false};
+        std::atomic<bool> thread2_saw_sealed{false};
+
+        std::thread t1([&host, &thread1_sealed]() {
+            auto res = host.InitializeAndSeal();
+            REQUIRE(res.has_value());
+            thread1_sealed.store(true, std::memory_order_release);
+        });
+
+        std::thread t2([&host, &thread1_sealed, &thread2_saw_sealed]() {
+            while (!thread1_sealed.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            auto res = host.InitializeAndSeal();
+            REQUIRE(res.has_value());
+            thread2_saw_sealed.store(true, std::memory_order_release);
+        });
+
+        t1.join();
+        t2.join();
+        REQUIRE(thread2_saw_sealed.load());
+    }
+
+    // RED TEAM: Test 3 - Rapid sequential init (stress test lock contention)
+    {
+        GovernedMinotaurHost<> host;
+        std::atomic<int> init_attempts{0};
+
+        for (int i = 0; i < 100; ++i) {
+            auto res = host.InitializeAndSeal();
+            REQUIRE(res.has_value());
+            init_attempts++;
+        }
+
+        REQUIRE(init_attempts.load() == 100);
+    }
+}
+
 TEST_CASE("Component 16 & 17: Integration & Chaos Stress", "[components][16-17]") {
     constexpr int num_threads = 4;
     std::vector<std::thread> threads;
