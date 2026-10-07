@@ -2,7 +2,7 @@
 
 Reference implementation of the ≡TACK (STACK) governance kernel, written in Rust and C++ with comprehensive red-team validation. Each component was built, attacked by a separate red-team agent, hardened, measured and documented. The complete manual is in `manual/`.
 
-**Private by design.** These crates are built around the CNS gate contract (`cns/gate.py` in the CNS repository), which carries confidentiality protections. Several source comments reference that contract. Do not make this repository public without clearing that first.
+These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](https://github.com/wking53214/CNS), Apache-2.0). Several source comments reference that contract.
 
 ## What is here
 

@@ -3,8 +3,6 @@
 /**
  * ≡TACK KERNEL LAYER 4: Host Boundary Orchestration and SECCOMP Enforcement
  *
- * CONFIDENTIAL. Trade secret of William N. King (wking53214).
- *
  * ───────────────────────────────────────────────────────────────────────────
  * ORCHESTRATION LAYER: Binding Execution to Governance
  *

@@ -18,7 +18,7 @@ Five web pages and six local files were opened; seven papers the network blocked
 
 | Source | What it supports |
 |---|---|
-| [CNS gate.py](file:///home/user/CNS/cns/gate.py) | GatePosition (ALPHA, OMEGA), GateOutcome (PASS, RETRY, TERMINAL_BREACH) and `subject_digest`, a SHA-256 over a type-tagged rendering; the header marks the file confidential. |
+| [CNS gate.py](https://github.com/wking53214/CNS/blob/main/cns/gate.py) | GatePosition (ALPHA, OMEGA), GateOutcome (PASS, RETRY, TERMINAL_BREACH) and `subject_digest`, a SHA-256 over a type-tagged rendering. Public, Apache-2.0. |
 | [sentinel_os twin_custody.py](file:///home/user/sentinel_os/sentinel_os/twin_custody.py) | The Python verifier that tack-sentinel matches (`verify_rows`, `deep_verify_row`, `check_head_anchor`), and the 16-character hash prefixes in its messages. |
 | [sentinel_os canonical_fields.py](file:///home/user/sentinel_os/sentinel_os/canonical_fields.py) | `OPTIONAL_HASHED_FIELDS`, the shared list of optional columns that enter a row's hash when present. |
 | [sentinel_os api_key_auth.py](file:///home/user/sentinel_os/sentinel_os/api_key_auth.py) | `_find_key_constant_time` checks every key with `hmac.compare_digest` and no early exit; its two failure replies differ in text. |

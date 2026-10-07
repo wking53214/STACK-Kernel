@@ -59,7 +59,7 @@ def _ledger_dumps(obj: Any) -> bytes:
 
 A `shuffle_seed` is reserved for a future layer that shuffles gate order; the server derives it by HMAC from the previous hash. The `attestation_policy` marker is a chain row after which every `authorized_by` claim must be signed. A `subject_digest` is the CNS digest of the content a decision judged, recomputed by `src/cns.rs`.
 
-The CNS encoding behind that digest is not reproduced here, because the CNS source is marked confidential.
+The CNS encoding behind that digest is defined by `subject_digest` in CNS's `cns/gate.py` (public, Apache-2.0).
 
 **The Rust verifier in six steps.**
 
