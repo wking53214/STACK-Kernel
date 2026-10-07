@@ -3,7 +3,7 @@
 /**
  * ≡TACK KERNEL LAYER 5: Governance Audit Trail and Lock-Free Event Recording
  *
- * CONFIDENTIAL. Trade secret of William King (wking53214).
+ * CONFIDENTIAL. Trade secret of William N. King (wking53214).
  *
  * ───────────────────────────────────────────────────────────────────────────
  * AUDIT LAYER: Governance Event Telemetry

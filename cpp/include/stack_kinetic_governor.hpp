@@ -3,7 +3,7 @@
 /**
  * ≡TACK KERNEL LAYER 3: Rate Limiting, Debt Tracking, and Execution Deadlines
  *
- * CONFIDENTIAL. Trade secret of William King (wking53214).
+ * CONFIDENTIAL. Trade secret of William N. King (wking53214).
  *
  * ───────────────────────────────────────────────────────────────────────────
  * LAYER 3 OVERVIEW
