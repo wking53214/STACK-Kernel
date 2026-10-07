@@ -3,7 +3,7 @@
 /**
  * ≡TACK KERNEL LAYER 6: Memory Isolation Arena (Bump Allocator)
  *
- * CONFIDENTIAL. Trade secret of William King (wking53214).
+ * CONFIDENTIAL. Trade secret of William N. King (wking53214).
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ISOLATION LAYER: Linear Allocation Without Escape
