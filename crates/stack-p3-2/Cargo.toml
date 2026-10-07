@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 description = "≡TACK P3.2: Hard Preemption with Hybrid Boundary Model and Flywheel Schema"
 authors = ["William N. King <wking53214@gmail.com>"]
-license = "UNLICENSE"
+license.workspace = true
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
