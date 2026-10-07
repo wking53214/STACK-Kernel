@@ -5,7 +5,7 @@
 /**
  * ≡TACK KERNEL LAYER 2: Hardened POSIX Deadline Timer and Preemption
  *
- * CONFIDENTIAL. Trade secret of William King (wking53214).
+ * CONFIDENTIAL. Trade secret of William N. King (wking53214).
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ARCHITECTURE: Signal-Based Timeout Detection

@@ -3,7 +3,7 @@
 /**
  * ≡TACK KERNEL FOUNDATION: Hardware-Locked Timing and Admission Control
  *
- * CONFIDENTIAL. Trade secret of William King (wking53214).
+ * CONFIDENTIAL. Trade secret of William N. King (wking53214).
  * This module is the ground floor of the containment stack.
  * Everything built above depends on what it measures.
  *
