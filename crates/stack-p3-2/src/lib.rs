@@ -76,18 +76,23 @@ impl HardPreemptionKernel {
         Ok(tx_id)
     }
 
-    /// Begin a transaction using the governed deadline for this agent. `default_deadline_ns`
-    /// is the ceiling: the governance service can shorten the deadline, never lengthen it,
-    /// and a service outage leaves the default in force.
+    /// Begin a transaction whose deadline is `now + budget`, where the budget is the governed
+    /// time budget for this agent. `default_budget_ns` is the ceiling: the governance service
+    /// can shorten the budget, never lengthen it, and an outage leaves the default in force.
+    /// (`deadline_ns` in the schema is an absolute timestamp; the governed limit is a duration.)
     pub fn begin_transaction_governed<S: governed_limits::LimitSource>(
         &self,
         limits: &GovernedLimits<S>,
         agent_id: String,
         subject_digest: [u8; 32],
-        default_deadline_ns: u64,
+        default_budget_ns: u64,
     ) -> Result<uuid::Uuid, &'static str> {
-        let deadline_ns = limits.effective(&agent_id, LimitKind::DeadlineNs, default_deadline_ns);
-        self.begin_transaction(agent_id, subject_digest, deadline_ns)
+        let budget = limits.effective(&agent_id, LimitKind::DeadlineNs, default_budget_ns);
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "clock before epoch")?
+            .as_nanos() as u64;
+        self.begin_transaction(agent_id, subject_digest, now_ns.saturating_add(budget))
     }
 
     /// Check preemption boundary: trap if preempted, log context + reason.
@@ -192,20 +197,26 @@ mod tests {
     }
 
     #[test]
-    fn test_governed_deadline_is_applied_and_capped() {
+    fn test_governed_budget_becomes_a_deadline_and_is_capped() {
         use std::time::Duration;
         let kernel = HardPreemptionKernel::new(P32Config::default()).unwrap();
         let dir = std::env::temp_dir().join(format!("gd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("l.json");
-        std::fs::write(&path, r#"{"stack.agent.a.deadline_ns": 500, "stack.agent.b.deadline_ns": 9999999}"#).unwrap();
+        std::fs::write(&path, r#"{"stack.agent.a.deadline_ns": 2000000000, "stack.agent.b.deadline_ns": 99000000000}"#).unwrap();
         let limits = GovernedLimits::new(governed_limits::FileSource { path }, Duration::ZERO);
-        let deadline = |agent: &str| {
-            let tx = kernel.begin_transaction_governed(&limits, agent.into(), [0u8; 32], 1000).unwrap();
-            kernel.live_contexts(tx).unwrap()[0].deadline_ns
+        let budget = |agent: &str| {
+            let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+            let tx = kernel.begin_transaction_governed(&limits, agent.into(), [0u8; 32], 10_000_000_000).unwrap();
+            let after = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+            let d = kernel.live_contexts(tx).unwrap()[0].deadline_ns;
+            assert!(d >= before && d <= after + 10_000_000_000, "deadline is an absolute time");
+            d - before
         };
-        assert_eq!(deadline("a"), 500); // tightened
-        assert_eq!(deadline("b"), 1000); // above the ceiling: ignored
-        assert_eq!(deadline("c"), 1000); // nothing governed
+        let slack = 1_000_000_000; // generous: clock reads happen around the call
+        let near = |got: u64, want: u64| got >= want && got <= want + slack;
+        assert!(near(budget("a"), 2_000_000_000)); // tightened
+        assert!(near(budget("b"), 10_000_000_000)); // above the ceiling: default
+        assert!(near(budget("c"), 10_000_000_000)); // nothing governed: default
     }
 }
