@@ -6,7 +6,7 @@
 //
 // Output, one JSON object per line: {"trap": <TrapEvent>} for each trap, then {"summary": {...}}.
 //
-// usage: governed_workload --agent NAME --profile healthy|runaway|slowed --round N --tasks N
+// usage: governed_workload --agent NAME --profile healthy|runaway|slowed|regressed --round N --tasks N
 //        --default-ns N --seed N [--port P --token T | --static]
 
 use stack_p3_2::governed_limits::HttpSource;
@@ -72,12 +72,15 @@ fn main() {
         "healthy" => (20.0, 0.0),
         "runaway" => (20.0, 0.05),
         "slowed" => (60.0, 0.0),
+        // healthy for the first 20 rounds, then a regression makes every task 3x slower
+        "regressed" => (if round < 20 { 20.0 } else { 60.0 }, 0.0),
         other => panic!("unknown profile {other}"),
     };
 
     let (mut legit, mut legit_failed, mut bad, mut bad_caught) = (0u64, 0u64, 0u64, 0u64);
     let (mut total_ns, mut bad_ns, mut budget_last) = (0u128, 0u128, default_ns);
     let digest = [0u8; 32];
+    let mut completed: Vec<u64> = Vec::new();
     for _ in 0..tasks {
         let is_bad = rng.next() < runaway_p;
         let dur_ns = if is_bad {
@@ -100,6 +103,7 @@ fn main() {
                 println!("{}", serde_json::json!({ "trap": trap }));
             }
         }
+        if !preempted { completed.push(dur_ns); }
         let cost = dur_ns.min(budget) as u128;
         total_ns += cost;
         if is_bad {
@@ -111,7 +115,10 @@ fn main() {
             if preempted { legit_failed += 1; }
         }
     }
+    completed.sort_unstable();
+    let completed_median = completed.get(completed.len() / 2).copied().unwrap_or(0);
     println!("{}", serde_json::json!({ "summary": {
+        "completed_median_ns": completed_median,
         "agent": agent, "round": round, "tasks": tasks, "legit": legit, "legit_failed": legit_failed,
         "bad": bad, "bad_caught": bad_caught, "total_ns": total_ns.to_string(), "bad_ns": bad_ns.to_string(),
         "budget_last_ns": budget_last } }));
