@@ -14,12 +14,14 @@ pub mod context;
 pub mod trap;
 pub mod boundary;
 pub mod config;
+pub mod governed_limits;
 
 pub use schema::{ExecutionContext, TrapEvent, Transaction};
 pub use context::ContextLocal;
 pub use trap::{TrapReason, TrapOutcome};
 pub use boundary::PreemptionBoundary;
 pub use config::P32Config;
+pub use governed_limits::{GovernedLimits, LimitKind, LimitSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundaryLayer {
@@ -72,6 +74,20 @@ impl HardPreemptionKernel {
         contexts.push(ctx.clone());
 
         Ok(tx_id)
+    }
+
+    /// Begin a transaction using the governed deadline for this agent. `default_deadline_ns`
+    /// is the ceiling: the governance service can shorten the deadline, never lengthen it,
+    /// and a service outage leaves the default in force.
+    pub fn begin_transaction_governed<S: governed_limits::LimitSource>(
+        &self,
+        limits: &GovernedLimits<S>,
+        agent_id: String,
+        subject_digest: [u8; 32],
+        default_deadline_ns: u64,
+    ) -> Result<uuid::Uuid, &'static str> {
+        let deadline_ns = limits.effective(&agent_id, LimitKind::DeadlineNs, default_deadline_ns);
+        self.begin_transaction(agent_id, subject_digest, deadline_ns)
     }
 
     /// Check preemption boundary: trap if preempted, log context + reason.
@@ -173,5 +189,23 @@ mod tests {
         // Trap should be logged
         let history = kernel.trap_history(&agent_id).unwrap();
         assert!(!history.is_empty());
+    }
+
+    #[test]
+    fn test_governed_deadline_is_applied_and_capped() {
+        use std::time::Duration;
+        let kernel = HardPreemptionKernel::new(P32Config::default()).unwrap();
+        let dir = std::env::temp_dir().join(format!("gd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("l.json");
+        std::fs::write(&path, r#"{"stack.agent.a.deadline_ns": 500, "stack.agent.b.deadline_ns": 9999999}"#).unwrap();
+        let limits = GovernedLimits::new(governed_limits::FileSource { path }, Duration::ZERO);
+        let deadline = |agent: &str| {
+            let tx = kernel.begin_transaction_governed(&limits, agent.into(), [0u8; 32], 1000).unwrap();
+            kernel.live_contexts(tx).unwrap()[0].deadline_ns
+        };
+        assert_eq!(deadline("a"), 500); // tightened
+        assert_eq!(deadline("b"), 1000); // above the ceiling: ignored
+        assert_eq!(deadline("c"), 1000); // nothing governed
     }
 }
