@@ -186,10 +186,14 @@ fn main() {
     }
     completed.sort_unstable();
     let completed_median = completed.get(completed.len() / 2).copied().unwrap_or(0);
+    // Quantiles of completed durations: p50 p75 p90 p95 p99 (0 if nothing completed).
+    let q: Vec<u64> = [0.50, 0.75, 0.90, 0.95, 0.99].iter()
+        .map(|p| if completed.is_empty() { 0 } else { completed[((completed.len() as f64 - 1.0) * p).round() as usize] })
+        .collect();
     println!("{}", serde_json::json!({ "summary": {
         "agent": agent, "round": round, "tasks": tasks.len(), "legit": legit, "legit_failed": legit_failed,
         "expected_trapped": expected_trapped, "bad": bad, "bad_caught": bad_caught,
         "deadline_traps": deadline_traps, "token_traps": token_traps, "memory_traps": memory_traps,
-        "completed_median_ns": completed_median, "total_ns": total_ns.to_string(), "bad_ns": bad_ns.to_string(),
+        "completed_median_ns": completed_median, "completed_q": q, "total_ns": total_ns.to_string(), "bad_ns": bad_ns.to_string(),
         "budget_last_ns": budget_last, "tokens_last": tokens_last, "memory_last": memory_last } }));
 }
