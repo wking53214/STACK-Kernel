@@ -72,7 +72,7 @@ fn anchor_raw(head: &str, entries: PyInt, key: &[u8]) -> Vec<u8> {
         head: head.to_owned(),
         entries,
         sealed_at: "2026-09-30T00:00:00+00:00".into(),
-        key_fingerprint: tack_sentinel::key_fingerprint(key),
+        key_fingerprint: stack_sentinel::key_fingerprint(key),
         hmac: String::new(),
     };
     a.hmac = common::hmac_hex(key, &anchor_payload(&a));
@@ -1007,7 +1007,7 @@ fn redteam_anchor_counts_and_row_ids_at_the_edges() {
     let r = run(&v, &cols, &base, &anchor_raw(last, PyInt::from_i64(15), common::FIXTURE_KEY));
     assert_eq!(r.finding.unwrap().reason, Reason::HeadMismatch);
     // a count too large for any integer type
-    let huge = tack_sentinel::pyjson::parse("9".repeat(4000).as_bytes(), Default::default()).unwrap();
+    let huge = stack_sentinel::pyjson::parse("9".repeat(4000).as_bytes(), Default::default()).unwrap();
     let Value::Int(huge) = huge else { panic!() };
     let r = run(&v, &cols, &base, &anchor_raw(last, huge, common::FIXTURE_KEY));
     assert_eq!(r.finding.unwrap().reason, Reason::TailMissing);

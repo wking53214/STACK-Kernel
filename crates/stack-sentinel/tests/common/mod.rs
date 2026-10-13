@@ -85,7 +85,7 @@ pub fn anchor_bytes(rows: &[Object], entries: usize, signing_key: &[u8]) -> Vec<
         head,
         entries: PyInt::from_i64(entries as i64),
         sealed_at: "2026-09-30T00:00:00+00:00".into(),
-        key_fingerprint: tack_sentinel::key_fingerprint(signing_key),
+        key_fingerprint: stack_sentinel::key_fingerprint(signing_key),
         hmac: String::new(),
     };
     a.hmac = hmac_hex(signing_key, &anchor_payload(&a));
@@ -114,7 +114,7 @@ pub fn rechain(rows: &mut [Object], start: usize) {
             let prev = rows[i - 1]["current_hash"].clone();
             rows[i].insert("previous_hash".into(), prev);
         }
-        let h = tack_sentinel::recompute_current_hash(&rows[i]).unwrap();
+        let h = stack_sentinel::recompute_current_hash(&rows[i]).unwrap();
         rows[i].insert("current_hash".into(), Value::Str(h));
     }
 }

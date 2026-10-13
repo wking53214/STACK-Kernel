@@ -315,7 +315,7 @@ fn caps_refuse_over_budget_input_without_a_verdict() {
     );
     assert!(matches!(
         v.verify_export(deep.as_bytes(), None),
-        Err(VerifyError::ExportNotJson(tack_sentinel::pyjson::JsonError::TooDeep(256)))
+        Err(VerifyError::ExportNotJson(stack_sentinel::pyjson::JsonError::TooDeep(256)))
     ));
 }
 
@@ -353,7 +353,7 @@ fn cli(export: &[u8], anchor: Option<&[u8]>, keys: &str, fps: &str) -> (i32, Str
     let dir = std::env::temp_dir().join(format!(
         "stack-sentinel-cli-{}-{}",
         std::process::id(),
-        tack_sentinel::canonical::sha256_hex(format!("{keys}{fps}{}", export.len()).as_bytes())
+        stack_sentinel::canonical::sha256_hex(format!("{keys}{fps}{}", export.len()).as_bytes())
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let export_path = dir.join("export.json");
@@ -386,7 +386,7 @@ fn the_cli_prints_what_the_python_tool_prints_and_exits_the_same_way() {
     let export = common::export_bytes(&cols, &rows);
     let anchor = common::anchor_bytes(&rows, rows.len(), common::FIXTURE_KEY);
     let key_line = format!("{}\n", std::str::from_utf8(common::FIXTURE_KEY).unwrap());
-    let fp = tack_sentinel::key_fingerprint(common::FIXTURE_KEY);
+    let fp = stack_sentinel::key_fingerprint(common::FIXTURE_KEY);
 
     let (code, out, _) = cli(&export, Some(&anchor), &key_line, &fp);
     assert_eq!((code, out.as_str()), (0, "VERIFIED\n"));
@@ -401,7 +401,7 @@ fn the_cli_prints_what_the_python_tool_prints_and_exits_the_same_way() {
     assert_eq!(code, 1);
     assert!(out.starts_with("TRUNCATED row=- "), "{out}");
 
-    let other_fp = tack_sentinel::key_fingerprint(common::OTHER_KEY);
+    let other_fp = stack_sentinel::key_fingerprint(common::OTHER_KEY);
     let (code, out, err) = cli(&export, Some(&anchor), &key_line, &other_fp);
     assert_eq!((code, out.as_str()), (2, ""));
     assert!(err.contains("no trusted key material"));
@@ -430,7 +430,7 @@ fn an_ordinary_export_of_several_mib_is_not_refused_by_the_parse_budget() {
     while rows.len() < 4800 {
         for r in &base_rows {
             let mut r = r.clone();
-            r.insert("id".into(), Value::Int(tack_sentinel::pyjson::PyInt::from_i64(id)));
+            r.insert("id".into(), Value::Int(stack_sentinel::pyjson::PyInt::from_i64(id)));
             id += 1;
             rows.push(r);
         }

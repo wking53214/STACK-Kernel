@@ -156,5 +156,5 @@ fn where_python_crashes_rust_reports_tampered() {
         .verify_export(&common::export_bytes(&columns, &rows), Some(&anchor))
         .unwrap();
     assert_eq!(report.verdict().as_str(), "TAMPERED");
-    assert_eq!(report.finding.unwrap().reason, tack_sentinel::Reason::RecomputeFailed);
+    assert_eq!(report.finding.unwrap().reason, stack_sentinel::Reason::RecomputeFailed);
 }

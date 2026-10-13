@@ -33,7 +33,7 @@ async fn guard_held_across_await_in_spawned_task() {
         trip.kind,
         TripKind::LoopDetected {
             period: 2,
-            detector: tack_minotaur::Detector::Exact
+            detector: stack_minotaur::Detector::Exact
         }
     );
     assert_eq!(t.depth(), 0);

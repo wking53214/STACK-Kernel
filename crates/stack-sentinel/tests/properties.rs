@@ -34,7 +34,7 @@ fn post() -> (Value, Vec<Object>) {
     (common::columns(POST), common::base_rows(POST))
 }
 
-fn verify(rows: &[Object], anchor_rows: &[Object]) -> tack_sentinel::Report {
+fn verify(rows: &[Object], anchor_rows: &[Object]) -> stack_sentinel::Report {
     let cols = common::columns(POST);
     let anchor = common::anchor_bytes(anchor_rows, anchor_rows.len(), common::FIXTURE_KEY);
     common::verifier(&[common::FIXTURE_KEY])

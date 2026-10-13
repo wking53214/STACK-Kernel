@@ -41,15 +41,15 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use sstack_anc_harness::cpu::{process_cpu_time, thread_cpu_time};
-use sstack_anc_harness::stats::percentile_sorted;
-use sstack_anc_harness::victim::{ct_validate, leaky_validate};
-use sstack_anc_harness::{
+use stack_anc_harness::cpu::{process_cpu_time, thread_cpu_time};
+use stack_anc_harness::stats::percentile_sorted;
+use stack_anc_harness::victim::{ct_validate, leaky_validate};
+use stack_anc_harness::{
     analyze, env, Class, Report, SplitMix64, TimeUnit, DEFAULT_CROP_PERCENTILES, T_THRESHOLD,
 };
-use sstack_anc_pipeline::naive::balanced_dummy_no_black_box;
-use sstack_anc_pipeline::telemetry::names;
-use sstack_anc_pipeline::{
+use stack_anc_pipeline::naive::balanced_dummy_no_black_box;
+use stack_anc_pipeline::telemetry::names;
+use stack_anc_pipeline::{
     balanced_dummy, constant_time, early_exit, PipelineConfig, PipelineGate, TokenSecret, Trip,
     Validator, MAX_DUMMY_STEPS, TOKEN_LEN,
 };

@@ -7,11 +7,11 @@
 mod common;
 
 use common::{ms, spin_for, us};
-use sstack_anc_adaptive::{
+use stack_anc_adaptive::{
     AdaptivePad, EpochConfig, NaiveConfig, PadConfig, SpinBudgetConfig, WaitMode, WindowStatistic,
 };
-use sstack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
-use sstack_anc_harness::{measure_pair, Class, MeasureConfig, Report, T_THRESHOLD};
+use stack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
+use stack_anc_harness::{measure_pair, Class, MeasureConfig, Report, T_THRESHOLD};
 
 /// Samples per class. Calibration below is checked at this same n.
 const N_PER_CLASS: usize = 2_000;

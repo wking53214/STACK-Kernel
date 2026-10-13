@@ -18,10 +18,10 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use sstack_anc_harness::victim::{ct_validate, leaky_validate};
-use sstack_anc_harness::{measure_pair, Class, MeasureConfig, Report, SplitMix64, T_THRESHOLD};
-use sstack_anc_pipeline::telemetry::{names, sha256_hex};
-use sstack_anc_pipeline::{
+use stack_anc_harness::victim::{ct_validate, leaky_validate};
+use stack_anc_harness::{measure_pair, Class, MeasureConfig, Report, SplitMix64, T_THRESHOLD};
+use stack_anc_pipeline::telemetry::{names, sha256_hex};
+use stack_anc_pipeline::{
     Accepted, GateOutcome, PipelineConfig, PipelineGate, TokenSecret, Trip, Validator, TOKEN_LEN,
 };
 

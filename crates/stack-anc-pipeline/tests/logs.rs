@@ -7,8 +7,8 @@
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
-use sstack_anc_pipeline::telemetry::sha256_hex;
-use sstack_anc_pipeline::{PipelineConfig, PipelineGate, TokenSecret, Validator, TOKEN_LEN};
+use stack_anc_pipeline::telemetry::sha256_hex;
+use stack_anc_pipeline::{PipelineConfig, PipelineGate, TokenSecret, Validator, TOKEN_LEN};
 
 // Test fixture, not a key. Printable so a raw leak into a log is easy to spot.
 const FIXTURE: &[u8; TOKEN_LEN] = b"FIXTURE-not-a-key-0123456789abcd";

@@ -4,7 +4,7 @@
 use metrics_util::debugging::DebugValue;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use sstack_anc_adaptive::Clock;
+use stack_anc_adaptive::Clock;
 
 pub fn us(n: u64) -> Duration {
     Duration::from_micros(n)

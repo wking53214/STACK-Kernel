@@ -479,6 +479,6 @@ fn thread_and_guard_are_send_and_sync() {
     fn sync<T: Sync>() {}
     send::<Thread>();
     sync::<Thread>();
-    send::<tack_minotaur::DepthGuard<'static>>();
+    send::<stack_minotaur::DepthGuard<'static>>();
     send::<Trip>();
 }

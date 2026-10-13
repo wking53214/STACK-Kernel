@@ -8,7 +8,7 @@ use common::{ms, spin_for, us, BackwardsOnce};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Barrier;
 use std::time::{Duration, Instant};
-use sstack_anc_adaptive::{
+use stack_anc_adaptive::{
     AdaptivePad, EpochConfig, EpochQuantizedTarget, GateOutcome, NaiveConfig, PadConfig,
     Resolution, SpinBudgetConfig, Trip, WaitMode,
 };

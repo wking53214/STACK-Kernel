@@ -61,8 +61,8 @@ fn non_canonical_wire_spelling_of_the_same_values_passes() {
 #[test]
 fn a_sender_terminal_breach_claim_is_carried_not_rejudged() {
     let fx = setup();
-    let env = tack_trident::seal(
-        tack_trident::EnvelopeDraft {
+    let env = stack_trident::seal(
+        stack_trident::EnvelopeDraft {
             sequence: 1,
             issued_at_unix_ms: fx.now(),
             nonce: nonce_for(1),
@@ -336,7 +336,7 @@ fn in_process_bombs_hit_the_same_caps() {
     assert_eq!(reasons(&fx.trident.verify(&env)), vec![EnvelopeTooLarge]);
 
     let mut env = fx.sealed(1);
-    env.sequence = tack_trident::MAX_SAFE_INTEGER + 1;
+    env.sequence = stack_trident::MAX_SAFE_INTEGER + 1;
     assert_eq!(reasons(&fx.trident.verify(&env)), vec![IntegerOutOfRange]);
 
     let mut env = fx.sealed(1);
@@ -410,7 +410,7 @@ fn skew_window_and_epoch_floor() {
 // Circuit breaker
 // ---------------------------------------------------------------------------
 
-fn transplanted(fx: &Fx, seq: u64) -> tack_trident::HandoffEnvelope {
+fn transplanted(fx: &Fx, seq: u64) -> stack_trident::HandoffEnvelope {
     let mut env = fx.sealed(seq);
     env.payload = json!({"transplanted": seq});
     remac(&mut env, "a");

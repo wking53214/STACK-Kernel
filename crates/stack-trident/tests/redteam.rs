@@ -517,7 +517,7 @@ fn rt_fail_closed_and_unit_confusion() {
         let v = tr.verify(&e);
         assert!(!v.is_accepted(), "clock {at}: {v:?}");
         assert!(!v.reasons().is_empty());
-        let e2 = seal(draft(2, at.min(tack_trident::MAX_SAFE_INTEGER), payload_for(2)), &fx.key_a, &fx.cfg.limits()).unwrap();
+        let e2 = seal(draft(2, at.min(stack_trident::MAX_SAFE_INTEGER), payload_for(2)), &fx.key_a, &fx.cfg.limits()).unwrap();
         assert!(!tr.verify(&e2).is_accepted(), "clock {at}");
     }
     // In-process u64 fields above 2^53 - 1 are refused, not wrapped.
@@ -752,9 +752,9 @@ fn rt_no_panic_from_arbitrary_bytes() {
     }
     // Deep nesting at the maximum configured depth does not blow the stack.
     let cfg = TridentConfig {
-        max_depth: tack_trident::config::MAX_DEPTH_CEILING,
-        max_nodes: tack_trident::config::MAX_NODES_CEILING,
-        max_envelope_bytes: tack_trident::config::MAX_ENVELOPE_BYTES_CEILING,
+        max_depth: stack_trident::config::MAX_DEPTH_CEILING,
+        max_nodes: stack_trident::config::MAX_NODES_CEILING,
+        max_envelope_bytes: stack_trident::config::MAX_ENVELOPE_BYTES_CEILING,
         ..TridentConfig::default()
     };
     let deep = Trident::new(cfg, ring_of(&["a"]), fx.clock.clone()).unwrap();

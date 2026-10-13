@@ -7,7 +7,7 @@ mod common;
 
 use common::{ms, us};
 use std::time::{Duration, Instant};
-use sstack_anc_adaptive::{
+use stack_anc_adaptive::{
     AdaptivePad, Disposition, NaiveConfig, NaiveRollingTarget, PadConfig, Plan, TargetController,
     WindowStatistic,
 };

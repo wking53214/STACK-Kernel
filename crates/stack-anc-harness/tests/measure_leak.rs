@@ -2,8 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::panic)] // test code: failures should abort the test
 
 use std::time::{Duration, Instant};
-use sstack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
-use sstack_anc_harness::{measure_pair, Class, MeasureConfig, Timer, T_THRESHOLD};
+use stack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
+use stack_anc_harness::{measure_pair, Class, MeasureConfig, Timer, T_THRESHOLD};
 
 fn spin(d: Duration) {
     let start = Instant::now();

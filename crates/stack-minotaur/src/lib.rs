@@ -200,7 +200,7 @@
 //! guard.record(a)?; // one revisit of each state is allowed
 //! guard.record(b)?;
 //! let trip = guard.record(a).unwrap_err(); // a second revisit is a loop
-//! assert_eq!(trip.kind, TripKind::LoopDetected { period: 2, detector: tack_minotaur::Detector::Exact });
+//! assert_eq!(trip.kind, TripKind::LoopDetected { period: 2, detector: stack_minotaur::Detector::Exact });
 //! assert_eq!(guard.depth(), 0); // rewound to the anchor
 //! // The guard is stale now: it refuses work until the caller unwinds.
 //! assert_eq!(guard.record(b).unwrap_err().kind, TripKind::StaleGuard);

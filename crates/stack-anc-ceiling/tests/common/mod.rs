@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use sstack_anc_ceiling::Clock;
+use stack_anc_ceiling::Clock;
 
 /// Real monotonic time, except that call number `trip_at` (0-based)
 /// returns a time one second in the past: a clock that went backwards.

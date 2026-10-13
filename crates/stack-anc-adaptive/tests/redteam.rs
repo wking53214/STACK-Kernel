@@ -21,9 +21,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use sstack_anc_adaptive::config::MAX_WINDOW;
-use sstack_anc_adaptive::telemetry::{names, sha256_hex};
-use sstack_anc_adaptive::{
+use stack_anc_adaptive::config::MAX_WINDOW;
+use stack_anc_adaptive::telemetry::{names, sha256_hex};
+use stack_anc_adaptive::{
     epoch_bound_bits, AdaptivePad, EpochConfig, EpochQuantizedTarget, GateOutcome,
     LeakBudgetConfig, MissRule, NaiveConfig, NaiveRollingTarget, PadConfig, Plan, Snapshot,
     SpinBudgetConfig, TargetController, Trip, WaitMode, WindowStatistic,

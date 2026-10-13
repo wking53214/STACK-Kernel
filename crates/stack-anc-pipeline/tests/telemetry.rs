@@ -5,8 +5,8 @@
 
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use std::collections::BTreeSet;
-use sstack_anc_pipeline::telemetry::names;
-use sstack_anc_pipeline::{
+use stack_anc_pipeline::telemetry::names;
+use stack_anc_pipeline::{
     Accepted, PipelineConfig, PipelineGate, TokenSecret, Trip, Validator, TOKEN_LEN,
 };
 

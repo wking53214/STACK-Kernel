@@ -7,11 +7,11 @@ mod common;
 use common::{ms, us};
 use proptest::prelude::*;
 use std::time::{Duration, Instant};
-use sstack_anc_adaptive::{
+use stack_anc_adaptive::{
     epoch_bound_bits, AdaptivePad, ControllerTrip, Disposition, EpochConfig, EpochQuantizedTarget,
     GateOutcome, LeakBudgetConfig, PadConfig, Resolution, TargetController, Trip,
 };
-use sstack_anc_harness::SplitMix64;
+use stack_anc_harness::SplitMix64;
 
 /// Ladder 100, 200, 400, 800, 1600 us; epoch 1 s; generous budget.
 fn cfg(initial_level: u32) -> EpochConfig {

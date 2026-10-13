@@ -19,8 +19,8 @@
 //! Both arguments are bounded (samples by MAX_SAMPLES, runs by 1000).
 
 use serde_json::{json, Value};
-use sstack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
-use sstack_anc_harness::{
+use stack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
+use stack_anc_harness::{
     env, measure_pair, Class, MeasureConfig, Report, Timer, DEFAULT_SEED, MAX_SAMPLES, T_THRESHOLD,
 };
 

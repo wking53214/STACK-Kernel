@@ -1,4 +1,4 @@
-//! The metrics named in `tack_sentinel::telemetry` fire, with closed labels.
+//! The metrics named in `stack_sentinel::telemetry` fire, with closed labels.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
@@ -59,7 +59,7 @@ fn histogram_count(entries: &[Entry], name: &str, outcome: &str) -> usize {
         .sum()
 }
 
-fn pre() -> (tack_sentinel::pyjson::Value, Vec<tack_sentinel::pyjson::Object>) {
+fn pre() -> (stack_sentinel::pyjson::Value, Vec<stack_sentinel::pyjson::Object>) {
     let rel = "ledger_export_pre_receipts.json";
     (common::columns(rel), common::base_rows(rel))
 }
@@ -89,7 +89,7 @@ fn a_clean_export_counts_one_verified_pass_and_its_rows() {
 fn a_tampered_export_counts_a_terminal_breach_trip_and_the_anchor_note() {
     let (cols, mut rows) = pre();
     let anchor = common::anchor_bytes(&rows, rows.len(), common::FIXTURE_KEY);
-    rows[0].insert("reason".into(), tack_sentinel::pyjson::Value::Str("edited".into()));
+    rows[0].insert("reason".into(), stack_sentinel::pyjson::Value::Str("edited".into()));
     common::rechain(&mut rows, 0);
     let export = common::export_bytes(&cols, &rows);
     let entries = run(|| {
@@ -191,7 +191,7 @@ fn no_label_value_is_taken_from_the_export() {
     // label: labels come only from the crate's closed enums.
     let (cols, mut rows) = pre();
     let marker = "ATTACKER-CONTROLLED-LABEL-VALUE";
-    rows[3].insert("node".into(), tack_sentinel::pyjson::Value::Str(marker.into()));
+    rows[3].insert("node".into(), stack_sentinel::pyjson::Value::Str(marker.into()));
     let anchor = common::anchor_bytes(&rows, rows.len(), common::FIXTURE_KEY);
     let export = common::export_bytes(&cols, &rows);
     let entries = run(|| {

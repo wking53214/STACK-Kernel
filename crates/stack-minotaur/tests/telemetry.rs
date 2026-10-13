@@ -219,9 +219,9 @@ fn lifetime_budget_halts_and_is_labelled() {
         let e = t.record(fp(1)).unwrap_err();
         assert_eq!(
             e.kind,
-            tack_minotaur::TripKind::LifetimeBudgetExhausted { limit: 6 }
+            stack_minotaur::TripKind::LifetimeBudgetExhausted { limit: 6 }
         );
-        assert_eq!(e.outcome, tack_minotaur::GateOutcome::TerminalBreach);
+        assert_eq!(e.outcome, stack_minotaur::GateOutcome::TerminalBreach);
         assert!(t.is_halted());
         t.operator_reset();
         assert_eq!(t.lifetime_steps(), 0);
