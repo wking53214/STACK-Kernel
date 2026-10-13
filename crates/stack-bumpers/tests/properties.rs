@@ -41,7 +41,7 @@ fn one(v: ParamValue) -> BTreeMap<String, ParamValue> {
     m
 }
 
-fn out(b: &Bumper, v: ParamValue) -> Result<f64, tack_bumpers::Rejection> {
+fn out(b: &Bumper, v: ParamValue) -> Result<f64, stack_bumpers::Rejection> {
     b.normalize(&one(v)).map(|n| n.get("x").unwrap().as_f64().unwrap())
 }
 

@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::panic)] // test code: failures should abort the test
 
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-use sstack_anc_harness::{measure_pair, Class, HarnessError, MeasureConfig, T_THRESHOLD};
+use stack_anc_harness::{measure_pair, Class, HarnessError, MeasureConfig, T_THRESHOLD};
 
 fn find<'s>(
     snap: &'s [(

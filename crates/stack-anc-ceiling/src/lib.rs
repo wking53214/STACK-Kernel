@@ -131,7 +131,7 @@
 //!
 //! ```
 //! use std::time::Duration;
-//! use sstack_anc_ceiling::{CeilingConfig, CeilingPad, WaitMode};
+//! use stack_anc_ceiling::{CeilingConfig, CeilingPad, WaitMode};
 //!
 //! let pad = CeilingPad::new(CeilingConfig {
 //!     mode: WaitMode::Hybrid,

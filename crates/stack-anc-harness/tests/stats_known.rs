@@ -1,7 +1,7 @@
 //! Stats functions against hand-computed values.
 #![allow(clippy::unwrap_used, clippy::panic)] // test code: failures should abort the test
 
-use sstack_anc_harness::stats::{
+use stack_anc_harness::stats::{
     crop_upper, kolmogorov_q, ks_two_sample, percentile, percentile_sorted, second_order_welch,
     welch, welch_slices, Welford,
 };

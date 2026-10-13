@@ -1,7 +1,7 @@
 //! `analyze` and `Report::verdict` on synthetic, deterministic samples.
 #![allow(clippy::unwrap_used, clippy::panic)] // test code: failures should abort the test
 
-use sstack_anc_harness::{
+use stack_anc_harness::{
     analyze, Class, GateOutcome, HarnessError, InconclusiveReason, MeasureConfig, SplitMix64,
     Statistic, TimeUnit, Verdict, DEFAULT_CROP_PERCENTILES, MAX_CROP_PERCENTILES, MAX_SAMPLES,
     T_THRESHOLD,

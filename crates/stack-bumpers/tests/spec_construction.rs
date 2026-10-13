@@ -180,5 +180,5 @@ fn bumper_rejects_invalid_config() {
 
 #[test]
 fn bumper_position_is_alpha() {
-    assert_eq!(Bumper::POSITION, tack_bumpers::GatePosition::Alpha);
+    assert_eq!(Bumper::POSITION, stack_bumpers::GatePosition::Alpha);
 }

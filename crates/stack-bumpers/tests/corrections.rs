@@ -9,7 +9,7 @@ use stack_bumpers::{
     UnitScale,
 };
 
-fn kinds(n: &tack_bumpers::Normalized) -> Vec<&'static str> {
+fn kinds(n: &stack_bumpers::Normalized) -> Vec<&'static str> {
     n.corrections().iter().map(|c| c.kind.label()).collect()
 }
 
@@ -155,11 +155,11 @@ fn enum_trim_fold_and_alias_each_count() {
 
 #[test]
 fn enum_non_ascii_is_not_folded() {
-    let b = tack_bumpers::Bumper::new(
+    let b = stack_bumpers::Bumper::new(
         BumperConfig::default(),
-        [tack_bumpers::ParamSpec::required(
+        [stack_bumpers::ParamSpec::required(
             "mode",
-            tack_bumpers::EnumSpec::new([tack_bumpers::VariantSpec::new("\u{e9}t\u{e9}")]).unwrap(),
+            stack_bumpers::EnumSpec::new([stack_bumpers::VariantSpec::new("\u{e9}t\u{e9}")]).unwrap(),
         )],
     )
     .unwrap();
@@ -267,7 +267,7 @@ fn unknown_param_is_rejected_and_not_echoed() {
         TripParam::Unknown { len, sha256 } => {
             assert_eq!(*len, 7);
             assert_eq!(sha256.len(), 64);
-            assert_eq!(sha256, &tack_bumpers::telemetry::sha256_hex(b"timeuot"));
+            assert_eq!(sha256, &stack_bumpers::telemetry::sha256_hex(b"timeuot"));
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -376,11 +376,11 @@ fn string_min_len_is_checked_after_trim() {
     assert_eq!(r.outcome, GateOutcome::Retry);
     assert!(r.has(TripReason::TooShort));
     // An explicit min_len of 0 allows the empty string.
-    let b = tack_bumpers::Bumper::new(
+    let b = stack_bumpers::Bumper::new(
         BumperConfig::default(),
-        [tack_bumpers::ParamSpec::required(
+        [stack_bumpers::ParamSpec::required(
             "s",
-            tack_bumpers::StringSpec::new(4, tack_bumpers::TrimPolicy::Trim)
+            stack_bumpers::StringSpec::new(4, stack_bumpers::TrimPolicy::Trim)
                 .unwrap()
                 .with_min_len(0)
                 .unwrap(),

@@ -12,9 +12,9 @@
 
 #![allow(clippy::unwrap_used, clippy::panic)] // test code: failures should abort the test
 
-use sstack_anc_harness::victim::{ct_validate, leaky_validate};
-use sstack_anc_harness::{measure_pair, Class, MeasureConfig, Report, SplitMix64, T_THRESHOLD};
-use sstack_anc_pipeline::{PipelineConfig, PipelineGate, TokenSecret, Validator, TOKEN_LEN};
+use stack_anc_harness::victim::{ct_validate, leaky_validate};
+use stack_anc_harness::{measure_pair, Class, MeasureConfig, Report, SplitMix64, T_THRESHOLD};
+use stack_anc_pipeline::{PipelineConfig, PipelineGate, TokenSecret, Validator, TOKEN_LEN};
 
 const PER_CLASS: usize = 20_000;
 

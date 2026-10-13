@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::panic)] // test code: failures should abort the test
 
 use proptest::prelude::*;
-use sstack_anc_harness::stats::{ks_two_sample, percentile, welch_slices, Welford};
+use stack_anc_harness::stats::{ks_two_sample, percentile, welch_slices, Welford};
 
 fn finite_vec() -> impl Strategy<Value = Vec<f64>> {
     prop::collection::vec(-1.0e6..1.0e6_f64, 2..200)

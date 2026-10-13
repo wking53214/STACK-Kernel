@@ -29,8 +29,8 @@
 //! # Quick use
 //!
 //! ```
-//! use sstack_anc_harness::{measure_pair, MeasureConfig, Class, T_THRESHOLD};
-//! use sstack_anc_harness::victim::{ct_validate, TOKEN_LEN};
+//! use stack_anc_harness::{measure_pair, MeasureConfig, Class, T_THRESHOLD};
+//! use stack_anc_harness::victim::{ct_validate, TOKEN_LEN};
 //!
 //! // Test fixture, not a real key or token.
 //! let secret = [0x42u8; TOKEN_LEN];

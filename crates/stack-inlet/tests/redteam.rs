@@ -628,7 +628,7 @@ fn integer_off_by_one_at_the_cap_holds() {
 #[test]
 fn resource_state_is_fixed_size() {
     let _g = serial();
-    let s = std::mem::size_of::<tack_inlet::Scanner>();
+    let s = std::mem::size_of::<stack_inlet::Scanner>();
     let v = std::mem::size_of::<Verdict>();
     println!("size_of Scanner = {s}, Verdict = {v}");
     assert!(s <= 512, "Scanner is {s} bytes");

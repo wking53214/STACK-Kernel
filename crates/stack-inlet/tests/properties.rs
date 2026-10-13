@@ -231,7 +231,7 @@ proptest! {
         let mut sc = inlet.scanner();
         let mut last = 0;
         for p in points.into_iter().chain(std::iter::once(bytes.len())) {
-            prop_assert_eq!(sc.feed(&bytes[last..p]), tack_inlet::Feed::Continue);
+            prop_assert_eq!(sc.feed(&bytes[last..p]), stack_inlet::Feed::Continue);
             last = p;
         }
         prop_assert_eq!(sc.finish(), whole);

@@ -10,9 +10,9 @@
 #![allow(clippy::unwrap_used)]
 
 use std::time::Duration;
-use sstack_anc_ceiling::{CeilingConfig, CeilingPad, SpinBudgetConfig, WaitMode};
-use sstack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
-use sstack_anc_harness::{measure_pair, Class, MeasureConfig, Report, T_THRESHOLD};
+use stack_anc_ceiling::{CeilingConfig, CeilingPad, SpinBudgetConfig, WaitMode};
+use stack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
+use stack_anc_harness::{measure_pair, Class, MeasureConfig, Report, T_THRESHOLD};
 
 /// Samples per class.
 const N_PER_CLASS: usize = 20_000;

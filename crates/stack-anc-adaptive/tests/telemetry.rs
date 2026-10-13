@@ -7,8 +7,8 @@ use common::{counter, find, gauge, ms, us, BackwardsOnce, Snap};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use std::sync::Barrier;
 use std::time::{Duration, Instant};
-use sstack_anc_adaptive::telemetry::{names, sha256_hex};
-use sstack_anc_adaptive::{
+use stack_anc_adaptive::telemetry::{names, sha256_hex};
+use stack_anc_adaptive::{
     AdaptivePad, EpochConfig, EpochQuantizedTarget, LeakBudgetConfig, NaiveConfig, PadConfig,
     SpinBudgetConfig, Trip, WaitMode, WindowStatistic,
 };

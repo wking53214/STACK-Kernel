@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use sstack_anc_ceiling::{
+use stack_anc_ceiling::{
     CeilingConfig, CeilingPad, GateOutcome, Resolution, SpinBudgetConfig, Trip, WaitMode,
 };
 

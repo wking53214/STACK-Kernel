@@ -445,13 +445,13 @@ fn a9_extreme_timeouts_fail_closed_without_panic() {
     let cfg = TransmissionConfig {
         max_in_flight: usize::MAX,
         max_waiting_engagers: usize::MAX,
-        max_engage_wait: tack_transmission::MAX_CONFIGURABLE_WAIT,
-        max_shift_timeout: tack_transmission::MAX_CONFIGURABLE_WAIT,
+        max_engage_wait: stack_transmission::MAX_CONFIGURABLE_WAIT,
+        max_shift_timeout: stack_transmission::MAX_CONFIGURABLE_WAIT,
     };
     let t = tx(cfg);
-    let g = t.engage(tack_transmission::MAX_CONFIGURABLE_WAIT).unwrap();
+    let g = t.engage(stack_transmission::MAX_CONFIGURABLE_WAIT).unwrap();
     drop(g);
-    t.shift(Mode::for_epoch(1), tack_transmission::MAX_CONFIGURABLE_WAIT).unwrap();
+    t.shift(Mode::for_epoch(1), stack_transmission::MAX_CONFIGURABLE_WAIT).unwrap();
 
     // Zero timeouts are legal and fail closed under the clutch.
     let t = tx(TransmissionConfig::default());

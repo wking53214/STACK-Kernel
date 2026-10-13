@@ -15,9 +15,9 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use sstack_anc_ceiling::config::{MAX_CEILING, MAX_INPUT_LEN_LIMIT};
-use sstack_anc_ceiling::telemetry::names;
-use sstack_anc_ceiling::{
+use stack_anc_ceiling::config::{MAX_CEILING, MAX_INPUT_LEN_LIMIT};
+use stack_anc_ceiling::telemetry::names;
+use stack_anc_ceiling::{
     bucket_offset, release_bucket, CeilingConfig, CeilingPad, Clock, GateOutcome,
     SpinBudgetConfig, Trip, WaitMode,
 };

@@ -262,7 +262,7 @@
 //!
 //! ```
 //! use std::time::Duration;
-//! use sstack_anc_adaptive::{AdaptivePad, EpochConfig, PadConfig};
+//! use stack_anc_adaptive::{AdaptivePad, EpochConfig, PadConfig};
 //!
 //! let us = Duration::from_micros;
 //! let pad = AdaptivePad::epoch(PadConfig::default(), EpochConfig::new(us(100), us(1_600)))?;

@@ -4,9 +4,9 @@
 #![allow(clippy::unwrap_used, clippy::panic)] // test code: failures should abort the test
 
 use proptest::prelude::*;
-use sstack_anc_harness::victim::{ct_validate, leaky_validate};
-use sstack_anc_pipeline::naive::balanced_dummy_no_black_box;
-use sstack_anc_pipeline::{
+use stack_anc_harness::victim::{ct_validate, leaky_validate};
+use stack_anc_pipeline::naive::balanced_dummy_no_black_box;
+use stack_anc_pipeline::{
     balanced_dummy, constant_time, early_exit, Accepted, PipelineConfig, PipelineGate, TokenSecret,
     Trip, Validator, TOKEN_LEN,
 };

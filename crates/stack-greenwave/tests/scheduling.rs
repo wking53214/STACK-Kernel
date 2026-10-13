@@ -295,7 +295,7 @@ trait NowForTest {
 }
 impl NowForTest for ManualClock {
     fn now_for_test(&self) -> u64 {
-        tack_greenwave::Clock::now(self)
+        stack_greenwave::Clock::now(self)
     }
 }
 

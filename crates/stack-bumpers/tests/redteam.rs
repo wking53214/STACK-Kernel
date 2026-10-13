@@ -835,9 +835,9 @@ fn redteam_enum_fold_is_ascii_only() {
         BumperConfig::default(),
         [ParamSpec::required(
             "mode",
-            tack_bumpers::EnumSpec::new([
-                tack_bumpers::VariantSpec::new("kill"),
-                tack_bumpers::VariantSpec::new("strasse"),
+            stack_bumpers::EnumSpec::new([
+                stack_bumpers::VariantSpec::new("kill"),
+                stack_bumpers::VariantSpec::new("strasse"),
             ])
             .unwrap(),
         )],

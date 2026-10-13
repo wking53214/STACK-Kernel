@@ -7,8 +7,8 @@ use common::{wait_for, BackwardsOnce};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use std::sync::mpsc;
 use std::time::Duration;
-use sstack_anc_ceiling::telemetry::{names, sha256_hex, STRATEGY};
-use sstack_anc_ceiling::{CeilingConfig, CeilingPad, SpinBudgetConfig, Trip, WaitMode};
+use stack_anc_ceiling::telemetry::{names, sha256_hex, STRATEGY};
+use stack_anc_ceiling::{CeilingConfig, CeilingPad, SpinBudgetConfig, Trip, WaitMode};
 
 type Snap = Vec<(
     metrics_util::CompositeKey,

@@ -160,7 +160,7 @@ fn labels_are_closed_enums_and_names_follow_convention() {
         }
     });
     let outcomes = ["pass", "retry", "terminal_breach"];
-    let reasons: Vec<&str> = tack_inlet::Reason::ALL
+    let reasons: Vec<&str> = stack_inlet::Reason::ALL
         .iter()
         .map(|r| r.as_str())
         .chain(std::iter::once("none"))
