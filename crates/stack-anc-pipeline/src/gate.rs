@@ -111,6 +111,9 @@ impl TokenSecret {
         if bool::from(arr.ct_eq(&[0u8; TOKEN_LEN])) {
             return Err(ConfigError::SecretAllZero);
         }
+        if bool::from(arr.ct_eq(&[0xFFu8; TOKEN_LEN])) {
+            return Err(ConfigError::SecretAllOnes);
+        }
         Ok(Self(arr))
     }
 
@@ -154,7 +157,7 @@ impl PipelineGate {
     /// validator without `allow_leaky_validators`.
     pub fn new(secret: TokenSecret, config: PipelineConfig) -> Result<Self, ConfigError> {
         config.validate()?;
-        telemetry::emit_leaky_active(config.validator);
+        telemetry::sync_leaky_active(config.validator);
         Ok(Self {
             secret,
             config,
@@ -214,6 +217,7 @@ impl PipelineGate {
         span.record("outcome", ev.outcome.as_str());
         span.record("reason", ev.trip.map_or("none", Trip::label));
         telemetry::emit(&ev);
+        telemetry::sync_leaky_active(self.config.validator);
         telemetry::log_input(candidate, &ev);
         result
     }

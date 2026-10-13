@@ -45,14 +45,19 @@ fn logs_carry_length_and_full_digest_never_raw_input() {
         .with_ansi(false)
         .with_writer(move || writer.clone())
         .finish();
+    // FIXTURE is the secret itself (it PASSes), and a PASS must not be digested.
+    // Check the digest of a wrong guess instead.
+    let mut wrong = *FIXTURE;
+    wrong[0] ^= 0x01;
     let oversized = [b'Q'; 100];
     tracing::subscriber::with_default(subscriber, || {
         let g = gate(Validator::ConstantTime, true);
         let _ = g.check(FIXTURE);
         let _ = g.check(&oversized);
+        let _ = g.check(&wrong);
     });
     let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-    let digest = sha256_hex(FIXTURE);
+    let digest = sha256_hex(&wrong);
     assert_eq!(digest.len(), 64);
     assert!(text.contains(&digest), "full digest logged: {text}");
     assert!(text.contains("input_len=32"), "{text}");
