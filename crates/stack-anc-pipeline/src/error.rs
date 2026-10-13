@@ -23,4 +23,7 @@ pub enum ConfigError {
     /// The secret is all zeros, the usual shape of an unset default.
     #[error("secret is all zeros")]
     SecretAllZero,
+    /// The secret is all 0xFF, the usual shape of erased flash or a `!0` filler.
+    #[error("secret is all 0xFF")]
+    SecretAllOnes,
 }

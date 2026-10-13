@@ -97,15 +97,41 @@ pub(crate) fn emit(ev: &Event) {
     }
 }
 
-pub(crate) fn emit_leaky_active(validator: Validator) {
-    if validator.is_leaky() {
+/// Make the leaky-validator gauge describe the gate in use: 1 for its own
+/// leaky label, 0 for every other leaky label. A non-leaky gate therefore
+/// clears a stale 1. With two leaky gates alive at once, the gauge follows
+/// whichever ran last.
+pub(crate) fn sync_leaky_active(current: Validator) {
+    // 0 = no leaky gate was last in use; otherwise the code of that validator.
+    let new = match current {
+        Validator::EarlyExit => 1,
+        Validator::BalancedDummy => 2,
+        Validator::ConstantTime => 0,
+    };
+    let old = LEAKY_IN_USE.with(|c| c.replace(new));
+    let set = |code: u8, value: f64| {
+        let v = if code == 1 { Validator::EarlyExit } else { Validator::BalancedDummy };
         metrics::gauge!(
             names::LEAKY_VALIDATOR_ACTIVE,
             "strategy" => STRATEGY,
-            "validator" => validator.label()
+            "validator" => v.label()
         )
-        .set(1.0);
+        .set(value);
+    };
+    if old != 0 && old != new {
+        set(old, 0.0);
     }
+    if new != 0 {
+        set(new, 1.0);
+    }
+}
+
+thread_local! {
+    /// Which leaky validator the last gate used on this thread was built with
+    /// (0 = none). Per thread, so a constant-time gate on one thread never
+    /// clears a gauge set by a leaky gate on another. Only leaky gates set it,
+    /// so a constant-time-only thread never emits the gauge at all.
+    static LEAKY_IN_USE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
 /// Full lowercase SHA-256 hex of `input` (64 characters, never truncated).
@@ -113,19 +139,27 @@ pub fn sha256_hex(input: &[u8]) -> String {
     hex::encode(Sha256::digest(input))
 }
 
-/// Debug log of one request. Length always; digest only when the input was
-/// within the length cap. The digest is computed only when debug logging
-/// is enabled, and SHA-256 of a 32-byte input costs the same for every
-/// value, so enabling it adds a constant, not a class-dependent, cost.
+/// Debug log of one request: the length, the validator, the outcome and the
+/// reason. The digest of a non-matching input is logged. A PASS is never
+/// digested: a PASS means the input is the secret, and an unkeyed SHA-256 of
+/// a low-entropy secret can be guessed offline.
 pub(crate) fn log_input(input: &[u8], ev: &Event) {
     if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
     let reason = ev.trip.map_or("none", Trip::label);
-    if input.len() <= TOKEN_LEN {
+    if input.len() <= TOKEN_LEN && ev.outcome != GateOutcome::Pass {
         tracing::debug!(
             input_len = input.len(),
             input_sha256 = %sha256_hex(input),
+            validator = ev.validator.label(),
+            outcome = ev.outcome.as_str(),
+            reason,
+            "pipeline check"
+        );
+    } else if input.len() <= TOKEN_LEN {
+        tracing::debug!(
+            input_len = input.len(),
             validator = ev.validator.label(),
             outcome = ev.outcome.as_str(),
             reason,
