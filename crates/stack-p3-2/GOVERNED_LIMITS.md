@@ -41,3 +41,10 @@ and the summary reports `canary_tasks` and `canary_deadline_traps`, which the re
 `TrapBridge.observe_transactions`. The share and `D0` come from the governance side
 (`TrapBridge.canary_plan`), one call per agent per slice. A kernel that runs the loop in production
 needs the same two things: run the asked-for share on the original deadline, and report both counts.
+
+With `--canary-key K` the canary tasks are chosen by a keyed hash (64-bit FNV-1a over `K|agent|seq`,
+membership when the hash is a multiple of `round(1/S)`) rather than by sequence number. Without a key
+an agent that knows the rule can complete exactly the canaries and hang the rest, which makes a correct
+tightening read as harmful and asks a person to undo it (T16 in the governance threat model; shown in
+`experimental/docs/TRACE_TEST_PLAN.md`, round 8). The key must not be readable by the agent, and the
+kernel must not reveal to a task which deadline it is running under.
