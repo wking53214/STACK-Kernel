@@ -14,10 +14,15 @@
 // of the governed one, its trap events carry "canary": true, and the summary reports canary_tasks and
 // canary_deadline_traps. The governance side compares the two groups to judge the tightening.
 //
+// With --canary-key K the canary tasks are chosen by a keyed hash (64-bit FNV-1a over the UTF-8 bytes
+// of "K|agent|seq", a multiple of round(1/S)) instead of by sequence number, so an agent that knows
+// the rule cannot complete exactly the canaries and hang the rest (T16 in the governance threat model).
+// The Python model uses the same hash.
+//
 // usage: governed_workload --agent NAME --round N --tasks N --default-ns N
 //          ( --profile healthy|runaway|slowed|regressed --seed N | --csv FILE )
 //          [--tokens-cap N --memory-cap N] [--ttl-s N] ( --port P [--token T] | --static )
-//          [--canary-share S --canary-ns D0]
+//          [--canary-share S --canary-ns D0 [--canary-key K]]
 
 use stack_p3_2::governed_limits::HttpSource;
 use stack_p3_2::{ContextLocal, GovernedLimits, HardPreemptionKernel, LimitKind, P32Config, TrapEvent};
@@ -35,6 +40,23 @@ impl Rng {
     fn normal(&mut self) -> f64 {
         let (u, v) = (self.next().max(1e-12), self.next());
         (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
+    }
+}
+
+/// 64-bit FNV-1a; must match `fnv1a64` in experimental/experiments/stack_trace_sim.py.
+fn fnv1a64(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in data {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn is_canary_task(agent: &str, seq: u64, every: u64, key: Option<&str>) -> bool {
+    match key {
+        None => seq % every == 0,
+        Some(k) => fnv1a64(format!("{k}|{agent}|{seq}").as_bytes()) % every == 0,
     }
 }
 
@@ -130,6 +152,9 @@ fn main() {
     };
     let canary_ns = num("canary-ns", 0);
     if (canary_every > 0) != (canary_ns > 0) { panic!("--canary-share and --canary-ns go together"); }
+    let canary_key = m.get("canary-key").cloned();
+    debug_assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
+    debug_assert_eq!(fnv1a64(b"k-7f3a|agent-1|42"), 0xca8a5faaefe020a3);   // Python reference
 
     let tasks = match m.get("csv") {
         Some(path) => csv_tasks(path, &agent, round * n, (round + 1) * n),
@@ -164,7 +189,8 @@ fn main() {
         let mem_budget = eff(LimitKind::MemoryCapacityBytes, memory_cap);
         (budget_last, tokens_last, memory_last) = (governed, tok_budget, mem_budget);
         // The canary runs on the original deadline only while the governed one is tighter.
-        let is_canary = canary_every > 0 && governed < canary_ns && t.seq % canary_every == 0;
+        let is_canary = canary_every > 0 && governed < canary_ns
+            && is_canary_task(&agent, t.seq, canary_every, canary_key.as_deref());
         let budget = if is_canary { canary_ns } else { governed };
         if is_canary { canary_tasks += 1; }
         let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
