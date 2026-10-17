@@ -574,12 +574,30 @@ fn attack_one_slow_request_per_epoch_pins_cap() {
 // Attack 11. Naive late release: the raw work time is the response time.
 // ---------------------------------------------------------------------------
 
-/// The naive controller is reachable through the public constructor
-/// `AdaptivePad::naive` with no opt-in, and its late release puts the raw,
-/// secret-dependent work time on the wire. Documented as a leak kept for
-/// measurement. SAFE: a late naive release is not the raw work time.
+/// The naive controller used to be reachable through the public constructor
+/// `AdaptivePad::naive` with no opt-in. SAFE: building one is refused unless
+/// `allow_naive_controller` is set, and the refusal names that field.
 #[test]
-fn attack_naive_late_release_is_raw_work_time() {
+fn attack_naive_constructor_requires_opt_in() {
+    let refused = AdaptivePad::naive(PadConfig::default(), NaiveConfig::new(us(300)));
+    match refused {
+        Err(e) => assert_eq!(e.field, "allow_naive_controller", "{e}"),
+        Ok(_) => panic!("the naive controller was built with no opt-in"),
+    }
+    let opted_in = PadConfig {
+        allow_naive_controller: true,
+        ..PadConfig::default()
+    };
+    assert!(AdaptivePad::naive(opted_in, NaiveConfig::new(us(300))).is_ok());
+}
+
+/// Documents a leak kept for measurement: a late naive release is the raw,
+/// secret-dependent work time. The naive controller is not safe and is not
+/// meant to be, so this asserts the leak is still there. If it ever stops
+/// failing the "safe" reading, the leak measurements in the verify example
+/// no longer measure the design the brief proposed.
+#[test]
+fn naive_late_release_is_raw_work_time_by_design() {
     let s = Snapshot {
         target: us(100),
         cap: us(1_000),
@@ -589,8 +607,8 @@ fn attack_naive_late_release_is_raw_work_time() {
     let b = s.plan(us(456));
     println!("naive plans: {a:?} {b:?}");
     assert!(
-        a.release() == b.release(),
-        "naive late releases equal the raw work times {:?} and {:?}",
+        a.release() != b.release(),
+        "naive late releases should still differ with the work time, got {:?} and {:?}",
         a.release(),
         b.release()
     );
@@ -725,7 +743,7 @@ fn held_metric_labels_are_closed_set() {
                 }
             });
         }
-        let naive = AdaptivePad::naive(PadConfig::default(), NaiveConfig::new(us(300))).unwrap();
+        let naive = AdaptivePad::naive(PadConfig { allow_naive_controller: true, ..PadConfig::default() }, NaiveConfig::new(us(300))).unwrap();
         for _ in 0..5 {
             let _ = naive.pad_input(b"x\ny=z", |_| ());
         }

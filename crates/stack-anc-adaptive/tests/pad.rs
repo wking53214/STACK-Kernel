@@ -176,7 +176,7 @@ fn config_bounds_are_rejected_not_clamped() {
     ];
     for c in bad_naive {
         assert!(c.validate().is_err(), "{c:?}");
-        assert!(AdaptivePad::naive(PadConfig::default(), c).is_err());
+        assert!(AdaptivePad::naive(PadConfig { allow_naive_controller: true, ..PadConfig::default() }, c).is_err());
     }
 }
 

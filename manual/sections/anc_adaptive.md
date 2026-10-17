@@ -362,6 +362,6 @@ Cargo stops at the first failing target, so `tests/telemetry.rs` ran only in the
 - **Reply content.** A RETRY reply differs from a value. Every trip is counted, but an overrun RETRY is influenced by the secret like an escalation.
 - **Panic output.** A caught panic is released on schedule, but the panic hook prints at the moment of the panic, inside the wait. With `panic = "abort"` there is nothing to catch.
 - **Availability (open finding).** One request per epoch with work near the cap holds every request at the cap. Shedding does not give honest clients a fair share.
-- **A reachable naive controller.** `AdaptivePad::naive` carries a "never select it in a deployment profile" warning, but nothing enforces it (open finding).
+- **A reachable naive controller.** `AdaptivePad::naive` is now refused unless `PadConfig::allow_naive_controller` is set, so a deployment cannot pick it by accident. It is still public, because tests and the verify example measure it. Its late release is still the raw work time, by design.
 - **One machine.** The numbers come from one KVM guest pinned to one CPU and shared with other agents. Each production host and CI runner needs its own calibrated runs.
 - **The threat model.** The bound assumes the attacker sees only reply contents and times. Attackers with code on the same physical core, who can watch caches, are out of scope, as is anyone who can read the metrics endpoint.

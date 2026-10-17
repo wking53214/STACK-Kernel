@@ -74,7 +74,16 @@ impl AdaptivePad<NaiveRollingTarget, MonotonicClock> {
     /// completion, so its response time is its raw, secret-dependent work
     /// time. Never select it in a deployment profile; use
     /// [`AdaptivePad::epoch`].
+    ///
+    /// Refused unless `pad.allow_naive_controller` is set, so a deployment
+    /// cannot pick it by accident.
     pub fn naive(pad: PadConfig, naive: NaiveConfig) -> Result<Self, ConfigError> {
+        if !pad.allow_naive_controller {
+            return Err(ConfigError {
+                field: "allow_naive_controller",
+                reason: "the naive controller leaks the raw work time; set allow_naive_controller only to measure it",
+            });
+        }
         Self::with_parts(pad, NaiveRollingTarget::new(naive)?, MonotonicClock)
     }
 }
