@@ -301,7 +301,7 @@ groups:
           summary: "A replaced configuration panicked in Drop during a shift. The shift completed; the configuration type has a bug."
 ```
 
-**Timing side channels.** ANC, the kernel's Active Timing Cancellation, pads responses so their timing reveals nothing. This component leaves three channels for ANC to cover, and does not close them itself.
+**Timing side channels.** ANC, the kernel's Active Timing Cancellation, pads responses so that their timing reveals less. It cannot bring the leak to zero, as the ANC analysis explains. This component leaves three channels for ANC to cover, and does not close them itself.
 
 - **The clutch window is visible.** While a shift drains, `engage()` blocks. A timer can therefore tell that a mode change, such as a key rotation, is under way. Padding must cover `max_engage_wait`, or treat a RETRY as a response to pad.
 - **Refusals are fast.** They reveal load and halt state to a timer, though not secrets.

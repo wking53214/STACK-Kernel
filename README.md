@@ -33,7 +33,7 @@ C++ headers (kernel layers 1-6) in `cpp/include/`:
 
 `manual/sections/` holds the manual's sections as markdown. `manual/measurements/`
 holds the raw timing runs the ANC sections quote. `manual/review/` holds the
-final reviewer's findings, all of which were applied to the manual.
+final reviewer's findings. Not all of them are applied to the manual yet.
 
 ## Build and test
 
@@ -44,6 +44,8 @@ Rust 1.94 was used. Dependencies are limited to the workspace list in
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets --no-fail-fast
 ```
+
+The ANC red-team tests are timing-sensitive. On a loaded machine a run can fail one or two of them, for example `attack_one_slow_request_per_epoch_pins_cap`. Rerun before treating a failure as a regression. The Summary section lists the open ANC limits.
 
 Timing measurements need release builds on a quiet machine:
 
