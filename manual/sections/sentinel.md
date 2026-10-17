@@ -1,6 +1,6 @@
 ## 7. Sentinel Hash-Chain
 
-Edits to hashed fields, deleted rows and cut tails in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in all 211 cases.
+Edits to hashed fields, deleted rows, and tails cut past the latest anchor in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in all 211 cases.
 
 *Exists today in sentinel_os. The Rust verifier, stack-sentinel, is a new design: reference implementation compiled and tested on Rust 1.94*
 
@@ -10,7 +10,7 @@ Picture a factory logbook where every page carries a tamper seal, and each seal 
 
 That photo is the head anchor. Without it, someone could cut off the last few pages and reseal the rest, and the shorter book would look perfect. With it, the auditor sees that pages are missing.
 
-The goal is persistent memory whose every alteration, reordering or truncation can be detected offline. Offline means by an auditor who does not trust the running system and never connects to it. The auditor needs an exported copy of the ledger, the anchor file and the signing key.
+The goal is persistent memory whose every alteration, reordering or truncation can be detected offline. Today's ledger falls short in three known ways, listed under Red-team results: unhashed columns, holders of the service key, and stale anchors. Offline means by an auditor who does not trust the running system and never connects to it. The auditor needs an exported copy of the ledger, the anchor file and the signing key.
 
 | Term | Plain meaning |
 |---|---|

@@ -153,7 +153,7 @@ This excerpt of `Thread::record` (src/thread.rs) shows three cases: a known stat
 **When the map is full, the Thread degrades instead of growing.** Two fixed-size detectors take over, and memory stays constant at the cost of some precision. The `stack_minotaur_degraded_total` counter fires once for that walk.
 
 - Brent's algorithm finds a cycle by comparing each new step against one saved step, called the tortoise. This streaming version (src/brent.rs) finds any strictly repeating cycle up to 256 steps long.
-- The recent-state table (src/recent.rs) holds up to 256 states the full map could not hold, the smaller of `max_cycle_period` and `max_distinct_states`. It keeps exact visit counts and applies the same loop rule as the map.
+- The recent-state table (src/recent.rs) holds up to 256 of the states the full map could not hold (its size is the smaller of `max_cycle_period` and `max_distinct_states`. It keeps exact visit counts and applies the same loop rule as the map.
 
 Eviction follows the CLOCK rule. A hand sweeps the slots, sparing entries revisited since its last pass, and evicts the first entry that was not revisited.
 
@@ -214,7 +214,7 @@ RETRY means the caller may resubmit with a correction; TERMINAL_BREACH means abo
 | `LoopDetected { period, detector: Exact }`: a mapped state visited more than 1 + `revisit_allowance` times | RETRY | Rollback | The walk is not making progress, but a different next step can. |
 | `LoopDetected` with detector `Brent` or `Recent`: the same rule once the map is full | RETRY | Rollback | It is the map's rule, applied with fixed memory. |
 | `StateSpaceExhausted { tracked, limit }`: more than `max_untracked_transitions` steps onto states the full map cannot hold | RETRY | Rollback | A narrower search can succeed. It also catches long cycles and long revisit gaps that the detectors miss. |
-| Any trip that brings the trip count to `max_trips_before_halt` | TERMINAL_BREACH | Rollback, then halt until `operator_reset` | A caller that keeps tripping is itself looping, so no correction from it will help. The Trip keeps its original kind. |
+| Any trip that brings the trip count to `max_trips_before_halt` | TERMINAL_BREACH | Halt until operator_reset (the walk is rewound to the anchor first, so nothing is left half-done) `operator_reset` | A caller that keeps tripping is itself looping, so no correction from it will help. The Trip keeps its original kind. |
 | `LifetimeBudgetExhausted { limit }`: a transition arrives after `max_steps` times `max_trips_before_halt` were already accepted | TERMINAL_BREACH | Rollback, then halt | It bounds a caller that replays walks and rewinds just before each per-walk cap. |
 | `Halted`: any call while the Thread is halted | TERMINAL_BREACH | Halt: nothing changes, the path is empty, and no rollback is counted | Fail closed until an operator acts. It logs at debug only, so a stream of refused calls cannot flood the log. |
 | `StaleGuard`: a call through a guard issued before the last rewind | RETRY | Reject: nothing changes, and it does not count toward the halt | The caller must unwind to the root and resubmit from there. |
