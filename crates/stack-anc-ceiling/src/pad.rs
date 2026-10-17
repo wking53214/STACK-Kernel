@@ -28,7 +28,7 @@ use crate::budget::SpinBudget;
 use crate::clock::{Clock, MonotonicClock};
 use crate::config::{CeilingConfig, ConfigError, WaitMode, ASYNC_TIMER_SLACK};
 use crate::outcome::{GateOutcome, PadResult, Padded, ReleaseInfo, Trip};
-use crate::slots::{Permit, Slots};
+use crate::slots::{Permit, Slots, Step};
 use crate::telemetry::{self, Event};
 use crate::wait::{self, bucket_offset, release_bucket, ClockFault};
 use std::future::Future;
@@ -124,7 +124,7 @@ impl<C: Clock> CeilingPad<C> {
             reason: "ceiling times buckets overflows",
         })?;
         Ok(Self {
-            slots: Slots::new(config.max_concurrent, hold),
+            slots: Slots::new(config.max_concurrent, hold, &config.scaling, now),
             budget: SpinBudget::new(config.spin_budget, now),
             halted: AtomicBool::new(false),
             config,
@@ -137,9 +137,17 @@ impl<C: Clock> CeilingPad<C> {
         &self.config
     }
 
-    /// Requests currently holding a concurrency slot.
+    /// Requests admitted and not yet returned. A finished request frees its
+    /// concurrency slot only when its fixed hold time (the hard ceiling) is
+    /// over, so this is not the number of busy slots.
     pub fn in_flight(&self) -> usize {
         self.slots.in_use()
+    }
+
+    /// Concurrency slots open right now: `max_concurrent` up to
+    /// `scaling.max_slots`, moved only by public arrival counts.
+    pub fn slots_open(&self) -> usize {
+        self.slots.open()
     }
 
     /// True after a clock failure, until [`CeilingPad::reset`].
@@ -247,19 +255,31 @@ impl<C: Clock> CeilingPad<C> {
     }
 
     /// Step 2 of the module docs. `start` is already taken.
+    ///
+    /// `Ok(None)` means every slot is held but the spillway has room: wait
+    /// `spillway_wait` and call again with `after_spill`.
     fn admit(
         &self,
         start: Instant,
         input_len: Option<usize>,
         async_api: bool,
-    ) -> Result<Admitted<'_>, Trip> {
+        after_spill: bool,
+    ) -> Result<Option<Admitted<'_>>, Trip> {
         if self.is_halted() {
             return Err(Trip::Halted);
         }
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire(start).ok_or(Trip::SlotsFull)?;
+        let permit = if after_spill {
+            self.slots.retry(start).ok_or(Trip::SlotsFull)?
+        } else {
+            match self.slots.enter(start) {
+                Step::In(p) => p,
+                Step::Spill => return Ok(None),
+                Step::Shed => return Err(Trip::SlotsFull),
+            }
+        };
         let charge = if async_api {
             self.config.async_spin_charge()
         } else {
@@ -270,12 +290,45 @@ impl<C: Clock> CeilingPad<C> {
         } else {
             (WaitMode::Sleep, Duration::ZERO, Some(self.config.mode))
         };
-        Ok(Admitted {
+        Ok(Some(Admitted {
             _permit: permit,
             mode,
             reserved,
             fallback_from,
-        })
+        }))
+    }
+
+    /// Admit, waiting in the spillway first if need be. Returns the
+    /// admission and the instant the padded window starts from.
+    fn admit_blocking(
+        &self,
+        first: Instant,
+        input_len: Option<usize>,
+    ) -> Result<(Admitted<'_>, Instant), Trip> {
+        if let Some(a) = self.admit(first, input_len, false, false)? {
+            return Ok((a, first));
+        }
+        std::thread::sleep(self.slots.spill_wait());
+        let start = self.clock.now();
+        self.admit(start, input_len, false, true)?
+            .map(|a| (a, start))
+            .ok_or(Trip::SlotsFull)
+    }
+
+    /// As [`CeilingPad::admit_blocking`], waiting on the async timer.
+    async fn admit_async(
+        &self,
+        first: Instant,
+        input_len: Option<usize>,
+    ) -> Result<(Admitted<'_>, Instant), Trip> {
+        if let Some(a) = self.admit(first, input_len, true, false)? {
+            return Ok((a, first));
+        }
+        tokio::time::sleep(self.slots.spill_wait()).await;
+        let start = self.clock.now();
+        self.admit(start, input_len, true, true)?
+            .map(|a| (a, start))
+            .ok_or(Trip::SlotsFull)
     }
 
     /// Step 4: the release target, its bucket, and whether it is within
@@ -301,10 +354,10 @@ impl<C: Clock> CeilingPad<C> {
         input_len: Option<usize>,
         op: impl FnOnce() -> T,
     ) -> (PadResult<T>, Event) {
-        let start = self.clock.now();
-        let adm = match self.admit(start, input_len, false) {
+        let first = self.clock.now();
+        let (adm, start) = match self.admit_blocking(first, input_len) {
             Ok(a) => a,
-            Err(trip) => return (Err(trip), self.early(start, trip)),
+            Err(trip) => return (Err(trip), self.early(first, trip)),
         };
         let value = op();
         let completion = self.clock.now();
@@ -388,7 +441,7 @@ impl<C: Clock> CeilingPad<C> {
             let trip = Trip::TimerUnavailable;
             return (Err(trip), self.early(start, trip));
         }
-        let adm = match self.admit(start, input_len, true) {
+        let (adm, start) = match self.admit_async(start, input_len).await {
             Ok(a) => a,
             Err(trip) => return (Err(trip), self.early(start, trip)),
         };

@@ -149,6 +149,116 @@ impl Default for SpinBudgetConfig {
     }
 }
 
+/// Shortest accepted slot-scaling window.
+pub const MIN_REACTION_DELAY: Duration = Duration::from_millis(1);
+/// Longest accepted slot-scaling window.
+pub const MAX_REACTION_DELAY: Duration = Duration::from_secs(3_600);
+/// Longest accepted spillway wait.
+pub const MAX_SPILLWAY_WAIT: Duration = Duration::from_secs(10);
+/// Default slot-scaling window.
+pub const DEFAULT_REACTION_DELAY: Duration = Duration::from_secs(1);
+/// Default quiet windows in a row before slots close again.
+pub const DEFAULT_COOLDOWN_WINDOWS: u32 = 10;
+
+/// Extra slots that open on backlog, and a small waiting area.
+///
+/// Both are off by default, so a pad behaves as before until an operator
+/// turns them on. Neither looks at how long any request took: they use only
+/// when requests arrived, which the sender already controls and sees.
+///
+/// * **More slots.** With `max_slots` above `max_concurrent`, the pad opens
+///   `step` more slots after any window of `reaction_delay` in which an
+///   arrival found every open slot held, and closes `step` after
+///   `cooldown_windows` quiet windows in a row. It never goes below
+///   `max_concurrent` or above `max_slots`.
+/// * **Spillway.** With `spillway_size` above zero, up to that many
+///   arrivals that find every slot held wait exactly `spillway_wait` and
+///   try once more. The wait is the same for every request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotScaling {
+    /// Most slots that may be open. `0` means the same as
+    /// `max_concurrent`: no scaling. Otherwise at least `max_concurrent`
+    /// and at most [`MAX_CONCURRENT_LIMIT`].
+    pub max_slots: usize,
+    /// Slots opened or closed at a time. Default 1. Bounds: 1 ..=
+    /// [`MAX_CONCURRENT_LIMIT`].
+    pub step: usize,
+    /// Window length, and so the shortest time between changes. Default
+    /// [`DEFAULT_REACTION_DELAY`]. Bounds: [`MIN_REACTION_DELAY`] ..=
+    /// [`MAX_REACTION_DELAY`].
+    pub reaction_delay: Duration,
+    /// Quiet windows in a row before `step` slots close. Default
+    /// [`DEFAULT_COOLDOWN_WINDOWS`]. At least 1.
+    pub cooldown_windows: u32,
+    /// Places in the waiting area. Default 0 (no spillway). Bounds: 0 ..=
+    /// [`MAX_CONCURRENT_LIMIT`].
+    pub spillway_size: usize,
+    /// The fixed wait. Default zero. Required positive, and at most
+    /// [`MAX_SPILLWAY_WAIT`], when `spillway_size` is above zero.
+    pub spillway_wait: Duration,
+}
+
+impl Default for SlotScaling {
+    fn default() -> Self {
+        Self {
+            max_slots: 0,
+            step: 1,
+            reaction_delay: DEFAULT_REACTION_DELAY,
+            cooldown_windows: DEFAULT_COOLDOWN_WINDOWS,
+            spillway_size: 0,
+            spillway_wait: Duration::ZERO,
+        }
+    }
+}
+
+impl SlotScaling {
+    /// The most slots that can be open for a pad with `base` slots.
+    pub fn effective_max(&self, base: usize) -> usize {
+        if self.max_slots == 0 {
+            base
+        } else {
+            self.max_slots
+        }
+    }
+
+    /// Check every bound against the pad's `max_concurrent`.
+    pub fn validate(&self, base: usize) -> Result<(), ConfigError> {
+        let err = |field, reason| Err(ConfigError { field, reason });
+        if self.max_slots != 0 {
+            if self.max_slots < base {
+                return err("scaling.max_slots", "below max_concurrent");
+            }
+            if self.max_slots > MAX_CONCURRENT_LIMIT {
+                return err("scaling.max_slots", "above MAX_CONCURRENT_LIMIT");
+            }
+            if self.step == 0 || self.step > MAX_CONCURRENT_LIMIT {
+                return err("scaling.step", "must be 1 ..= MAX_CONCURRENT_LIMIT");
+            }
+            if self.reaction_delay < MIN_REACTION_DELAY {
+                return err("scaling.reaction_delay", "below MIN_REACTION_DELAY");
+            }
+            if self.reaction_delay > MAX_REACTION_DELAY {
+                return err("scaling.reaction_delay", "above MAX_REACTION_DELAY");
+            }
+            if self.cooldown_windows == 0 {
+                return err("scaling.cooldown_windows", "must be at least 1");
+            }
+        }
+        if self.spillway_size > MAX_CONCURRENT_LIMIT {
+            return err("scaling.spillway_size", "above MAX_CONCURRENT_LIMIT");
+        }
+        if self.spillway_size > 0 {
+            if self.spillway_wait.is_zero() {
+                return err("scaling.spillway_wait", "must be positive with a spillway");
+            }
+            if self.spillway_wait > MAX_SPILLWAY_WAIT {
+                return err("scaling.spillway_wait", "above MAX_SPILLWAY_WAIT");
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Padding mechanics shared by both controllers: how to wait, and the
 /// admission limits. No field can be influenced by a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +289,9 @@ pub struct PadConfig {
     /// leak, never for deployment, so building one is refused unless this is
     /// set on purpose.
     pub allow_naive_controller: bool,
+    /// Extra slots that open on backlog, and the spillway. Default: both
+    /// off. See [`SlotScaling`].
+    pub scaling: SlotScaling,
 }
 
 impl Default for PadConfig {
@@ -190,6 +303,7 @@ impl Default for PadConfig {
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             max_input_len: DEFAULT_MAX_INPUT_LEN,
             allow_naive_controller: false,
+            scaling: SlotScaling::default(),
         }
     }
 }
@@ -218,6 +332,7 @@ impl PadConfig {
         if self.max_input_len > MAX_INPUT_LEN_LIMIT {
             return bad("max_input_len", "above MAX_INPUT_LEN_LIMIT");
         }
+        self.scaling.validate(self.max_concurrent)?;
         if let SpinBudgetConfig::Limited {
             cpu_per_second,
             burst,

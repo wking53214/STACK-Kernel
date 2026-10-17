@@ -32,7 +32,7 @@ use crate::controller::{ControllerKind, ControllerStatus, Plan, TargetController
 use crate::outcome::{
     ControllerTrip, Disposition, GateOutcome, PadResult, Padded, ReleaseInfo, Trip,
 };
-use crate::slots::{Permit, Slots};
+use crate::slots::{Permit, Slots, Step};
 use crate::telemetry::{self, Event, OverrunKind};
 use crate::wait::{self, ClockFault};
 use std::any::Any;
@@ -130,7 +130,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         let kind = controller.kind();
         telemetry::emit_status(&status);
         Ok(Self {
-            slots: Slots::new(config.max_concurrent, status.cap),
+            slots: Slots::new(config.max_concurrent, status.cap, &config.scaling, now),
             budget: SpinBudget::new(config.spin_budget, now),
             controller: Mutex::new(controller),
             kind,
@@ -155,6 +155,12 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
     /// is over, so this is not the number of busy slots.
     pub fn in_flight(&self) -> usize {
         self.slots.in_use()
+    }
+
+    /// Concurrency slots open right now: `max_concurrent` up to
+    /// `scaling.max_slots`, moved only by public arrival counts.
+    pub fn slots_open(&self) -> usize {
+        self.slots.open()
     }
 
     /// True after a clock failure, until [`AdaptivePad::reset`].
@@ -254,34 +260,66 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         self.controller.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn admit(&self, start: Instant, input_len: Option<usize>) -> Result<Admitted<'_>, Trip> {
+    /// `Ok(None)` means every slot is held but the spillway has room: wait
+    /// `spillway_wait` and call again with `after_spill`.
+    fn admit(
+        &self,
+        start: Instant,
+        input_len: Option<usize>,
+        after_spill: bool,
+    ) -> Result<Option<Admitted<'_>>, Trip> {
         if self.is_halted() {
             return Err(Trip::Halted);
         }
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire(start).ok_or(Trip::SlotsFull)?;
+        let permit = if after_spill {
+            self.slots.retry(start).ok_or(Trip::SlotsFull)?
+        } else {
+            match self.slots.enter(start) {
+                Step::In(p) => p,
+                Step::Spill => return Ok(None),
+                Step::Shed => return Err(Trip::SlotsFull),
+            }
+        };
         let charge = self.config.spin_charge();
         let (mode, reserved, fallback) = if self.budget.try_reserve(charge, start) {
             (self.config.mode, charge, false)
         } else {
             (WaitMode::Sleep, Duration::ZERO, true)
         };
-        Ok(Admitted {
+        Ok(Some(Admitted {
             _permit: permit,
             mode,
             reserved,
             fallback,
-        })
+        }))
+    }
+
+    /// Admit, waiting in the spillway first if need be. Returns the
+    /// admission and the instant the padded window starts from.
+    fn admit_blocking(
+        &self,
+        first: Instant,
+        input_len: Option<usize>,
+    ) -> Result<(Admitted<'_>, Instant), Trip> {
+        if let Some(a) = self.admit(first, input_len, false)? {
+            return Ok((a, first));
+        }
+        std::thread::sleep(self.slots.spill_wait());
+        let start = self.clock.now();
+        self.admit(start, input_len, true)?
+            .map(|a| (a, start))
+            .ok_or(Trip::SlotsFull)
     }
 
     fn run<T>(&self, input_len: Option<usize>, op: impl FnOnce() -> T) -> (PadResult<T>, Event) {
-        let start = self.clock.now();
-        let adm = match self.admit(start, input_len) {
+        let first = self.clock.now();
+        let (adm, start) = match self.admit_blocking(first, input_len) {
             Ok(a) => a,
             Err(trip) => {
-                let observed = self.clock.now().saturating_duration_since(start);
+                let observed = self.clock.now().saturating_duration_since(first);
                 return (Err(trip), Event::early(self.kind, trip, observed));
             }
         };

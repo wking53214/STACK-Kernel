@@ -38,6 +38,7 @@ fn epoch_pad_metrics_fire() {
                 max_concurrent: 1,
                 max_input_len: 8,
                 allow_naive_controller: false,
+                scaling: stack_anc_adaptive::SlotScaling::default(),
             },
             EpochConfig {
                 initial_level: 0,

@@ -290,8 +290,8 @@ mod wait;
 
 pub use clock::{Clock, MonotonicClock};
 pub use config::{
-    ConfigError, EpochConfig, LeakBudgetConfig, NaiveConfig, PadConfig, SpinBudgetConfig, WaitMode,
-    WindowStatistic,
+    ConfigError, EpochConfig, LeakBudgetConfig, NaiveConfig, PadConfig, SlotScaling,
+    SpinBudgetConfig, WaitMode, WindowStatistic,
 };
 pub use controller::epoch::EpochQuantizedTarget;
 pub use controller::naive::NaiveRollingTarget;

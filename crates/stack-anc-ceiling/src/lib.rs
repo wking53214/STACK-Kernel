@@ -159,7 +159,7 @@ mod pad;
 mod slots;
 
 pub use clock::{Clock, MonotonicClock};
-pub use config::{CeilingConfig, ConfigError, SpinBudgetConfig, WaitMode};
+pub use config::{CeilingConfig, ConfigError, SlotScaling, SpinBudgetConfig, WaitMode};
 pub use outcome::{GateOutcome, PadResult, Padded, ReleaseInfo, Resolution, Trip};
 pub use pad::CeilingPad;
 pub use wait::{bucket_offset, release_bucket};

@@ -923,3 +923,127 @@ fn held_concurrent_state_stays_consistent() {
     assert!(st.leak_bits.is_finite());
     assert!((st.leak_bits - epoch_bound_bits(st.window_changes, st.window_requests)).abs() < 1e-9);
 }
+
+// ---------------------------------------------------------------------------
+// Extra slots on backlog, and the spillway.
+// ---------------------------------------------------------------------------
+
+fn scaling_pad() -> AdaptivePad<EpochQuantizedTarget> {
+    AdaptivePad::epoch(
+        PadConfig {
+            max_concurrent: 1,
+            scaling: stack_anc_adaptive::SlotScaling {
+                max_slots: 3,
+                step: 1,
+                // Longer than the test, so no slot opens mid-probe.
+                reaction_delay: Duration::from_secs(1),
+                cooldown_windows: 2,
+                spillway_size: 1,
+                spillway_wait: ms(10),
+            },
+            ..PadConfig::default()
+        },
+        EpochConfig::new(ms(20), ms(20)),
+    )
+    .unwrap()
+}
+
+/// Attack class "a secret changes the number of open slots or the spillway
+/// verdict". The slot count and the spillway use only arrival times, so a
+/// probe sees the same verdict, the same wait and the same open-slot count
+/// whether the victim's secret work was short or long. SAFE.
+#[test]
+fn attack_scaling_and_spillway_independent_of_victim_secret() {
+    let mut seen = Vec::new();
+    for victim_work in [ms(1), ms(30)] {
+        let pad = scaling_pad();
+        let started = AtomicBool::new(false);
+        let (probe, waited, open) = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _ = pad.pad(|| {
+                    started.store(true, Ordering::SeqCst);
+                    std::thread::sleep(victim_work);
+                });
+            });
+            while !started.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+            std::thread::sleep(ms(2));
+            // Finds the one open slot held, waits in the spillway, tries
+            // again 10 ms later and finds it still held (hold 20 ms).
+            let t = Instant::now();
+            let probe = pad.pad(|| ()).map(|_| ()).map_err(|t| t.label());
+            let waited = t.elapsed();
+            (probe, waited, pad.slots_open())
+        });
+        println!("victim {victim_work:?}: probe {probe:?} after {waited:?}, {open} slots open");
+        assert!(waited >= ms(10) && waited < ms(18), "spillway wait {waited:?}");
+        seen.push((probe, open));
+    }
+    assert_eq!(seen[0], seen[1], "scaling or spillway revealed the victim's work");
+}
+
+/// A flood opens slots up to the maximum and quiet closes them again.
+#[test]
+fn scaling_opens_under_flood_and_closes_when_quiet() {
+    let pad = Arc::new(
+        AdaptivePad::epoch(
+            PadConfig {
+                max_concurrent: 1,
+                scaling: stack_anc_adaptive::SlotScaling {
+                    max_slots: 4,
+                    step: 1,
+                    reaction_delay: ms(5),
+                    cooldown_windows: 2,
+                    ..Default::default()
+                },
+                ..PadConfig::default()
+            },
+            EpochConfig::new(ms(2), ms(4)),
+        )
+        .unwrap(),
+    );
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            let pad = pad.clone();
+            let stop = &stop;
+            s.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = pad.pad(|| ());
+                    std::thread::sleep(us(200));
+                }
+            });
+        }
+        std::thread::sleep(ms(120));
+        stop.store(true, Ordering::Relaxed);
+    });
+    let peak = pad.slots_open();
+    println!("slots open after the flood: {peak}");
+    assert!(peak > 1 && peak <= 4, "peak {peak}");
+    std::thread::sleep(ms(200));
+    let _ = pad.pad(|| ());
+    assert_eq!(pad.slots_open(), 1, "slots stayed open after the flood");
+}
+
+/// Config bounds for the new settings.
+#[test]
+fn held_scaling_config_bounds() {
+    use stack_anc_adaptive::SlotScaling;
+    let with = |sc: SlotScaling| PadConfig { max_concurrent: 4, scaling: sc, ..PadConfig::default() };
+    let ok = SlotScaling { max_slots: 8, ..SlotScaling::default() };
+    assert!(with(ok).validate().is_ok());
+    for bad in [
+        SlotScaling { max_slots: 3, ..ok },
+        SlotScaling { max_slots: usize::MAX, ..ok },
+        SlotScaling { step: 0, ..ok },
+        SlotScaling { reaction_delay: Duration::ZERO, ..ok },
+        SlotScaling { reaction_delay: Duration::MAX, ..ok },
+        SlotScaling { cooldown_windows: 0, ..ok },
+        SlotScaling { spillway_size: 2, spillway_wait: Duration::ZERO, ..ok },
+        SlotScaling { spillway_size: 2, spillway_wait: Duration::from_secs(60), ..ok },
+        SlotScaling { spillway_size: usize::MAX, spillway_wait: ms(1), ..ok },
+    ] {
+        assert!(with(bad).validate().is_err(), "{bad:?}");
+    }
+}
