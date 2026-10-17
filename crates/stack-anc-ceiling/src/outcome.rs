@@ -37,7 +37,7 @@ impl GateOutcome {
 }
 
 /// The kernel-wide state resolutions. This crate uses `Reject` and `Halt`;
-/// the other two are listed so the vocabulary matches the other TACK
+/// the other two are listed so the vocabulary matches the other STACK
 /// components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {

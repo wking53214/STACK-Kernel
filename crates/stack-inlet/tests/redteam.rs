@@ -1,4 +1,4 @@
-//! Red-team attacks on tack-inlet.
+//! Red-team attacks on stack-inlet.
 //!
 //! Every test asserts the SAFE behaviour, so a test FAILS while the weakness
 //! it names exists. Test names start with the attack class. Nothing here
@@ -9,7 +9,7 @@
 //! switched on per thread, so the tracing callsite-interest race that the
 //! builder hit in `tests/logging.rs` cannot hide events here.
 //!
-//! Run: cargo test -p tack-inlet --test redteam -- --nocapture
+//! Run: cargo test -p stack-inlet --test redteam -- --nocapture
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::cell::{Cell, RefCell};

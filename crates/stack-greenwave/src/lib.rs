@@ -1,7 +1,7 @@
 //! # stack-greenwave: Traffic Cop and Green Wave Routing
 //!
-//! **Status: new design.** This component does not exist in any TACK
-//! repository today. Of the seven TACK components only the Sentinel
+//! **Status: new design.** This component does not exist in any STACK
+//! repository today. Of the seven STACK components only the Sentinel
 //! Hash-Chain exists (in `sentinel_os`). This crate is a reference
 //! implementation of a design, not a port of running code.
 //!

@@ -201,7 +201,7 @@ impl Trident {
     fn enter_halt(&self, cause: HaltCause) {
         if !self.halted.swap(true, Ordering::SeqCst) {
             counter!(t::HALTS_TOTAL, "cause" => cause.as_str()).increment(1);
-            tracing::error!(cause = cause.as_str(), "tack.trident halted; operator reset required");
+            tracing::error!(cause = cause.as_str(), "stack.trident halted; operator reset required");
         }
     }
 
@@ -472,7 +472,7 @@ impl Trident {
                             sender = %f,
                             threshold,
                             window_ms = window,
-                            "tack.trident sender quarantined by breaker"
+                            "stack.trident sender quarantined by breaker"
                         );
                     }
                 }
@@ -500,10 +500,10 @@ impl Trident {
         span.record("outcome", outcome);
         span.record("resolution", resolution);
         match verdict {
-            Verdict::Accepted(_) => tracing::debug!(outcome, "tack.trident accepted handoff"),
+            Verdict::Accepted(_) => tracing::debug!(outcome, "stack.trident accepted handoff"),
             Verdict::Refused(r) => {
                 let codes: Vec<&'static str> = r.reasons.iter().map(|c| c.as_str()).collect();
-                tracing::warn!(outcome, resolution, reasons = ?codes, "tack.trident refused handoff");
+                tracing::warn!(outcome, resolution, reasons = ?codes, "stack.trident refused handoff");
             }
         }
     }
@@ -521,7 +521,7 @@ impl Trident {
         if released {
             counter!(t::QUARANTINE_RELEASES_TOTAL).increment(1);
             gauge!(t::QUARANTINED_SENDERS).set(gauge_value(st.senders.quarantined_count()));
-            tracing::info!(sender = %fp, "tack.trident quarantine released by operator");
+            tracing::info!(sender = %fp, "stack.trident quarantine released by operator");
         }
         Ok(released)
     }
@@ -584,7 +584,7 @@ impl Trident {
         drop(st);
         self.halted.store(false, Ordering::SeqCst);
         counter!(t::OPERATOR_RESETS_TOTAL).increment(1);
-        tracing::warn!(epoch_floor_ms = floor, "tack.trident reset by operator");
+        tracing::warn!(epoch_floor_ms = floor, "stack.trident reset by operator");
     }
 
     /// Swaps in a new key ring. Receiver state for senders not in the new

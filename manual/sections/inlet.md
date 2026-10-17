@@ -8,9 +8,9 @@ The Inlet Winnowing Filter refuses malformed UTF-8 and 4,307 banned characters b
 
 A combine harvester has a winnowing fan at its grain inlet. The fan blows the light chaff away before anything reaches the threshing drum, so the drum only ever sees grain.
 
-The inlet is that fan for the TACK kernel. It sits at the kernel boundary and refuses bad text before any other component reads it. In CNS terms it is an ALPHA gate: a check that runs before any work starts.
+The inlet is that fan for the STACK kernel. It sits at the kernel boundary and refuses bad text before any other component reads it. In CNS terms it is an ALPHA gate: a check that runs before any work starts.
 
-It is a new design. No TACK repository had an inlet filter before the `tack-inlet` crate, and no Python version exists. Of the seven components, only the Sentinel Hash-Chain in sentinel_os exists today.
+It is a new design. No STACK repository had an inlet filter before the `stack-inlet` crate, and no Python version exists. Of the seven components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 The goal has two parts. First, nothing malformed or disguised crosses the boundary. Second, the check itself cannot be turned into a weapon.
 
@@ -32,7 +32,7 @@ The filter works in three stages: a length check, one pass of an automaton over 
 ```rust
     #[must_use]
     pub fn winnow(&self, input: &[u8]) -> Verdict {
-        let span = tracing::info_span!("tack.inlet.winnow", len = input.len());
+        let span = tracing::info_span!("stack.inlet.winnow", len = input.len());
         let _entered = span.enter();
         let started = Instant::now();
         let v = if input.len() > self.config.max_len {
@@ -253,9 +253,9 @@ The test file tests/telemetry.rs asserts that these metrics fire, using `Debuggi
 
 Spans are named, timed regions of work in the `tracing` log. All three are at info level:
 
-- `tack.inlet.winnow`, field `len`: wraps one `Inlet::winnow` call.
-- `tack.inlet.precheck`, field `declared_len`: wraps one `Inlet::precheck` call. The declared length appears here and nowhere else.
-- `tack.inlet.stream`, field `chunks`: created by `Inlet::scanner` and entered only at `finish` or drop, never per chunk.
+- `stack.inlet.winnow`, field `len`: wraps one `Inlet::winnow` call.
+- `stack.inlet.precheck`, field `declared_len`: wraps one `Inlet::precheck` call. The declared length appears here and nowhere else.
+- `stack.inlet.stream`, field `chunks`: created by `Inlet::scanner` and entered only at `finish` or drop, never per chunk.
 
 Log events, target `tack_inlet::telemetry`:
 
@@ -278,7 +278,7 @@ Alert rules are Prometheus expressions evaluated over these metrics on a schedul
 
 ```yaml
 groups:
-  - name: tack-inlet
+  - name: stack-inlet
     rules:
       - alert: TackInletTerminalBreach
         expr: increase(tack_inlet_quarantined_total[5m]) > 0
@@ -354,7 +354,7 @@ The red team ran 24 tests covering 23 attacks against the built crate. Before fi
 
 The fix pass edited some existing tests and recorded each edit. Tests in hand_cases.rs and logging.rs that asserted the exact behaviour a fix changed now assert the new behaviour. In redteam.rs, the reference ban list grew to match the new bans, and a log-capture cache race was fixed.
 
-Final run of `cargo test -p tack-inlet --all-targets` for this manual: 71 passed and 0 failed across 7 targets. The doctest passes separately, and `cargo clippy -p tack-inlet --all-targets -- -D warnings` is clean.
+Final run of `cargo test -p stack-inlet --all-targets` for this manual: 71 passed and 0 failed across 7 targets. The doctest passes separately, and `cargo clippy -p stack-inlet --all-targets -- -D warnings` is clean.
 
 ```text
      Running unittests src/lib.rs (target/debug/deps/tack_inlet-a6affdc3e6919659)

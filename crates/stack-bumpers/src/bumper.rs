@@ -84,7 +84,7 @@ impl Bumper {
     /// Any [`SpecError`]: an invalid config, a duplicate or badly formed
     /// parameter name, or a spec that exceeds a configured cap.
     pub fn new(config: BumperConfig, specs: impl IntoIterator<Item = ParamSpec>) -> Result<Self, SpecError> {
-        let span = tracing::debug_span!("tack.bumpers.build");
+        let span = tracing::debug_span!("stack.bumpers.build");
         let _entered = span.enter();
         let built = Self::build(config, specs);
         match &built {
@@ -181,7 +181,7 @@ impl Bumper {
     pub fn normalize(&self, input: &BTreeMap<String, ParamValue>) -> Result<Normalized, Rejection> {
         let start = Instant::now();
         let span = tracing::debug_span!(
-            "tack.bumpers.normalize",
+            "stack.bumpers.normalize",
             params = input.len(),
             outcome = tracing::field::Empty,
             corrections = tracing::field::Empty,

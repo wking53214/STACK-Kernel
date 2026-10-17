@@ -2,7 +2,7 @@
 //! padding target.
 //!
 //! Status: new design. This is a reference implementation, compiled and
-//! tested in this workspace; it is not deployed anywhere. Of the seven TACK
+//! tested in this workspace; it is not deployed anywhere. Of the seven STACK
 //! components only the Sentinel Hash-Chain (in `sentinel_os`) exists today.
 //!
 //! # The metaphor

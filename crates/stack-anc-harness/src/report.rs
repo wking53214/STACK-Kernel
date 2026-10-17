@@ -300,7 +300,7 @@ pub fn analyze(
     crop_percentiles: &[f64],
     min_per_class: u64,
 ) -> Result<Report, HarnessError> {
-    let _guard = tracing::debug_span!("tack.anc_harness.analyze", n = samples.len()).entered();
+    let _guard = tracing::debug_span!("stack.anc_harness.analyze", n = samples.len()).entered();
     if classes.len() != samples.len() {
         return Err(HarnessError::LengthMismatch);
     }

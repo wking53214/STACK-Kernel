@@ -44,7 +44,7 @@ impl GateOutcome {
 ///
 /// The Minotaur String produces [`Resolution::Rollback`],
 /// [`Resolution::Halt`] and, for a call made through a stale guard,
-/// [`Resolution::Reject`]. [`Resolution::Quarantine`] exists so every TACK
+/// [`Resolution::Reject`]. [`Resolution::Quarantine`] exists so every STACK
 /// component shares one vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {
