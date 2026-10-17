@@ -536,38 +536,137 @@ fn attack_leak_budget_renews_every_window() {
 // Attack 10. One slow request per epoch pins everyone at the cap.
 // ---------------------------------------------------------------------------
 
-/// A decrease needs the whole epoch's largest work time to fit the lower
-/// level. One attacker request per epoch with work near the cap therefore
-/// holds every honest request at the cap forever, at a cost of one request
-/// per second against any honest volume. SAFE: with 1 slow request per 1000
-/// fast ones, the target leaves the cap within 30 epochs.
-#[test]
-fn attack_one_slow_request_per_epoch_pins_cap() {
+/// Thirty one-second epochs of 1000 requests, `slow_per_epoch` of them
+/// slow (1.5 ms against a 1.6 ms cap), the first one right after the epoch
+/// boundary. Returns the controller afterwards.
+fn slow_trickle(tolerated: u16, slow_per_epoch: u64) -> EpochQuantizedTarget {
     let o = Instant::now();
     let cfg = EpochConfig {
         leak_budget: LeakBudgetConfig {
             bits: 1.0e6,
             window: Duration::from_secs(3_600),
         },
+        tolerated_slow_permille: tolerated,
         ..EpochConfig::new(us(100), us(1_600))
     };
     let mut c = EpochQuantizedTarget::new(cfg, o).unwrap();
     for sec in 0..30u64 {
         for k in 0..1_000u64 {
-            let work = if k == 500 { us(1_500) } else { us(50) };
+            let work = if k < slow_per_epoch { us(1_500) } else { us(50) };
             step(&mut c, o + ms(sec * 1_000) + us(k * 900), work);
         }
     }
+    c
+}
+
+/// A decrease needs the whole epoch's largest work time to fit the lower
+/// level. One attacker request per epoch with work near the cap therefore
+/// holds every honest request at the cap forever, at a cost of one request
+/// per second against any honest volume. That is the strict default and it
+/// is kept: with `tolerated_slow_permille` at zero the weakness is
+/// documented, not hidden. This asserts it is still there so a change to the
+/// default cannot go unnoticed.
+#[test]
+fn attack_one_slow_request_per_epoch_pins_cap_when_strict() {
+    let c = slow_trickle(0, 1);
+    assert_eq!(c.target(), c.config().cap, "the strict default no longer pins");
+}
+
+/// SAFE with the tolerance on: with 1 slow request per 1000 fast ones and
+/// 1 percent of traffic tolerated, the target leaves the cap, and the slow
+/// requests are charged to the leak budget instead of raising the level.
+#[test]
+fn attack_one_slow_request_per_epoch_cannot_pin_cap_with_tolerance() {
+    let c = slow_trickle(10, 1);
     println!(
-        "after 30 epochs with 1 slow per 1000 fast: target {:?} (floor {:?}, cap {:?})",
+        "after 30 epochs with 1 slow per 1000 fast: target {:?} (floor {:?}, cap {:?}), \
+         window changes {}",
         c.target(),
-        cfg.floor,
-        cfg.cap
+        c.config().floor,
+        c.config().cap,
+        c.status().window_changes
     );
     assert!(
-        c.target() < cfg.cap,
+        c.target() < c.config().cap,
         "0.1 percent attacker traffic holds 100 percent of requests at the cap"
     );
+    assert!(
+        c.status().window_changes >= 29,
+        "rare slow requests must still be charged to the leak budget"
+    );
+}
+
+/// The tolerance is a share of the traffic, not a count: an attacker who
+/// sends more than 1 percent slow requests still holds the level up. Its
+/// cost grows with the honest volume.
+#[test]
+fn attack_slow_share_above_the_tolerance_still_pins_cap() {
+    let c = slow_trickle(10, 30);
+    assert_eq!(c.target(), c.config().cap, "3 percent slow traffic should pin");
+}
+
+/// One slow request first thing in the epoch is judged against the last
+/// epoch's volume, not against the two or three requests that finished
+/// before it, so it cannot raise the shared level.
+#[test]
+fn attack_slow_request_at_epoch_start_does_not_raise_the_level() {
+    let o = Instant::now();
+    let cfg = EpochConfig {
+        leak_budget: LeakBudgetConfig {
+            bits: 1.0e6,
+            window: Duration::from_secs(3_600),
+        },
+        tolerated_slow_permille: 10,
+        initial_level: 1,
+        ..EpochConfig::new(us(100), us(1_600))
+    };
+    let mut c = EpochQuantizedTarget::new(cfg, o).unwrap();
+    // A full epoch of fast traffic, then a slow request at the start of the
+    // next one.
+    for k in 0..1_000u64 {
+        step(&mut c, o + us(k * 900), us(50));
+    }
+    let level_before = c.level();
+    let t = o + ms(1_000);
+    step(&mut c, t, us(1_500));
+    assert!(c.level() <= level_before, "level rose to {}", c.level());
+}
+
+/// A genuine shift (every request slow) is not rare and still raises the
+/// level at once.
+#[test]
+fn honest_shift_still_raises_the_level() {
+    let o = Instant::now();
+    let cfg = EpochConfig {
+        leak_budget: LeakBudgetConfig {
+            bits: 1.0e6,
+            window: Duration::from_secs(3_600),
+        },
+        tolerated_slow_permille: 10,
+        initial_level: 0,
+        ..EpochConfig::new(us(100), us(1_600))
+    };
+    let mut c = EpochQuantizedTarget::new(cfg, o).unwrap();
+    for k in 0..200u64 {
+        step(&mut c, o + us(k * 900), us(50));
+    }
+    for k in 200..260u64 {
+        step(&mut c, o + us(k * 900), us(700));
+    }
+    assert!(c.target() >= us(700), "level stayed at {:?}", c.target());
+}
+
+/// Bounds of the new setting.
+#[test]
+fn held_tolerated_slow_permille_bounds() {
+    for ok in [0u16, 10, 500] {
+        let cfg = EpochConfig { tolerated_slow_permille: ok, ..EpochConfig::new(us(100), us(1_600)) };
+        assert!(cfg.validate().is_ok(), "{ok}");
+    }
+    for bad in [501u16, u16::MAX] {
+        let cfg = EpochConfig { tolerated_slow_permille: bad, ..EpochConfig::new(us(100), us(1_600)) };
+        assert_eq!(cfg.validate().unwrap_err().field, "tolerated_slow_permille");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -62,6 +62,13 @@ pub struct EpochQuantizedTarget {
     epoch_requests: u64,
     epoch_max: Duration,
     epoch_mispredicted: bool,
+    /// Requests of the epoch before this one (0 after an idle gap). With
+    /// this epoch's count so far, it sets how many slow requests are rare.
+    prev_epoch_requests: u64,
+    /// Requests this epoch that ran past their admission target.
+    epoch_misses: u64,
+    /// Requests this epoch that ran past the next level down.
+    epoch_over_lower: u64,
     window_index: u64,
     window_changes: u64,
     window_requests: u64,
@@ -111,6 +118,9 @@ impl EpochQuantizedTarget {
             epoch_requests: 0,
             epoch_max: Duration::ZERO,
             epoch_mispredicted: false,
+            prev_epoch_requests: 0,
+            epoch_misses: 0,
+            epoch_over_lower: 0,
             window_index: 0,
             window_changes: 0,
             window_requests: 0,
@@ -183,6 +193,25 @@ impl EpochQuantizedTarget {
         }
     }
 
+    /// True if `count` slow requests are a rare share of this epoch's
+    /// traffic. The share is of the larger of the requests so far and the
+    /// last epoch's, so a burst at the start of an epoch is judged against
+    /// the volume the service really carries. With the setting at zero
+    /// nothing is rare (the strict rule).
+    fn is_rare(&self, count: u64) -> bool {
+        let permille = u128::from(self.cfg.tolerated_slow_permille);
+        let volume = u128::from(self.epoch_requests.max(self.prev_epoch_requests));
+        permille > 0 && u128::from(count) * 1000 <= permille * volume
+    }
+
+    fn clear_epoch(&mut self) {
+        self.epoch_requests = 0;
+        self.epoch_max = Duration::ZERO;
+        self.epoch_mispredicted = false;
+        self.epoch_misses = 0;
+        self.epoch_over_lower = 0;
+    }
+
     fn count_change(&mut self, n: u32) {
         let n = u64::from(n);
         self.window_changes = self.window_changes.saturating_add(n);
@@ -209,9 +238,8 @@ impl EpochQuantizedTarget {
                 // The epoch in progress began while frozen; start the
                 // warm-up from a clean epoch so a miss from the frozen
                 // period does not end it.
-                self.epoch_requests = 0;
-                self.epoch_max = Duration::ZERO;
-                self.epoch_mispredicted = false;
+                self.clear_epoch();
+                self.prev_epoch_requests = 0;
             }
         }
     }
@@ -223,10 +251,11 @@ impl EpochQuantizedTarget {
         }
         self.boundaries_total = self.boundaries_total.saturating_add(1);
         let eligible = !self.frozen && self.level > 0 && self.epoch_requests > 0;
-        if eligible
+        let steps_down = eligible
             && !self.epoch_mispredicted
-            && self.epoch_max <= self.cfg.level_target(self.level - 1)
-        {
+            && (self.epoch_max <= self.cfg.level_target(self.level - 1)
+                || self.is_rare(self.epoch_over_lower));
+        if steps_down {
             self.level -= 1;
             self.decreases_total = self.decreases_total.saturating_add(1);
             // Rule 5: a warm-up step follows the public default; only the
@@ -242,10 +271,14 @@ impl EpochQuantizedTarget {
         }
         // Any epochs skipped between the old index and `idx` were idle, so
         // they hold the level (rule 3); evaluating them is a no-op.
+        // Only an epoch directly before this one counts as recent volume.
+        self.prev_epoch_requests = if idx == self.epoch_index.saturating_add(1) {
+            self.epoch_requests
+        } else {
+            0
+        };
         self.epoch_index = idx;
-        self.epoch_requests = 0;
-        self.epoch_max = Duration::ZERO;
-        self.epoch_mispredicted = false;
+        self.clear_epoch();
     }
 
     /// Freeze (rule 6) when the window bound reaches the window budget or
@@ -297,16 +330,32 @@ impl TargetController for EpochQuantizedTarget {
         self.roll_window(now);
         self.epoch_requests = self.epoch_requests.saturating_add(1);
         self.epoch_max = self.epoch_max.max(work);
+        if self.level > 0 && work > self.cfg.level_target(self.level - 1) {
+            self.epoch_over_lower = self.epoch_over_lower.saturating_add(1);
+        }
         if work <= snapshot.target {
             return ch;
         }
         // A miss: the release (a higher level, or the cap grid) depends on
         // this request's work time, so it is charged whatever the level
         // does (rule 4).
-        self.epoch_mispredicted = true;
+        self.epoch_misses = self.epoch_misses.saturating_add(1);
         self.warmup = false;
         let mut charge = 0u32;
-        if !self.frozen {
+        if !self.frozen && self.is_rare(self.epoch_misses) {
+            // Rule 2, rare case: this request alone is released at its
+            // covering level. The shared level stays, so one slow request
+            // cannot raise it for everyone. The release still says how slow
+            // this request was, so it is charged one change per level.
+            let from = match snapshot.rule {
+                MissRule::Escalate { level, .. } => level,
+                _ => self.level,
+            };
+            let needed =
+                ladder::covering_level(self.cfg.floor, self.cfg.cap, 0, work).unwrap_or(self.top);
+            charge = needed.saturating_sub(from).max(1);
+        } else if !self.frozen {
+            self.epoch_mispredicted = true;
             let needed =
                 ladder::covering_level(self.cfg.floor, self.cfg.cap, 0, work).unwrap_or(self.top);
             if needed > self.level {
@@ -316,6 +365,8 @@ impl TargetController for EpochQuantizedTarget {
                 charge = steps;
                 ch.increases = steps;
             }
+        } else {
+            self.epoch_mispredicted = true;
         }
         if work > self.cfg.cap {
             charge = charge.saturating_add(overrun_charge(self.cfg.cap, work));
@@ -364,9 +415,8 @@ impl TargetController for EpochQuantizedTarget {
         self.window_changes = 0;
         self.window_requests = 0;
         self.epoch_index = grid_index(self.origin, now, self.cfg.epoch);
-        self.epoch_requests = 0;
-        self.epoch_max = Duration::ZERO;
-        self.epoch_mispredicted = false;
+        self.clear_epoch();
+        self.prev_epoch_requests = 0;
         Changes::default()
     }
 }
