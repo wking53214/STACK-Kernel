@@ -47,8 +47,11 @@ fn epoch_pad_metrics_fire() {
         .unwrap();
         // 1: on time, spin granted (the burst covers one tail).
         pad.pad(|| ()).unwrap();
+        // A slot is held for the cap (4 ms) after admission; let it free.
+        std::thread::sleep(ms(5));
         // 2: escalated 1 ms -> 2 ms; the budget is empty, so it sleeps.
         pad.pad(|| std::thread::sleep(us(1_300))).unwrap();
+        std::thread::sleep(ms(5));
         // 3: past the 4 ms cap: RETRY, overrun retry, 1 ms -> ... -> cap.
         assert_eq!(
             pad.pad(|| std::thread::sleep(ms(5))).unwrap_err(),
@@ -59,6 +62,7 @@ fn epoch_pad_metrics_fire() {
             pad.pad_input(&[0u8; 9], |_| ()).unwrap_err(),
             Trip::InputTooLarge
         );
+        std::thread::sleep(ms(5));
         // 5: slots full, shed (another thread holds the only slot; its own
         // metrics go to no recorder).
         let entered = Barrier::new(2);

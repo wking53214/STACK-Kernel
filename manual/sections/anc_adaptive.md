@@ -234,7 +234,7 @@ Admission, from `src/pad.rs`:
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire().ok_or(Trip::SlotsFull)?;
+        let permit = self.slots.try_acquire(start).ok_or(Trip::SlotsFull)?;
         let charge = self.config.spin_charge();
         let (mode, reserved, fallback) = if self.budget.try_reserve(charge, start) {
             (self.config.mode, charge, false)
@@ -357,7 +357,7 @@ Cargo stops at the first failing target, so `tests/telemetry.rs` ran only in the
 - **No proof.** A pass is no detectable leak at that n on one virtual machine. The tests rule out shifts they could see, not all shifts.
 - **Not zero leakage.** The budget meters the leak and does not remove it. By default the controller allows up to 1,024 bits between operator resets. A frozen controller still leaks its overruns and misses, and is charged for them.
 - **Sleep mode's distribution.** KS separated the two classes under epoch Sleep in every full-size pinned run, for a reason not yet tested. Prefer Hybrid where that matters. A flood drains the spin budget and forces Sleep: about 1,200 of 5,000 served requests spun in the pinned Hybrid flood.
-- **Slot occupancy (open finding).** A slow request holds its slot until its later release. A third party probing admission can then see `SlotsFull` and learn that a victim was slow.
+- **Slot occupancy (fixed in this version).** Every admitted request holds its slot for one fixed time, the controller cap, counted from admission, whatever its work time. A third party probing admission cannot learn that a victim was slow (`attack_shed_decision_reveals_victim_overrun` now passes). The hold is the cap at construction, so it does not follow later cap changes. The cost is capacity: throughput is at most `max_concurrent / cap` per second. A backstop of `4 x max_concurrent` requests inside the pad bounds requests stuck past the hold. The cap is a placeholder speed limit until measured work times set it.
 - **Overrun multiples.** The blocking API cannot stop work at the cap, so an overrun's release still tells `ceil(work / cap)`. It is charged, but the multiple is not capped; a pre-emptible API is the real fix.
 - **Reply content.** A RETRY reply differs from a value. Every trip is counted, but an overrun RETRY is influenced by the secret like an escalation.
 - **Panic output.** A caught panic is released on schedule, but the panic hook prints at the moment of the panic, inside the wait. With `panic = "abort"` there is nothing to catch.

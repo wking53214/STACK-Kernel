@@ -119,8 +119,12 @@ impl<C: Clock> CeilingPad<C> {
     pub fn with_clock(config: CeilingConfig, clock: C) -> Result<Self, ConfigError> {
         config.validate()?;
         let now = clock.now();
+        let hold = config.hard_ceiling().ok_or(ConfigError {
+            field: "hard_ceiling_buckets",
+            reason: "ceiling times buckets overflows",
+        })?;
         Ok(Self {
-            slots: Slots::new(config.max_concurrent),
+            slots: Slots::new(config.max_concurrent, hold),
             budget: SpinBudget::new(config.spin_budget, now),
             halted: AtomicBool::new(false),
             config,
@@ -255,7 +259,7 @@ impl<C: Clock> CeilingPad<C> {
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire().ok_or(Trip::SlotsFull)?;
+        let permit = self.slots.try_acquire(start).ok_or(Trip::SlotsFull)?;
         let charge = if async_api {
             self.config.async_spin_charge()
         } else {
