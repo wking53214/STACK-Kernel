@@ -576,8 +576,9 @@ fn attack_one_slow_request_per_epoch_pins_cap() {
 
 /// The naive controller is reachable through the public constructor
 /// `AdaptivePad::naive` with no opt-in, and its late release puts the raw,
-/// secret-dependent work time on the wire. Documented as a leak kept for
-/// measurement. SAFE: a late naive release is not the raw work time.
+/// secret-dependent work time on the wire. This is a documented leak kept for
+/// measurement, so this test asserts the leak is present: each late release
+/// equals its own raw work time. A safe controller would fail this assertion.
 #[test]
 fn attack_naive_late_release_is_raw_work_time() {
     let s = Snapshot {
@@ -589,8 +590,8 @@ fn attack_naive_late_release_is_raw_work_time() {
     let b = s.plan(us(456));
     println!("naive plans: {a:?} {b:?}");
     assert!(
-        a.release() == b.release(),
-        "naive late releases equal the raw work times {:?} and {:?}",
+        a.release() == us(123) && b.release() == us(456),
+        "documented leak: naive late releases equal the raw work times {:?} and {:?}",
         a.release(),
         b.release()
     );
