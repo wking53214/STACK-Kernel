@@ -474,7 +474,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
             }
             Some(Trip::OperationPanicked) => {
                 tracing::error!(
-                    "operation panicked inside the adaptive pad: released on schedule, quarantine the input"
+                    "operation panicked inside the adaptive pad: released on schedule, reject the request"
                 );
             }
             _ => {}

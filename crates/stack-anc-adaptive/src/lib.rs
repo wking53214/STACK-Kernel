@@ -157,7 +157,7 @@
 //! | [`Trip::Overrun`] | RETRY | reject | work passed the cap; value discarded |
 //! | [`Trip::ClockFailure`] | TERMINAL_BREACH | halt | no trustworthy clock, no padding |
 //! | [`Trip::Halted`] | TERMINAL_BREACH | halt | until operator [`AdaptivePad::reset`] |
-//! | [`Trip::OperationPanicked`] | TERMINAL_BREACH | quarantine | the op panicked; caught, released on schedule, counted; a halt would let one request stop the pad |
+//! | [`Trip::OperationPanicked`] | TERMINAL_BREACH | reject | the op panicked; caught, released on schedule, counted; a halt would let one request stop the pad |
 //! | [`ControllerTrip::LeakBudgetSpent`] | RETRY (controller) | rollback | target back to the cap for the rest of the window; requests still served |
 //! | [`ControllerTrip::LeakLifetimeSpent`] | TERMINAL_BREACH (controller) | rollback | target at the cap until operator [`AdaptivePad::reset_controller`]; requests still served |
 //!

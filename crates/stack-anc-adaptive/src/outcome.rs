@@ -41,11 +41,6 @@ impl GateOutcome {
 pub enum Resolution {
     /// Nothing changed; the request is refused.
     Reject,
-    /// The input, sender or agent is isolated for review and counted. Used
-    /// for [`Trip::OperationPanicked`]: the pad counts the request and
-    /// returns a fixed code; the caller isolates the input or sender (the
-    /// pad has no sender identity of its own).
-    Quarantine,
     /// State restored to the last good snapshot. Used by the epoch
     /// controller when its leak budget is spent: the target returns to the
     /// configured public maximum (the cap).
@@ -93,7 +88,7 @@ pub enum Trip {
     /// reply is released on the same schedule as any other request (the
     /// work time is the time until the panic), the request is counted, and
     /// the panic payload is dropped. A resubmission would hit the same bug,
-    /// so TERMINAL_BREACH; quarantine, not halt, because a request that can
+    /// so TERMINAL_BREACH; reject, not halt, because a request that can
     /// trigger the panic would otherwise halt the pad for everyone.
     #[error("TERMINAL_BREACH: operation panicked")]
     OperationPanicked,
@@ -115,7 +110,7 @@ impl Trip {
         match self {
             Trip::SlotsFull | Trip::InputTooLarge | Trip::Overrun => Resolution::Reject,
             Trip::Halted | Trip::ClockFailure => Resolution::Halt,
-            Trip::OperationPanicked => Resolution::Quarantine,
+            Trip::OperationPanicked => Resolution::Reject,
         }
     }
 
