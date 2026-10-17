@@ -397,7 +397,7 @@ where
     O: FnMut(&I) -> R,
 {
     let span = tracing::info_span!(
-        "stack.anc_harness.measure",
+        "tack.anc_harness.measure",
         samples = config.samples,
         warmup = config.warmup,
         timer = ?config.timer,

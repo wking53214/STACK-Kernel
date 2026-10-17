@@ -365,7 +365,7 @@ fn cli(export: &[u8], anchor: Option<&[u8]>, keys: &str, fps: &str) -> (i32, Str
         std::fs::write(&anchor_path, a).unwrap();
     }
     std::fs::write(&key_path, keys).unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_stack-sentinel-verify"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tack-sentinel-verify"))
         .args(["--export", export_path.to_str().unwrap()])
         .args(["--anchor", anchor_path.to_str().unwrap()])
         .args(["--trusted-fingerprints", fps])

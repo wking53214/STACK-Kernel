@@ -58,9 +58,9 @@ fn logs_carry_digest_and_length_never_raw_input() {
     assert!(logs.contains(&telemetry::sha256_hex(secret_key.as_bytes())));
     assert!(logs.contains(&telemetry::sha256_hex(secret_val.as_bytes())));
     assert!(logs.contains(&format!("input_len={}", secret_val.len())));
-    assert!(logs.contains("stack.bumpers.normalize"));
+    assert!(logs.contains("tack.bumpers.normalize"));
     assert!(logs.contains("reason=\"unknown_param\"") || logs.contains("reason=unknown_param"));
     assert!(logs.contains("WARN"), "terminal breach logs at warn");
     assert!(logs.contains("bumper correction"));
-    assert!(logs.contains("stack.bumpers.build"));
+    assert!(logs.contains("tack.bumpers.build"));
 }

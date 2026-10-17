@@ -326,7 +326,7 @@ impl<T: Send + 'static> GreenWaveDriver<T> {
     /// As [`TrafficCop::admit`].
     pub async fn admit(&self, lane: LaneId, payload: T) -> Result<Admitted, Refused<T>> {
         {
-            let _guard = tracing::debug_span!("stack.greenwave.admit", lane = lane.index()).entered();
+            let _guard = tracing::debug_span!("tack.greenwave.admit", lane = lane.index()).entered();
             if let Some(trip) = self.refuse_full_lane(lane) {
                 return Err(Refused { trip, payload });
             }
@@ -453,7 +453,7 @@ impl<T: Send + 'static> GreenWaveDriver<T> {
     /// the next phase start does not fit in `u64`; or
     /// [`TripReason::DriverStopped`] if the runtime would not run the loop.
     pub async fn run_phases(&self, sink: &mpsc::Sender<Dispatched<T>>, max_phases: u64) -> Result<u64, Trip> {
-        let span = tracing::info_span!("stack.greenwave.drive", max_phases);
+        let span = tracing::info_span!("tack.greenwave.drive", max_phases);
         let handle = Handle::current();
         let stop = Arc::new(AtomicBool::new(false));
         let _stop_on_drop = StopOnDrop(Arc::clone(&stop));
@@ -509,7 +509,7 @@ impl<T: Send + 'static> GreenWaveDriver<T> {
             .ok_or_else(|| Trip::new(Op::Complete, TripReason::Overflow, None))?;
         // TRACE, like `complete`: the span opens at the completion instant.
         sleep_until(at)
-            .instrument(tracing::trace_span!("stack.greenwave.release_wait", seq = ticket.id().get()))
+            .instrument(tracing::trace_span!("tack.greenwave.release_wait", seq = ticket.id().get()))
             .await;
         Ok(release)
     }

@@ -1,7 +1,7 @@
-//! stack-anc-harness: the statistical engine that every STACK ANC (Active
+//! stack-anc-harness: the statistical engine that every TACK ANC (Active
 //! Timing Cancellation) strategy is verified with.
 //!
-//! Status: new design. This crate is test tooling; nothing in the STACK
+//! Status: new design. This crate is test tooling; nothing in the TACK
 //! runtime links it in production.
 //!
 //! # What it answers
@@ -29,8 +29,8 @@
 //! # Quick use
 //!
 //! ```
-//! use tack_anc_harness::{measure_pair, MeasureConfig, Class, T_THRESHOLD};
-//! use tack_anc_harness::victim::{ct_validate, TOKEN_LEN};
+//! use stack_anc_harness::{measure_pair, MeasureConfig, Class, T_THRESHOLD};
+//! use stack_anc_harness::victim::{ct_validate, TOKEN_LEN};
 //!
 //! // Test fixture, not a real key or token.
 //! let secret = [0x42u8; TOKEN_LEN];

@@ -1,6 +1,6 @@
-//! # stack-bumpers: Elastic Bumpers for the STACK governance kernel
+//! # tack-bumpers: Elastic Bumpers for the TACK governance kernel
 //!
-//! **Status: new design.** Of the seven STACK kernel components, only the
+//! **Status: new design.** Of the seven TACK kernel components, only the
 //! Sentinel Hash-Chain exists today (in `sentinel_os`). Elastic Bumpers is
 //! one of the six new designs. This crate is its reference implementation;
 //! it is not yet wired into any of the Python repositories.
@@ -139,7 +139,7 @@
 //! * `tack_bumpers_corrections_per_request` histogram, passing requests.
 //! * `tack_bumpers_normalize_duration_seconds{outcome}` histogram.
 //!
-//! Spans: `stack.bumpers.normalize` and `stack.bumpers.build`. Trip events
+//! Spans: `tack.bumpers.normalize` and `tack.bumpers.build`. Trip events
 //! are at DEBUG and carry the spec name, reason and outcome, and for caller
 //! text only its byte length and full SHA-256 hex digest (`input_len`,
 //! `input_sha256`). Text over `max_input_bytes` is logged by length only,

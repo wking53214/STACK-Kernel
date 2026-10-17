@@ -43,17 +43,17 @@ pub const REPLAY_EVICTIONS_TOTAL: &str = "tack_trident_replay_evictions_total";
 pub const BREAKER_UNTRACKED_TOTAL: &str = "tack_trident_breaker_untracked_total";
 
 /// Span around one verification.
-pub const SPAN_VERIFY: &str = "stack.trident.verify";
+pub const SPAN_VERIFY: &str = "tack.trident.verify";
 /// Span around sealing on the producer side.
-pub const SPAN_SEAL: &str = "stack.trident.seal";
+pub const SPAN_SEAL: &str = "tack.trident.seal";
 /// Span around an operator releasing a quarantined sender.
-pub const SPAN_RELEASE: &str = "stack.trident.release";
+pub const SPAN_RELEASE: &str = "tack.trident.release";
 /// Span around an operator reset.
-pub const SPAN_RESET: &str = "stack.trident.reset";
+pub const SPAN_RESET: &str = "tack.trident.reset";
 /// Span around an operator halt.
-pub const SPAN_HALT: &str = "stack.trident.halt";
+pub const SPAN_HALT: &str = "tack.trident.halt";
 /// Span around replacing the key ring.
-pub const SPAN_REPLACE_KEYRING: &str = "stack.trident.replace_keyring";
+pub const SPAN_REPLACE_KEYRING: &str = "tack.trident.replace_keyring";
 
 /// Why the Trident halted. Closed; used as the `cause` label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

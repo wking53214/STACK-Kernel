@@ -155,7 +155,7 @@ impl<C: Clock> CeilingPad<C> {
     /// halted leaves it alone). Call it only after the clock problem is
     /// understood.
     pub fn reset(&self) {
-        let _span = tracing::info_span!("stack.anc.ceiling_reset").entered();
+        let _span = tracing::info_span!("tack.anc.ceiling_reset").entered();
         let was = self.halted.swap(false, Ordering::AcqRel);
         telemetry::emit_reset(was);
         tracing::warn!(was_halted = was, "ceiling pad reset by operator");
@@ -520,7 +520,7 @@ fn pad_span(async_api: bool) -> tracing::Span {
     // `tracing` span names must be literals, hence two calls.
     if async_api {
         tracing::debug_span!(
-            "stack.anc.ceiling_pad_async",
+            "tack.anc.ceiling_pad_async",
             outcome = Empty,
             trip = Empty,
             buckets = Empty,
@@ -528,7 +528,7 @@ fn pad_span(async_api: bool) -> tracing::Span {
         )
     } else {
         tracing::debug_span!(
-            "stack.anc.ceiling_pad",
+            "tack.anc.ceiling_pad",
             outcome = Empty,
             trip = Empty,
             buckets = Empty,

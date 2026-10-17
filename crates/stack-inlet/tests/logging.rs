@@ -78,7 +78,7 @@ fn logs_carry_length_and_keyed_digest_never_raw_input_or_plain_digest() {
     }
     assert!(out.contains("input_hmac=unkeyed"), "{out}");
     assert!(
-        out.contains("stack.inlet.winnow"),
+        out.contains("tack.inlet.winnow"),
         "span name present: {out}"
     );
     assert!(

@@ -15,7 +15,7 @@
 //!   anchored head is not in the chain. No correction by the submitter
 //!   repairs a broken seal. The resolution is **quarantine**: the export is
 //!   not accepted as evidence, the finding is counted in
-//!   `stack_sentinel_trips_total`, and the report names the first failing row
+//!   `tack_sentinel_trips_total`, and the report names the first failing row
 //!   for an operator to review.
 //!
 //! Two key findings are TERMINAL_BREACH although they involve keys, because

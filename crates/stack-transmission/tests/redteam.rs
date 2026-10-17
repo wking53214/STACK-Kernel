@@ -1,4 +1,4 @@
-//! Independent red-team tests for stack-transmission.
+//! Independent red-team tests for tack-transmission.
 //!
 //! Each test asserts the SAFE behaviour. A failing test means the weakness
 //! named in its doc comment exists. Test keys and configs here are test
