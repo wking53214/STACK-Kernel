@@ -206,7 +206,7 @@ Two timing notes follow. A shed reply is fast, but its speed reflects load, whic
 | Adaptive leakage budget spent | Window budget spent: RETRY. Lifetime budget spent: TERMINAL_BREACH. In both cases requests continue. (Strategy 2 split this after the red team showed that one slow request could otherwise force a freeze only an operator can clear.) | rollback | The target returns to its configured public maximum and stops adapting; that last change is one more counted step. Halting would let a flood force a shutdown. |
 | Monotonic clock unavailable | TERMINAL_BREACH | halt | No padding guarantee holds without a clock, and no correction to the input repairs that. |
 
-Quarantine is not used. Isolating a sender belongs to admission control, not to timing.
+The ceiling and pipeline pads never quarantine. The adaptive pad signals quarantine only for a panicked operation, and the caller isolates the input or sender; isolating a sender belongs to admission control, not to timing.
 
 ### What exists today
 
