@@ -19,12 +19,13 @@ Each item is one question, then its tradeoff. They come from every builder's ope
 - [ ] Should every gauge be written as 0 at construction, so absence alerts work? Some gauges stay absent until their first event, but writing 0 at build time resets a series another instance shares.
 - [ ] Should metrics and logs move off the request path, through a bounded channel to a telemetry thread? Outcome-dependent nanoseconds land in the time a caller sees today; a channel is one more queue to bound, and it can drop events.
 - [ ] Should the allowed dependency list grow to admit a formal constant-time checker, the sha2 assembly feature, a confusables table or a signature scheme? Each closes a limit recorded in this manual, at the cost of more code in the trusted base.
+- [ ] Should the Inlet and Elastic Bumpers move inside the ANC boundary? The diagram releases their refusals at once, but the bumper's refusal time varies with the input and its section asks for ANC around the whole request. Moving them inside pads every refusal, at the cost of holding a slot for each one.
 
 ### ANC strategies and harness
 
 - [ ] Should Spin mode leave production profiles, or be refused when `max_concurrent` exceeds the CPU count? Spin was the most precise when idle (0.11 to 0.13 µs late) but about 1.1 ms late at p99 in the recorded unpinned flood, with 8 threads on 4 CPUs.
 - [ ] Should `hard_ceiling_buckets = 1` be required for secret-heavy operations? Each overrun can reveal up to log2(H + 1) bits; H = 1 turns more slow requests into RETRY.
-- [ ] Should epoch Sleep mode be dropped, since KS flagged it in every full-size run? Hybrid passed KS but used about 4 times the CPU and added about 501 us instead of 180 us.
+- [ ] Should epoch Sleep mode be dropped, since KS flagged it in every full-size run? Hybrid passed KS but used about 4 times the CPU and added about 501 µs instead of 180 µs.
 - [ ] Should the adaptive controller ship at all, given that its 128-bit budget froze it within a second on this host? A larger floor or epoch keeps it adapting longer, but gives back most of its latency benefit over Strategy 1.
 - [ ] Should `AdaptivePad::naive` and `balanced_dummy` stay reachable in the public API? They are measured counterexamples that tests depend on. `AdaptivePad::naive` now needs `allow_naive_controller`, as `balanced_dummy` needs `allow_leaky_validators`; the open question is whether to hide them behind a cargo feature as well.
 - [x] Should a pad hold every slot until one fixed release time, or isolate slots per sender? Decided: hold every slot for one fixed time from admission (the cap, or the hard ceiling). Capacity cost is up to H times; extra registers that open on backlog are the planned offset.

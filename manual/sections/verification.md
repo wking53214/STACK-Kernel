@@ -155,8 +155,8 @@ The `cargo test` smoke tests use smaller samples, debug builds and, for Strategy
 | Run | Samples | Smallest mean shift the uncropped test could flag |
 |---|---|---|
 | Harness calibration | 200,000 per run across both classes; 1,000 A/A runs (50 recorded so far) | Not applicable |
-| Strategy 1 verify | 100,000 per class target, drawn at random (100,084 A and 99,916 B) | 1.9 to 4.7 us, padded |
-| Strategy 2 verify | 100,000 per class; 10,000 probes per class for poisoning; about 20,000 per class at the production budget | 13.4 to 20.4 us, epoch target |
+| Strategy 1 verify | 100,000 per class target, drawn at random (100,084 A and 99,916 B) | 1.9 to 4.7 µs, padded |
+| Strategy 2 verify | 100,000 per class; 10,000 probes per class for poisoning; about 20,000 per class at the production budget | 13.4 to 20.4 µs, epoch target |
 | Strategy 3 verify | Exactly 100,000 per class | 8.3 to 17.0 ns, through the gate |
 | `cargo test` smoke tests | 20,000 per class (Strategies 1 and 3), 2,000 per class (Strategy 2) | Not evidence |
 

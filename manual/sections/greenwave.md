@@ -240,7 +240,7 @@ Every operation returns a typed `Trip` or a success value. Library code contains
 | `clock_regressed` (any operation, including reset) | TERMINAL_BREACH | halt | Every bound assumes time never goes backwards. Queues and live tickets are kept for the operator. |
 | `halted` (any operation while halted) | TERMINAL_BREACH | halt | Nothing the caller changes repairs it. Only an operator `reset` does. |
 | `driver_stopped` (driver loop): the runtime is shutting down | TERMINAL_BREACH | reject | The loop could not run. Nothing was taken out of a queue. |
-| `ConfigError`, 16 variants (build) | TERMINAL_BREACH | halt | The scheduler is never built. Includes `phase_too_short_for_driver` below 1 ms. |
+| `ConfigError`, 16 variants (build) | TERMINAL_BREACH | reject | The scheduler is never built. Includes `phase_too_short_for_driver` below 1 ms. |
 | Not a trip: a stage runs after its due phase ended | PASS, with `late = true` | none | Quantization absorbs lateness up to the epoch boundary. Counted in `stack_greenwave_stage_late_total`. |
 | Not a trip: phases pass with no poll | PASS on the next poll | none | Lost phases are not made up. Counted in `stack_greenwave_phases_missed_total`. |
 | Not a trip: a lane dispatches past its live-ticket cap | PASS | none; that lane's oldest ticket expires | Memory stays bounded per lane. Counted in `stack_greenwave_tickets_expired_total`. |
@@ -401,7 +401,7 @@ Three test edits were made during the fixes:
 
 Known limitations that remain:
 
-- **Full CPU load costs phases.** The red-team binary failed 3 of 14 full runs for this manual. Two failures were `rt_driver_default_config_misses_no_phases`, at 10.5 and 12.9 ms against an 8 ms limit; the third was not identified. That test passed all 4 isolated runs.
+- **Full CPU load costs phases.** In a first series of 14 full runs for this manual, the red-team binary failed 3 times. Two failures were `rt_driver_default_config_misses_no_phases`, at 10.5 and 12.9 ms against an 8 ms limit; the third was not identified. That test passed all 4 isolated runs. A second series of 10 full runs, reported at the end of this section, had 3 failing runs: 2 in the red-team binary and 1 in driver_metrics.
 - **No fix without privileges.** Per the fix agent, the flood test holds all 4 vCPUs and the kernel wakes the driver up to about 4 ms late. Raising the driver thread's priority would need `unsafe` system calls, which the crate rules forbid. Missed phases are counted, and the bound holds only when none are lost.
 - **One unexplained failure.** tests/driver_metrics.rs failed once in 16 runs, after 1.18 s, with its message not captured. Load is the assumed cause.
 - **Blind metric reading.** Two red-team driver tests read `phases_missed_total` through a thread-local recorder that cannot see the driver thread, so it reads 0.
