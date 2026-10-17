@@ -116,11 +116,37 @@ pub struct AuditRecord {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
 
+    /// Sealing installs a seccomp filter that cannot be removed, so it runs in
+    /// a child copy of this test binary. The parent only checks that the child
+    /// seals and exits cleanly, within a deadline, so a hang fails fast.
     #[test]
     fn test_ffi_initialization() {
-        assert!(host_initialize_and_seal().is_ok());
+        const CHILD_ENV: &str = "STACK_FFI_SEAL_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            assert!(host_initialize_and_seal().is_ok());
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut child = std::process::Command::new(exe)
+            .args(["--exact", "tests::test_ffi_initialization", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .expect("spawn sealed child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll child") {
+                assert!(status.success(), "sealed child failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("sealed child did not exit within 60 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[test]
