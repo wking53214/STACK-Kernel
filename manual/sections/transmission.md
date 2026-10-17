@@ -204,13 +204,13 @@ Every refusal is a typed `Trip` that names the operation, the reason, the CNS ou
 | `drain_timeout`: in-flight work did not reach zero in time | RETRY | Rollback | The old gear and epoch stay, and parked workers proceed on them. A cooldown of twice the clutch time follows. |
 | `epoch_exhausted`: engaged epoch is `u64::MAX` | TERMINAL_BREACH | Reject | No new epoch can be numbered without reuse. `engage()` keeps working on the current gear. |
 | `halted`: operator halt, recovered poison or broken invariant | TERMINAL_BREACH | Halt | Resubmitting cannot fix it; only `operator_reset()` can. Guards already issued run to completion. |
-| `halted` during a cooldown, drain or clutch wait | TERMINAL_BREACH | Halt; a pending shift is also rolled back | A halted component must not change mode. This holds even if the operator resets before the waiter wakes. |
+| `halted` during a cooldown, drain or clutch wait | TERMINAL_BREACH | Halt (any pending shift is abandoned and the old gear stays engaged) | A halted component must not change mode. This holds even if the operator resets before the waiter wakes. |
 | Lock poisoned by a panic under the lock | TERMINAL_BREACH on that call and every later one | Halt, cause `poisoned` | `UnwindRepair` already restored the state. Halting stops admission on state nobody has checked. |
 | Worker panics while holding a guard | No verdict; only that request fails | None needed | The RAII drop lowers the count during the unwind and wakes a waiting shifter. |
 | In-flight count would go below zero | Later calls get TERMINAL_BREACH | Halt, cause `invariant` | The drain guarantee can no longer be trusted. Unreachable through the public API. |
 | Invalid `TransmissionConfig` | Construction error | Reject: nothing is built | A zero cap or out-of-range wait is never replaced by a default. |
 
-**What can still panic.** The crate's own code never panics, and `shift()` contains a panic from dropping the replaced gear. Two panics from outside the crate can still reach a caller.
+**What can still panic.** The crate's own code never panics, and `shift()` catches and counts a panic from dropping the replaced gear. Two panics from outside the crate can still reach a caller.
 
 The first comes from a metrics or tracing backend that panics under the lock. The state is repaired during the unwind, and the next call halts.
 

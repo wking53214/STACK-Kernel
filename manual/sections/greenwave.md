@@ -1,6 +1,6 @@
 ## 5. Traffic Cop and Green Wave Routing
 
-A request that finds its lane empty is dispatched within one epoch (8 ms by default) plus poll latency, whatever other lanes do.
+A request that finds its lane empty is dispatched within one epoch (8 ms by default) plus poll latency, whatever other lanes do, as long as the driver misses no phases.
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 

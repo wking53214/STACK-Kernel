@@ -255,7 +255,7 @@ In every flood the shed and request metrics matched the observed outcomes exactl
 
 A shed request still costs a CAS and its telemetry, and flooders retry at once. Total CPU protection therefore needs a rate limiter or CPU quota in front of the gate.
 
-CPU per request rose from 575 to 691 ns pinned to 3.1 to 3.5 µs unpinned. The flood ran with the test recorder installed globally, which takes a lock on every metric call. Contention on that lock and on the shared slot counter is the likely cause, but that is an inference that was not profiled.
+CPU per request was 575 to 691 ns pinned, and rose to 3.1 to 3.5 µs unpinned. The flood ran with the test recorder installed globally, which takes a lock on every metric call. Contention on that lock and on the shared slot counter is the likely cause, but that is an inference that was not profiled.
 
 **Shedding as a second channel.** A shed reply returns faster than a mismatch. For `constant_time` that reveals load, not the secret. A red-team probe that saw only reply codes stayed at |t| 1.87 or less over 14 runs.
 

@@ -1,6 +1,6 @@
 ## Verification pipeline
 
-A build ships only if all 16 timing verdicts stay at or below |t| 4.5, at 100,000 samples per class, on the first attempt.
+A build ships only if all 16 timing verdicts stay at or below |t| 4.5, at 100,000 samples per class, on the first attempt: 11 strategy verdicts (3 for Strategy 1, 4 for Strategy 2, 4 for Strategy 3) and 5 constant-time control runs.
 
 *New design: the job below has not run on GitHub Actions. Its gate expressions were run against the recorded verify output, and its test commands were re-run for this section.*
 
@@ -10,7 +10,7 @@ The job has two parts. `unit` runs on every pull request, on a GitHub-hosted mac
 
 `timing` runs nightly and on release tags, on a self-hosted runner: a machine the team owns, which GitHub sends jobs to. It calibrates the harness, runs the three strategies' release-mode `examples/verify` programs pinned to one core, and gates on their JSON output.
 
-Timing runs apart from `unit` for two reasons. It measures for about 13 minutes: 232 s for Strategy 1, 453 to 511 s for Strategy 2, 9 s for Strategy 3. It also needs a quiet machine, and a shared hosted runner is noisier than even the VM used for this manual.
+Timing runs apart from `unit` for two reasons. It measures for about 12 minutes: 232 s for Strategy 1, 453 to 511 s for Strategy 2, 9 s for Strategy 3. It also needs a quiet machine, and a shared hosted runner is noisier than even the VM used for this manual.
 
 ```yaml
 name: stack-kernel-verify
@@ -196,7 +196,7 @@ test result: FAILED. 11 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out;
 error: test failed, to rerun pass `-p stack-anc-pipeline --test redteam`
 ```
 
-The other eight crates passed every test in this re-run, and clippy with warnings denied exited 0 for all eleven. Two timing-sensitive suites are flaky on a loaded host. They are Strategy 1's rt04 and Green Wave's driver tests, which failed 3 of 10 earlier full runs.
+The other eight crates passed every test in this re-run, and clippy with warnings denied exited 0 for all eleven. Two timing-sensitive suites are flaky on a loaded host: Strategy 1's rt04, which failed 3 of 12 full runs, and Green Wave's driver tests, which failed in 3 of 10.
 
 ### What a pass does and does not establish
 

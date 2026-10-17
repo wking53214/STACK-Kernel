@@ -1,6 +1,6 @@
 ## ANC strategy 1: deterministic ceiling padding
 
-Ceiling padding showed no detectable leak in 9 of 9 release runs at about 100,000 per class (worst max |t| 2.93; leak line 4.5).
+Ceiling padding showed no detectable leak in 9 of 9 release runs at about 100,000 per class (worst max |t| 2.92; leak line 4.5).
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
@@ -279,7 +279,7 @@ Runs 1 and 2 were pinned to one CPU with `taskset`; run 3 was an unpinned extra 
 | Unpadded `ct_validate` (control) | 100,084 A, 99,916 B | 1.65, 1.24, 1.54 | No, 0 of 3 | Not run: no pad |
 | Padded, Sleep | 100,084 A, 99,916 B | 1.42, 2.73, 2.70 | No, 0 of 3 | 0.013, 0.011, 0.042 cores (0.106, 0.095, 0.49) |
 | Padded, Spin (flood with no budget) | 100,084 A, 99,916 B | 1.23, 1.86, 1.37 | No, 0 of 3 | 0.92, 0.92, 1.74 cores (0.995, 0.994, 2.15) |
-| Padded, Hybrid (flood with budget) | 100,084 A, 99,916 B | 1.30, 2.36, 2.93 | No, 0 of 3 | 0.15, 0.18, 0.18 cores (0.245, 0.248, 0.63) |
+| Padded, Hybrid (flood with budget) | 100,084 A, 99,916 B | 1.30, 2.36, 2.92 | No, 0 of 3 | 0.15, 0.18, 0.18 cores (0.245, 0.248, 0.63) |
 
 Across the 9 padded runs, second-order |t| was at most 1.26, and KS p was 0.044 or higher. The calibration leak came from the 50th-percentile crop each time; the uncropped |t| alone ranged from 1.5 to 16.8.
 
@@ -287,7 +287,7 @@ Overruns were rare: 9 released late and 3 RETRYs in 1.8 million padded requests.
 
 **Red team and test status.** A red-team pass wrote 17 attack tests against the first build: 9 broke it, 1 partly broke it, and 7 held. The fixes made all 9 pass, though rt04 is now flaky.
 
-One pre-existing async test had its upper bound raised from 50 ms to 300 ms for the new retry window. My final re-run of `cargo test -p stack-anc-ceiling --all-targets` ended with this summary line:
+One pre-existing async test had its upper bound raised from 50 ms to 300 ms for the new retry window. The final re-run for this manual of `cargo test -p stack-anc-ceiling --all-targets` ended with this summary line:
 
 ```text
 test result: FAILED. 15 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s

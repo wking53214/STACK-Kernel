@@ -22,7 +22,7 @@ Each item is one question, then its tradeoff. They come from every builder's ope
 
 ### ANC strategies and harness
 
-- [ ] Should Spin mode leave production profiles, or be refused when `max_concurrent` exceeds the CPU count? Spin was the most precise when idle (0.11 to 0.13 us late) but 850 us late at p99 with 8 threads on 4 CPUs.
+- [ ] Should Spin mode leave production profiles, or be refused when `max_concurrent` exceeds the CPU count? Spin was the most precise when idle (0.11 to 0.13 µs late) but about 1.1 ms late at p99 in the recorded unpinned flood, with 8 threads on 4 CPUs.
 - [ ] Should `hard_ceiling_buckets = 1` be required for secret-heavy operations? Each overrun can reveal up to log2(H + 1) bits; H = 1 turns more slow requests into RETRY.
 - [ ] Should epoch Sleep mode be dropped, since KS flagged it in every full-size run? Hybrid passed KS but used about 4 times the CPU and added about 501 us instead of 180 us.
 - [ ] Should the adaptive controller ship at all, given that its 128-bit budget froze it within a second on this host? A larger floor or epoch keeps it adapting longer, but gives back most of its latency benefit over Strategy 1.
