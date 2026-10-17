@@ -1,8 +1,8 @@
-//! # stack-inlet: the Inlet Winnowing Filter
+//! # tack-inlet: the Inlet Winnowing Filter
 //!
-//! **Status: new design.** Of the seven components of the STACK governance
+//! **Status: new design.** Of the seven components of the TACK governance
 //! kernel, only the Sentinel Hash-Chain exists today (in `sentinel_os`). The
-//! Inlet Winnowing Filter did not exist in any STACK repository before this
+//! Inlet Winnowing Filter did not exist in any TACK repository before this
 //! crate; this is its reference implementation.
 //!
 //! ## The metaphor
@@ -106,7 +106,7 @@
 //! ## Telemetry
 //!
 //! See [`telemetry`] for metric names and alert rules. Spans are
-//! `stack.inlet.winnow`, `stack.inlet.precheck` and `stack.inlet.stream`. Logs
+//! `tack.inlet.winnow`, `tack.inlet.precheck` and `tack.inlet.stream`. Logs
 //! carry the input's length and, when the deployment supplies a
 //! [`telemetry::LogKey`], a keyed digest (HMAC-SHA256 of the SHA-256); never
 //! its bytes and never its plain SHA-256, which reverses low-entropy input.
@@ -248,7 +248,7 @@ impl Inlet {
     ///
     /// The [`Reason::Oversize`] verdict when `declared_len` exceeds the cap.
     pub fn precheck(&self, declared_len: u64) -> Result<(), Verdict> {
-        let span = tracing::info_span!("stack.inlet.precheck", declared_len);
+        let span = tracing::info_span!("tack.inlet.precheck", declared_len);
         let _entered = span.enter();
         let started = Instant::now();
         let len = usize::try_from(declared_len).unwrap_or(usize::MAX);
@@ -267,7 +267,7 @@ impl Inlet {
     /// SHA-256 of the input is computed, whatever the input contains.
     #[must_use]
     pub fn winnow(&self, input: &[u8]) -> Verdict {
-        let span = tracing::info_span!("stack.inlet.winnow", len = input.len());
+        let span = tracing::info_span!("tack.inlet.winnow", len = input.len());
         let _entered = span.enter();
         let started = Instant::now();
         let v = if input.len() > self.config.max_len {
@@ -302,7 +302,7 @@ impl Inlet {
             finished: false,
             log_key: self.log_key.clone(),
             started: Instant::now(),
-            span: tracing::info_span!("stack.inlet.stream", chunks = tracing::field::Empty),
+            span: tracing::info_span!("tack.inlet.stream", chunks = tracing::field::Empty),
         }
     }
 }

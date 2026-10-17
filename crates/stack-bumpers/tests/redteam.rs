@@ -1,4 +1,4 @@
-//! Independent red-team tests for stack-bumpers.
+//! Independent red-team tests for tack-bumpers.
 //!
 //! Every test asserts the SAFE behaviour, so a test FAILS while the weakness
 //! it describes exists. Test names start with `redteam_`.

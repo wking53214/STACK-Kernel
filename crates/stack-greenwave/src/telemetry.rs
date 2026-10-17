@@ -80,24 +80,24 @@ pub const QUEUE_DEPTH: &str = "tack_greenwave_queue_depth";
 /// or dropped. Alert on `max(tack_greenwave_halted) >= 1`.
 pub const HALTED: &str = "tack_greenwave_halted";
 
-/// Span names, `stack.greenwave.<operation>`.
+/// Span names, `tack.greenwave.<operation>`.
 pub mod spans {
     /// Building a scheduler from configuration.
-    pub const BUILD: &str = "stack.greenwave.build";
+    pub const BUILD: &str = "tack.greenwave.build";
     /// One `admit` call.
-    pub const ADMIT: &str = "stack.greenwave.admit";
+    pub const ADMIT: &str = "tack.greenwave.admit";
     /// One `poll` call.
-    pub const POLL: &str = "stack.greenwave.poll";
+    pub const POLL: &str = "tack.greenwave.poll";
     /// One `stage_check` call.
-    pub const STAGE_CHECK: &str = "stack.greenwave.stage_check";
+    pub const STAGE_CHECK: &str = "tack.greenwave.stage_check";
     /// One `complete` call.
-    pub const COMPLETE: &str = "stack.greenwave.complete";
+    pub const COMPLETE: &str = "tack.greenwave.complete";
     /// One operator `reset`.
-    pub const RESET: &str = "stack.greenwave.reset";
+    pub const RESET: &str = "tack.greenwave.reset";
     /// The tokio driver's dispatch loop.
-    pub const DRIVE: &str = "stack.greenwave.drive";
+    pub const DRIVE: &str = "tack.greenwave.drive";
     /// The tokio driver holding a result until its release time.
-    pub const RELEASE_WAIT: &str = "stack.greenwave.release_wait";
+    pub const RELEASE_WAIT: &str = "tack.greenwave.release_wait";
 }
 
 /// Register descriptions and units with the installed recorder. Optional:

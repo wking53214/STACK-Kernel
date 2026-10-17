@@ -87,19 +87,19 @@ pub const ALL_METRICS: [&str; 15] = [
 ];
 
 /// Span around one `engage()` call (debug level; it is on the hot path).
-pub const SPAN_ENGAGE: &str = "stack.transmission.engage";
+pub const SPAN_ENGAGE: &str = "tack.transmission.engage";
 /// Span around one `shift()` call.
-pub const SPAN_SHIFT: &str = "stack.transmission.shift";
+pub const SPAN_SHIFT: &str = "tack.transmission.shift";
 /// Span around an operator halt.
-pub const SPAN_OPERATOR_HALT: &str = "stack.transmission.operator_halt";
+pub const SPAN_OPERATOR_HALT: &str = "tack.transmission.operator_halt";
 /// Span around an operator reset.
-pub const SPAN_OPERATOR_RESET: &str = "stack.transmission.operator_reset";
+pub const SPAN_OPERATOR_RESET: &str = "tack.transmission.operator_reset";
 
 /// Prometheus alerting rules over the metrics above, in the rule-file YAML
 /// format. Thresholds are starting points; tune `for` windows to the shift
 /// cadence of the deployment.
 pub const PROMETHEUS_RULES: &str = r#"groups:
-  - name: stack-transmission
+  - name: tack-transmission
     rules:
       - alert: TackTransmissionHalted
         expr: max(tack_transmission_halted) == 1
@@ -266,7 +266,7 @@ mod tests {
             }
         }
         for span in [SPAN_ENGAGE, SPAN_SHIFT, SPAN_OPERATOR_HALT, SPAN_OPERATOR_RESET] {
-            assert!(span.starts_with("stack.transmission."), "{span}");
+            assert!(span.starts_with("tack.transmission."), "{span}");
         }
     }
 

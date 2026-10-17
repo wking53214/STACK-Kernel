@@ -1,9 +1,9 @@
-//! # stack-transmission: the Tractor Transmission
+//! # tack-transmission: the Tractor Transmission
 //!
 //! **Status: new design.** This crate is a reference implementation written
-//! for the STACK Governance Kernel manual. Of the kernel's seven components
+//! for the TACK Governance Kernel manual. Of the kernel's seven components
 //! only the Sentinel Hash-Chain exists today (in `sentinel_os`). The Tractor
-//! Transmission does not exist anywhere in the STACK repositories yet; this
+//! Transmission does not exist anywhere in the TACK repositories yet; this
 //! crate is its first implementation.
 //!
 //! ## The metaphor

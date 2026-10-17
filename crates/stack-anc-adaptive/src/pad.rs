@@ -179,7 +179,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
     /// Operator reset after a halt: the pad accepts work again. Counted in
     /// `stack_anc_resets_total{scope="pad"}`; sets `stack_anc_halted` to 0.
     pub fn reset(&self) {
-        let _span = tracing::info_span!("stack.anc.adaptive_reset", controller = self.kind.label())
+        let _span = tracing::info_span!("tack.anc.adaptive_reset", controller = self.kind.label())
             .entered();
         let was = self.halted.swap(false, Ordering::AcqRel);
         telemetry::emit_reset(self.kind, "pad");
@@ -192,7 +192,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
     /// `stack_anc_resets_total{scope="controller"}`.
     pub fn reset_controller(&self) {
         let _span = tracing::info_span!(
-            "stack.anc.adaptive_controller_reset",
+            "tack.anc.adaptive_controller_reset",
             controller = self.kind.label()
         )
         .entered();
@@ -460,7 +460,7 @@ fn drop_quietly(payload: Box<dyn Any + Send>) {
 
 fn pad_span(kind: ControllerKind) -> tracing::Span {
     tracing::debug_span!(
-        "stack.anc.adaptive_pad",
+        "tack.anc.adaptive_pad",
         controller = kind.label(),
         outcome = Empty,
         trip = Empty,

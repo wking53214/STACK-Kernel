@@ -12,13 +12,15 @@ members = [
     "crates/stack-anc-ceiling",
     "crates/stack-anc-adaptive",
     "crates/stack-anc-pipeline",
+    "crates/stack-p3-2",
     "crates/_warm",
+    "crates/stack-ffi",
 ]
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.80"
-license = "UNLICENSED"
+license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]

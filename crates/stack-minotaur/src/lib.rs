@@ -1,8 +1,8 @@
 //! # stack-minotaur: the Minotaur String
 //!
-//! **Status: new design.** Of the seven components of the STACK governance
+//! **Status: new design.** Of the seven components of the TACK governance
 //! kernel, only the Sentinel Hash-Chain exists today (in `sentinel_os`). The
-//! Minotaur String did not exist in any STACK repository before this crate;
+//! Minotaur String did not exist in any TACK repository before this crate;
 //! this is its first reference implementation, and nothing in `sentinel_os`,
 //! CNS, observe-perceive, ghost_tools or Resume_OS calls it yet.
 //!

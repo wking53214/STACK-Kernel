@@ -194,7 +194,7 @@ impl PipelineGate {
     pub fn check(&self, candidate: &[u8]) -> CheckResult {
         let start = self.config.record_response_time.then(Instant::now);
         let span = tracing::debug_span!(
-            "stack.anc.pipeline_check",
+            "tack.anc.pipeline_check",
             validator = self.config.validator.label(),
             input_len = candidate.len(),
             outcome = tracing::field::Empty,
