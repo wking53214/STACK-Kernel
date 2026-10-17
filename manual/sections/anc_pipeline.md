@@ -195,7 +195,7 @@ impl Default for PipelineConfig {
 
 The same idea already exists in sentinel_os. Its `api_key_auth.py` compares keys with Python's `hmac.compare_digest` and never exits early, but that code has not been measured with this harness.
 
-**Telemetry.** The gate emits `tack_anc_requests_total`, `tack_anc_shed_total`, `tack_anc_token_mismatch_total`, `tack_anc_leaky_validator_active` and `tack_anc_response_seconds`. Every label comes from a closed enum, and each check opens one debug span, `tack.anc.pipeline_check`.
+**Telemetry.** The gate emits `tack_anc_requests_total`, `tack_anc_shed_total`, `tack_anc_token_mismatch_total`, `tack_anc_validated_total`, `tack_anc_leaky_validator_active` and `tack_anc_response_seconds`. Every label comes from a closed enum, and each check opens one debug span, `tack.anc.pipeline_check`.
 
 Debug logs carry the input length, plus the full SHA-256 hex for inputs within the 32-byte cap; raw input is never logged. Hashing 32 bytes costs the same for every value, so it adds no class-dependent time. A red-team test with debug logging and a live recorder on the path stayed at max |t| 1.81, in a debug build.
 
@@ -400,7 +400,7 @@ Formal tools that could check the no-branch property, such as ct-verif and binse
 | The debug log carries the unkeyed SHA-256 of the secret on every PASS | A log reader can test guesses offline, with no rate limit or alert. That is infeasible for a random 256-bit token but practical for a weak one. | Log HMAC-SHA256 under a random per-process key, or omit the digest on PASS. Add to convention 4: for credentials, log only a keyed digest. |
 | The leaky gauge is missed when the recorder starts after the gate | The critical alert never fires. | Set the gauge on every check, or add a publish step to run after the exporter starts. Add an `absent()` alert. |
 | The leaky gauge never clears | The critical alert keeps firing after the leaky gate is gone, which trains operators to silence it. | Decrement the gauge when a leaky gate is dropped, so it counts live leaky gates. |
-| The guessing alert divides by all requests | Two cheap malformed requests per guess cut the ratio to 0.333, under the 0.5 line, which is itself an unmeasured placeholder. | Divide by requests that reached the validator, and add an absolute-rate alert on mismatches. |
+| The guessing alert divides by all requests | Two cheap malformed requests per guess cut the ratio to 0.333, under the 0.5 line, which is itself an unmeasured placeholder. | **Fixed for the denominator:** the gate now emits `stack_anc_validated_total` (requests that reached the validator, sheds excluded), and the alert should divide by that. Still open: the 0.5 threshold and an absolute-rate alert on mismatches. |
 | The `SlotsFull` docs say a shed reflects load only | Wrong for both leaky validators, whose shed rate tracks the secret. | Correct the docs, and never pair a leaky validator with a small `max_in_flight`. |
 
 `TokenSecret` zeroes its bytes on drop only on a best-effort basis. Without volatile writes or a zeroize crate, the compiler does not promise to keep the overwrite, and copies may remain in old stack frames.

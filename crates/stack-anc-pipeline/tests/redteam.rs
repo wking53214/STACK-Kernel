@@ -366,9 +366,9 @@ fn telemetry_label_cardinality_is_closed() {
             assert!(allowed_values.contains(val.as_str()), "label value {val}");
         }
     }
-    // 3 validators x (2 requests + 2 histogram + 1 mismatch + 1 gauge for
-    // the two leaky ones) + 3 shed reasons at most.
-    assert!(s.len() <= 3 * 5 + 2 + 3, "{} keys: {s:?}", s.len());
+    // 3 validators x (2 requests + 2 histogram + 1 mismatch + 1 validated)
+    // + 1 gauge for each of the two leaky ones + 3 shed reasons at most.
+    assert!(s.len() <= 3 * 6 + 2 + 3, "{} keys: {s:?}", s.len());
 }
 
 /// Attack (unit confusion): the histogram named `_seconds` must hold
@@ -517,10 +517,10 @@ fn alert_guessing_ratio_cannot_be_diluted_by_cheap_malformed_requests() {
     });
     let s = snapshot(&snap);
     let mismatch = counter_sum(&s, names::TOKEN_MISMATCH_TOTAL) as f64;
-    let requests = counter_sum(&s, names::REQUESTS_TOTAL) as f64;
+    let requests = counter_sum(&s, names::VALIDATED_TOTAL) as f64;
     // The documented alert expression, evaluated on the same counters.
     let ratio = mismatch / requests.max(1e-9);
-    eprintln!("guessing alert ratio {ratio:.3} (mismatch {mismatch}, requests {requests})");
+    eprintln!("guessing alert ratio {ratio:.3} (mismatch {mismatch}, validated {requests})");
     assert!(
         ratio > 0.5,
         "100% of well-formed tokens were wrong, yet the guessing alert ratio is {ratio:.3}"
