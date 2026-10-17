@@ -253,7 +253,7 @@ void test_defect4_concurrent_refund() {
 
 int main() {
     std::cout << "\n";
-    std::cout << "≡TACK KERNEL LAYER 4 RED-TEAM VALIDATION\n";
+    std::cout << "≡STACK KERNEL LAYER 4 RED-TEAM VALIDATION\n";
     std::cout << "========================================\n\n";
 
     // Defect 1 tests

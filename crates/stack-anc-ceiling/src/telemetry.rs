@@ -25,16 +25,16 @@
 //! that identifies the source is `strategy="ceiling"`), so thresholds that
 //! depend on configuration use the sum over those pads.
 //!
-//! * `TackAncCeilingHalted` (critical):
+//! * `StackAncCeilingHalted` (critical):
 //!   `max(stack_anc_halted{strategy="ceiling"}) > 0`. The gauge counts
 //!   halted pads: +1 on the transition to halted, -1 on the reset of a
 //!   halted pad. A reset of a pad that is not halted does not touch it, so
 //!   one pad's reset cannot clear another pad's halt. A halted pad that is
 //!   dropped without a reset keeps the count raised until the process
 //!   restarts.
-//! * `TackAncCeilingTerminal` (critical):
+//! * `StackAncCeilingTerminal` (critical):
 //!   `increase(stack_anc_requests_total{strategy="ceiling",outcome="terminal_breach"}[5m]) > 0`.
-//! * `TackAncCeilingOverrun` (warning):
+//! * `StackAncCeilingOverrun` (warning):
 //!   `increase(stack_anc_overrun_total{strategy="ceiling"}[15m]) > 0`.
 //!   Meaning: some work ran past the ceiling. If the work time depends on a
 //!   secret, each overrun can leak up to `log2(hard_ceiling_buckets + 1)`
@@ -44,7 +44,7 @@
 //!   one more distinguishable RETRY time. Overruns are also visible to
 //!   third parties, because an overrunning request holds its slot longer
 //!   and so changes who else is shed. Raise the ceiling.
-//! * `TackAncCeilingSpinOverBudget` (warning), `for: 10m`:
+//! * `StackAncCeilingSpinOverBudget` (warning), `for: 10m`:
 //!   `rate(stack_anc_spin_reserved_nanoseconds_total{strategy="ceiling"}[5m]) / 1e9 > T`
 //!   with `T` from [`spin_over_budget_threshold`] for a 5 minute window
 //!   (`cpu_per_second + burst / 300s`, summed over pads). A token bucket
@@ -52,7 +52,7 @@
 //!   threshold of `cpu_per_second` alone would fire on a correctly
 //!   configured pad at saturation. Above `T` the budget is not doing its
 //!   job (a bug, or pads missing from the sum).
-//! * `TackAncCeilingCancelled` (info):
+//! * `StackAncCeilingCancelled` (info):
 //!   `rate(stack_anc_requests_total{strategy="ceiling",outcome="cancelled"}[5m]) > 0`
 //!   sustained may be a connect-and-abort flood.
 
@@ -204,7 +204,7 @@ pub(crate) fn emit_reset(was_halted: bool) {
     }
 }
 
-/// Threshold for the `TackAncCeilingSpinOverBudget` alert, in cores (spin
+/// Threshold for the `StackAncCeilingSpinOverBudget` alert, in cores (spin
 /// seconds per wall second) averaged over `window`: the most a correctly
 /// working budget allows, `(cpu_per_second * window + burst) / window`.
 /// `None` for [`SpinBudgetConfig::Unlimited`] or a zero window. For several

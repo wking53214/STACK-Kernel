@@ -4,7 +4,7 @@ The brief's rolling-average target leaked (max |t| up to 24.7, leak line 4.5); t
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `tack-anc-adaptive`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-adaptive`, is a new design and is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 Max |t| is a test statistic, explained under the verification harness; above 4.5 counts as a detected leak. A pass means no detectable leak at that sample size, on one 4-vCPU virtual machine; it is never a proof. The fix's Sleep mode still failed a stricter test of distribution shape (KS) in every full-size run, while its Hybrid mode passed.
 
@@ -64,36 +64,36 @@ The descent from a public starting level, the warm-up, is not charged; only its 
 | `LeakBudgetSpent`, controller | RETRY | rollback | The target returns to the cap for the rest of the window. Waiting repairs it, and requests are still served. |
 | `LeakLifetimeSpent`, controller | TERMINAL_BREACH | rollback | The target stays at the cap until `reset_controller()`. Requests are still served. |
 
-An escalated release is not a trip: the value is returned and counted in `tack_anc_overrun_total`. The leak budget never halts the pad, because a flood that forces mispredictions could then force a shutdown.
+An escalated release is not a trip: the value is returned and counted in `stack_anc_overrun_total`. The leak budget never halts the pad, because a flood that forces mispredictions could then force a shutdown.
 
-**Telemetry.** Metric labels come only from closed sets: `strategy="adaptive"`, `controller`, and one of `outcome`, `reason`, `disposition` or `direction`. The only duration histogram, `tack_anc_response_seconds`, holds the post-padding time the client already sees. No metric carries the pre-padding work time.
+**Telemetry.** Metric labels come only from closed sets: `strategy="adaptive"`, `controller`, and one of `outcome`, `reason`, `disposition` or `direction`. The only duration histogram, `stack_anc_response_seconds`, holds the post-padding time the client already sees. No metric carries the pre-padding work time.
 
 | Metric | What it shows |
 |---|---|
-| `tack_anc_requests_total{outcome}` | One per request, sheds included |
-| `tack_anc_shed_total{reason}` | Refused at admission: `slots_full`, `input_too_large` or `halted` |
-| `tack_anc_overrun_total{disposition}` | `late` (naive), `escalated` (epoch) or `retry` (past the cap) |
-| `tack_anc_target_changes_total{direction}` | `increase`, `decrease` or `rollback` |
-| `tack_anc_leak_budget_bits`, `tack_anc_leak_lifetime_bits` | Bits charged in this window, and since the last reset |
-| `tack_anc_controller_frozen`, `tack_anc_controller_frozen_until_reset` | 1 while the target is held at the cap |
-| `tack_anc_spin_reserved_nanoseconds_total` | Spin reserved at admission; the spin actually done would reveal target minus work |
+| `stack_anc_requests_total{outcome}` | One per request, sheds included |
+| `stack_anc_shed_total{reason}` | Refused at admission: `slots_full`, `input_too_large` or `halted` |
+| `stack_anc_overrun_total{disposition}` | `late` (naive), `escalated` (epoch) or `retry` (past the cap) |
+| `stack_anc_target_changes_total{direction}` | `increase`, `decrease` or `rollback` |
+| `stack_anc_leak_budget_bits`, `stack_anc_leak_lifetime_bits` | Bits charged in this window, and since the last reset |
+| `stack_anc_controller_frozen`, `stack_anc_controller_frozen_until_reset` | 1 while the target is held at the cap |
+| `stack_anc_spin_reserved_nanoseconds_total` | Spin reserved at admission; the spin actually done would reveal target minus work |
 
-Spans are `tack.anc.adaptive_pad` for each request, plus `tack.anc.adaptive_reset` and `tack.anc.adaptive_controller_reset`. Inputs are logged at debug level, after release, as their length and full SHA-256 hex. The change and budget metrics are derived from work times, so the metrics endpoint must stay private.
+Spans are `stack.anc.adaptive_pad` for each request, plus `stack.anc.adaptive_reset` and `stack.anc.adaptive_controller_reset`. Inputs are logged at debug level, after release, as their length and full SHA-256 hex. The change and budget metrics are derived from work times, so the metrics endpoint must stay private.
 
 Proposed alert rules follow. They use the crate's metric names but were not loaded into a Prometheus server here. The metric behind the lifetime alert is emitted but not yet asserted by a recorder test.
 
 ```yaml
-- alert: TackAncAdaptiveOverrun
-  expr: sum by (controller) (rate(tack_anc_overrun_total{strategy="adaptive"}[5m])) > 0
+- alert: StackAncAdaptiveOverrun
+  expr: sum by (controller) (rate(stack_anc_overrun_total{strategy="adaptive"}[5m])) > 0
   for: 5m
-- alert: TackAncLeakBudgetSpent
-  expr: increase(tack_anc_leak_budget_exhausted_total{strategy="adaptive"}[10m]) > 0
+- alert: StackAncLeakBudgetSpent
+  expr: increase(stack_anc_leak_budget_exhausted_total{strategy="adaptive"}[10m]) > 0
   for: 0m
-- alert: TackAncLeakLifetimeSpent
-  expr: tack_anc_controller_frozen_until_reset{strategy="adaptive"} == 1
+- alert: StackAncLeakLifetimeSpent
+  expr: stack_anc_controller_frozen_until_reset{strategy="adaptive"} == 1
   for: 0m
-- alert: TackAncHalted
-  expr: tack_anc_halted{strategy="adaptive"} == 1
+- alert: StackAncHalted
+  expr: stack_anc_halted{strategy="adaptive"} == 1
   for: 0m
 ```
 
@@ -300,7 +300,7 @@ Calibration comes first. The harness must flag the unpadded `leaky_validate` and
 **CI today, and the gap.** `cargo test --all-targets` runs the smoke test but only compiles the evidence run. The example prints JSON and exits 0 even when it finds a leak, and the pinned runs took 454 and 473 s. CI therefore needs a separate release job, for example nightly, that gates on the JSON:
 
 ```text
-cargo build --release -p tack-anc-adaptive --example verify
+cargo build --release -p stack-anc-adaptive --example verify
 ./target/release/examples/verify > verify.json
 jq -e '.calibration.passed
   and ([.runs[] | select(.name | startswith("epoch_")) | .detect.max_abs_t < 4.5] | all)
@@ -341,13 +341,13 @@ Uncropped, the smallest mean shift the test could flag was 13.4 to 13.9 us (Slee
 
 At the production budget the controller froze after 6,102 and 2,069 requests, warm-up included (0.95 and 0.55 s). It thawed at the next 60 s window boundary, then froze again. Its mean target was 1,711 and 2,020 us, against 148 and 163 us for the same pad under the measurement budget.
 
-**Test suite status.** `cargo clippy -p tack-anc-adaptive --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, 61 tests pass and 3 fail across 8 targets. The passes are unit 14, epoch 14, leak 1, naive 6, pad 7, red team 14 of 17 and telemetry 5.
+**Test suite status.** `cargo clippy -p stack-anc-adaptive --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, 61 tests pass and 3 fail across 8 targets. The passes are unit 14, epoch 14, leak 1, naive 6, pad 7, red team 14 of 17 and telemetry 5.
 
 The 3 failures are the red team's open findings, kept as failing tests, so the brief's command fails. Its final summary line, re-run for this section:
 
 ```text
 test result: FAILED. 14 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
-error: test failed, to rerun pass `-p tack-anc-adaptive --test redteam`
+error: test failed, to rerun pass `-p stack-anc-adaptive --test redteam`
 ```
 
 Cargo stops at the first failing target, so `tests/telemetry.rs` ran only in the `--no-fail-fast` pass. The red team wrote 17 tests against the first build: 11 broke it and 6 held, and the fixes closed 8 of the 11.

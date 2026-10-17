@@ -374,7 +374,7 @@ fn metric_names_follow_the_convention() {
     ];
     for c in counters {
         assert!(
-            c.starts_with("tack_minotaur_") && c.ends_with("_total"),
+            c.starts_with("stack_minotaur_") && c.ends_with("_total"),
             "{c}"
         );
     }
@@ -384,7 +384,7 @@ fn metric_names_follow_the_convention() {
         WALK_DISTINCT_STATES,
         WALK_DURATION_SECONDS,
     ] {
-        assert!(h.starts_with("tack_minotaur_"), "{h}");
+        assert!(h.starts_with("stack_minotaur_"), "{h}");
     }
     assert!(WALK_DURATION_SECONDS.ends_with("_seconds"));
 }

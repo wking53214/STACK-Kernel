@@ -9,7 +9,7 @@ use stack_sentinel::{KeySet, SecretKey, Verifier, VerifierConfig};
 /// "fixture-attestation-key-not-a-real-secret". Not a real secret.
 pub const FIXTURE_KEY: &[u8] = b"fixture-attestation-key-not-a-real-secret";
 /// TEST FIXTURE KEY, used as the key an auditor does not trust.
-pub const OTHER_KEY: &[u8] = b"stack-sentinel-other-test-fixture-key-not-a-real-secret";
+pub const OTHER_KEY: &[u8] = b"tack-sentinel-other-test-fixture-key-not-a-real-secret";
 
 pub fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")

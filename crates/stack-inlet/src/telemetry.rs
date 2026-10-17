@@ -1,6 +1,6 @@
 //! Metrics and log events.
 //!
-//! Every metric name starts `tack_inlet_`. Labels come only from closed enums
+//! Every metric name starts `stack_inlet_`. Labels come only from closed enums
 //! ([`crate::GateOutcome`] and [`crate::Reason`]); nothing derived from input
 //! content is ever a label, because a free-form label is a cardinality
 //! attack (each new value creates a new time series in the metrics store).
@@ -29,14 +29,14 @@
 //! Prometheus rule expressions over these metrics:
 //!
 //! ```text
-//! # TackInletTerminalBreach: any quarantine in the last 5 minutes.
-//! increase(tack_inlet_quarantined_total[5m]) > 0
-//! # TackInletRetryFlood: more than 10 refusals a second, sustained.
-//! sum(rate(tack_inlet_verdicts_total{outcome="retry"}[5m])) > 10
-//! # TackInletAbandonedRefusals: streams dropped with a refusal pending.
-//! increase(tack_inlet_streams_abandoned_total{outcome!="pass"}[5m]) > 0
-//! # TackInletChunkLimit: senders hitting the chunk cap.
-//! increase(tack_inlet_verdicts_total{reason="chunk_limit"}[5m]) > 0
+//! # StackInletTerminalBreach: any quarantine in the last 5 minutes.
+//! increase(stack_inlet_quarantined_total[5m]) > 0
+//! # StackInletRetryFlood: more than 10 refusals a second, sustained.
+//! sum(rate(stack_inlet_verdicts_total{outcome="retry"}[5m])) > 10
+//! # StackInletAbandonedRefusals: streams dropped with a refusal pending.
+//! increase(stack_inlet_streams_abandoned_total{outcome!="pass"}[5m]) > 0
+//! # StackInletChunkLimit: senders hitting the chunk cap.
+//! increase(stack_inlet_verdicts_total{reason="chunk_limit"}[5m]) > 0
 //! ```
 
 use core::fmt;
@@ -51,39 +51,39 @@ use crate::verdict::{GateOutcome, Sha256Hex, Verdict};
 
 /// Counter, labels `outcome` and `reason`: one per verdict issued. `reason` is
 /// the first violation's reason, or `none` on a pass.
-pub const VERDICTS_TOTAL: &str = "tack_inlet_verdicts_total";
+pub const VERDICTS_TOTAL: &str = "stack_inlet_verdicts_total";
 /// Counter, no labels: total violations found (a verdict's `count`).
-pub const VIOLATIONS_TOTAL: &str = "tack_inlet_violations_total";
+pub const VIOLATIONS_TOTAL: &str = "stack_inlet_violations_total";
 /// Counter, label `reason`: once per verdict per distinct reason present.
-pub const REASON_SEEN_TOTAL: &str = "tack_inlet_reason_seen_total";
+pub const REASON_SEEN_TOTAL: &str = "stack_inlet_reason_seen_total";
 /// Counter, no labels: verdicts whose resolution is quarantine.
-pub const QUARANTINED_TOTAL: &str = "tack_inlet_quarantined_total";
+pub const QUARANTINED_TOTAL: &str = "stack_inlet_quarantined_total";
 /// Histogram, no labels: input length in bytes, as [`Verdict::len`] reports
 /// it. An oversize refusal records the cap plus one, never the declared
 /// length, so one request declaring `u64::MAX` cannot ruin the histogram's
 /// sum.
-pub const INPUT_BYTES: &str = "tack_inlet_input_bytes";
+pub const INPUT_BYTES: &str = "stack_inlet_input_bytes";
 /// Histogram, label `outcome`: wall time to reach a verdict, in seconds.
-pub const SCAN_DURATION_SECONDS: &str = "tack_inlet_scan_duration_seconds";
+pub const SCAN_DURATION_SECONDS: &str = "stack_inlet_scan_duration_seconds";
 /// Counter, label `outcome`: streams dropped without
 /// [`crate::Scanner::finish`], by the outcome of what had been fed so far. A
 /// stream abandoned with a refusal pending also records its verdict in every
 /// other metric, so a Trojan Source probe whose connection closes still
 /// reaches [`QUARANTINED_TOTAL`]. A stream abandoned while clean is counted
 /// here only, because nothing was admitted.
-pub const STREAMS_ABANDONED_TOTAL: &str = "tack_inlet_streams_abandoned_total";
+pub const STREAMS_ABANDONED_TOTAL: &str = "stack_inlet_streams_abandoned_total";
 
 /// Span names.
 pub mod spans {
     /// One-shot check of an in-memory input.
-    pub const WINNOW: &str = "tack.inlet.winnow";
+    pub const WINNOW: &str = "stack.inlet.winnow";
     /// Check of a declared length before the body is read.
-    pub const PRECHECK: &str = "tack.inlet.precheck";
+    pub const PRECHECK: &str = "stack.inlet.precheck";
     /// A streaming scan, from `Inlet::scanner` to `Scanner::finish` (or to
     /// the drop of an abandoned scanner). The span is entered only when the
     /// verdict is reached, not on every chunk, and records the number of
     /// chunks fed as the field `chunks`.
-    pub const STREAM: &str = "tack.inlet.stream";
+    pub const STREAM: &str = "stack.inlet.stream";
 }
 
 /// Register descriptions and units with the installed recorder. Optional;
@@ -125,7 +125,7 @@ impl LogKey {
 
     /// Domain separation for the log tag, so the tag cannot be confused with
     /// any other HMAC made under the same key.
-    const DOMAIN: &'static [u8] = b"tack.inlet.log.v1\0";
+    const DOMAIN: &'static [u8] = b"stack.inlet.log.v1\0";
 
     /// Build a key from secret bytes.
     ///

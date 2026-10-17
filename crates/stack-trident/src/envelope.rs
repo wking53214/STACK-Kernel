@@ -190,7 +190,7 @@ pub fn seal_for(
     audience: &str,
     limits: &Limits,
 ) -> Result<HandoffEnvelope, SealError> {
-    let _span = tracing::debug_span!("tack.trident.seal").entered();
+    let _span = tracing::debug_span!("stack.trident.seal").entered();
     if audience.len() > MAX_AUDIENCE_BYTES {
         return Err(SealError::Encoding(CanonicalError::TooLarge));
     }

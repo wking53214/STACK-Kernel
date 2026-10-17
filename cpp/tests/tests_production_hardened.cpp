@@ -9,9 +9,9 @@
 
 using namespace stack;
 
-TEST_CASE("PRODUCTION FIRE-TEST: ≡TACK Kernel Components") {
+TEST_CASE("PRODUCTION FIRE-TEST: ≡STACK Kernel Components") {
     std::cout << "\n" << std::string(72, '=') << "\n";
-    std::cout << "PRODUCTION FIRE-TEST: ≡TACK KERNEL VALIDATION\n";
+    std::cout << "PRODUCTION FIRE-TEST: ≡STACK KERNEL VALIDATION\n";
     std::cout << std::string(72, '=') << "\n\n";
     
     // Component 1: Hardware clock (HardwareClock::ReadTicks)

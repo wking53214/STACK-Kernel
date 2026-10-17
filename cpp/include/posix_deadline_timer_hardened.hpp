@@ -3,7 +3,7 @@
 #include "stack_kernel.hpp"
 
 /**
- * ≡TACK KERNEL LAYER 2: Hardened POSIX Deadline Timer and Preemption
+ * ≡STACK KERNEL LAYER 2: Hardened POSIX Deadline Timer and Preemption
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ARCHITECTURE: Signal-Based Timeout Detection

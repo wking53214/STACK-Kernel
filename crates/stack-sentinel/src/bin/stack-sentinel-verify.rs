@@ -1,11 +1,11 @@
-//! `tack-sentinel-verify`: the Rust counterpart of
+//! `stack-sentinel-verify`: the Rust counterpart of
 //! `sentinel_os/tools/verify_receipts.py`, with the same flags, the same
 //! output lines and the same exit codes (0 only on VERIFIED, 1 on a finding
 //! or an unreadable export, 2 when no trusted key material is held or the
 //! arguments are wrong).
 //!
 //! ```text
-//! tack-sentinel-verify --export ledger.json --anchor ledger.anchor \
+//! stack-sentinel-verify --export ledger.json --anchor ledger.anchor \
 //!     --trusted-fingerprints 0123456789abcdef --key-file keys.txt
 //! ```
 //!
@@ -25,7 +25,7 @@ use std::process::ExitCode;
 
 use stack_sentinel::{parse_key_file, KeySet, Verifier, VerifierConfig, VerifyError};
 
-const USAGE: &str = "usage: tack-sentinel-verify --export EXPORT --anchor ANCHOR \
+const USAGE: &str = "usage: stack-sentinel-verify --export EXPORT --anchor ANCHOR \
 --trusted-fingerprints TRUSTED_FINGERPRINTS [--key-file KEY_FILE]";
 
 struct Args {

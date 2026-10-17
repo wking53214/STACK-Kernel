@@ -1,33 +1,33 @@
 # C++23 Host Body Containment Stack
 
-Production-locked implementation of the TACK Host Body — the system-level security boundary that contains and protects untrusted agent execution (Minotaur, from the Rust crates).
+Production-locked implementation of the STACK Host Body — the system-level security boundary that contains and protects untrusted agent execution (Minotaur, from the Rust crates).
 
 ## Components (13/20 Completed)
 
 | Component | Header | Purpose |
 |---|---|---|
-| 1-10 | tack_kernel.hpp | ≡TACK Kernel: StackArena, CapabilityGuard, DelegationTable, BoundedRingBuffer, KernelDispatcher, ExecutionContextSupervisor |
-| 2-5 | tack_kinetic_governor.hpp + tier2 | Rate limiting, token bucket, reserved pool, dual-compensation rollbacks (RT-01-05 patches) |
-| 6 | tack_kinetic_governor_tier2.hpp | ExecutionDeadlineScope (cooperative software deadline enforcement) |
-| 7 | tack_kinetic_governor_tier2.hpp | BackpressureController (yield on high water mark) |
-| 8-9 | tack_kinetic_governor_tier2.hpp | ComputeDebtTracker + deferred preemption hooks (RT-05: saturating CAS) |
+| 1-10 | stack_kernel.hpp | ≡STACK Kernel: StackArena, CapabilityGuard, DelegationTable, BoundedRingBuffer, KernelDispatcher, ExecutionContextSupervisor |
+| 2-5 | stack_kinetic_governor.hpp + tier2 | Rate limiting, token bucket, reserved pool, dual-compensation rollbacks (RT-01-05 patches) |
+| 6 | stack_kinetic_governor_tier2.hpp | ExecutionDeadlineScope (cooperative software deadline enforcement) |
+| 7 | stack_kinetic_governor_tier2.hpp | BackpressureController (yield on high water mark) |
+| 8-9 | stack_kinetic_governor_tier2.hpp | ComputeDebtTracker + deferred preemption hooks (RT-05: saturating CAS) |
 | 10 | posix_deadline_timer_hardened.hpp | Persistent per-thread POSIX timer (≤220 cycles Arm), sival_ptr routing (RT-06, RT-08 fixes) |
-| 11 | tack_host_binding.hpp | SeccompFilterEngine: BPF-enforced signal mask immutability (RT-07 fix) |
-| 12 | tack_host_binding.hpp | GovernedMinotaurHost: One-way security ratchet + boundary executor |
-| 13 | tack_host_binding.hpp | SIMDCapabilityToken: 256-bit AVX2/NEON capability verification |
+| 11 | stack_host_binding.hpp | SeccompFilterEngine: BPF-enforced signal mask immutability (RT-07 fix) |
+| 12 | stack_host_binding.hpp | GovernedMinotaurHost: One-way security ratchet + boundary executor |
+| 13 | stack_host_binding.hpp | SIMDCapabilityToken: 256-bit AVX2/NEON capability verification |
 
 ## Lock/Key Alignment with Rust Crates
 
-- **tack-inlet** (Winnowing Filter) ← CapabilityGuard (boundary validation)
-- **tack-minotaur** (Agent String / Recursion) ← HardenedPosixPreemptionGuard (preemption control)
-- **tack-sentinel** (Audit Chain) ← BoundedRingBuffer (telemetry)
-- **tack-trident** (Inter-Agent) ← DelegationTable (O(1) capability dispatch)
-- **tack-greenwave** (Routing / Traffic) ← KineticGovernor (rate limiting)
-- **tack-transmission** (Queue) ← ComputeDebtTracker + TransactionRollbackGuard
+- **stack-inlet** (Winnowing Filter) ← CapabilityGuard (boundary validation)
+- **stack-minotaur** (Agent String / Recursion) ← HardenedPosixPreemptionGuard (preemption control)
+- **stack-sentinel** (Audit Chain) ← BoundedRingBuffer (telemetry)
+- **stack-trident** (Inter-Agent) ← DelegationTable (O(1) capability dispatch)
+- **stack-greenwave** (Routing / Traffic) ← KineticGovernor (rate limiting)
+- **stack-transmission** (Queue) ← ComputeDebtTracker + TransactionRollbackGuard
 
 ## Test Harnesses
 
-- `test_tack_kernel.cpp` - 6 Catch2 suites, 10M ops chaos validation
+- `test_stack_kernel.cpp` - 6 Catch2 suites, 10M ops chaos validation
 - `test_kinetic_governor.cpp` (showstopper patches) - 3 suites validating RT-01-05 fixes
 - `test_posix_deadline_timer_hardened.cpp` - 6 suites: signal registration, single/multi-thread preemption, TLS safety, cleanup
 - `test_seccomp_policy_validator.cpp` - 2 suites: 4 evasion scenarios + whitelist compliance (fork/waitpid isolated)

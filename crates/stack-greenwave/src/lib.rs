@@ -1,7 +1,7 @@
 //! # stack-greenwave: Traffic Cop and Green Wave Routing
 //!
-//! **Status: new design.** This component does not exist in any TACK
-//! repository today. Of the seven TACK components only the Sentinel
+//! **Status: new design.** This component does not exist in any STACK
+//! repository today. Of the seven STACK components only the Sentinel
 //! Hash-Chain exists (in `sentinel_os`). This crate is a reference
 //! implementation of a design, not a port of running code.
 //!
@@ -102,7 +102,7 @@
 //!   [`config::live_ticket_cap`]). Work that takes longer than that many of
 //!   its own lane's newer dispatches loses its ticket and its completion is
 //!   refused (`TicketNotLive`, counted in
-//!   `tack_greenwave_tickets_expired_total`). The cap keeps memory bounded
+//!   `stack_greenwave_tickets_expired_total`). The cap keeps memory bounded
 //!   without letting one lane's backlog touch another lane's tickets.
 //! - **Coarse information remains.** Quantization hides where inside an
 //!   epoch work finished, not how many epochs it took. A request that takes

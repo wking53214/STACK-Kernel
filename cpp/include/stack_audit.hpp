@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * ≡TACK KERNEL LAYER 5: Governance Audit Trail and Lock-Free Event Recording
+ * ≡STACK KERNEL LAYER 5: Governance Audit Trail and Lock-Free Event Recording
  *
  * ───────────────────────────────────────────────────────────────────────────
  * AUDIT LAYER: Governance Event Telemetry

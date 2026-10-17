@@ -7,17 +7,17 @@
 //! ```
 //!
 //! Debug-mode timings are not evidence; the program refuses to run without
-//! optimizations unless `TACK_ANC_PIPELINE_ALLOW_DEBUG=1`.
+//! optimizations unless `STACK_ANC_PIPELINE_ALLOW_DEBUG=1`.
 //!
 //! Environment variables (all optional):
 //!
 //! | variable                        | default              | bounds               | meaning |
 //! |---------------------------------|----------------------|----------------------|---------|
-//! | `TACK_ANC_PIPELINE_N`           | 100000               | 10000 ..= 5000000    | samples PER CLASS in every timing run |
-//! | `TACK_ANC_PIPELINE_SEED`        | 0x7ac4a1c05eed0003   | any u64              | class schedule and input seed (not a key) |
-//! | `TACK_ANC_PIPELINE_CPU_REQS`    | 1000000              | 10000 ..= 50000000   | requests per CPU-cost loop |
-//! | `TACK_ANC_PIPELINE_FLOOD_MS`    | 2000                 | 100 ..= 60000        | flood duration per validator |
-//! | `TACK_ANC_PIPELINE_FLOOD_CAP`   | 2                    | 1 ..= 64             | `max_in_flight` during the flood |
+//! | `STACK_ANC_PIPELINE_N`           | 100000               | 10000 ..= 5000000    | samples PER CLASS in every timing run |
+//! | `STACK_ANC_PIPELINE_SEED`        | 0x7ac4a1c05eed0003   | any u64              | class schedule and input seed (not a key) |
+//! | `STACK_ANC_PIPELINE_CPU_REQS`    | 1000000              | 10000 ..= 50000000   | requests per CPU-cost loop |
+//! | `STACK_ANC_PIPELINE_FLOOD_MS`    | 2000                 | 100 ..= 60000        | flood duration per validator |
+//! | `STACK_ANC_PIPELINE_FLOOD_CAP`   | 2                    | 1 ..= 64             | `max_in_flight` during the flood |
 //!
 //! With the defaults this took about 9 seconds of wall time on a 4-CPU VM
 //! (6 of them in the three 2-second floods).
@@ -105,21 +105,21 @@ fn to_usize(v: u64) -> Result<usize, String> {
 impl Settings {
     fn from_env() -> Result<Self, String> {
         Ok(Self {
-            per_class: to_usize(env_u64("TACK_ANC_PIPELINE_N", 100_000, 10_000, 5_000_000)?)?,
-            seed: env_u64("TACK_ANC_PIPELINE_SEED", 0x7ac4_a1c0_5eed_0003, 0, u64::MAX)?,
+            per_class: to_usize(env_u64("STACK_ANC_PIPELINE_N", 100_000, 10_000, 5_000_000)?)?,
+            seed: env_u64("STACK_ANC_PIPELINE_SEED", 0x7ac4_a1c0_5eed_0003, 0, u64::MAX)?,
             cpu_reqs: to_usize(env_u64(
-                "TACK_ANC_PIPELINE_CPU_REQS",
+                "STACK_ANC_PIPELINE_CPU_REQS",
                 1_000_000,
                 10_000,
                 50_000_000,
             )?)?,
             flood: Duration::from_millis(env_u64(
-                "TACK_ANC_PIPELINE_FLOOD_MS",
+                "STACK_ANC_PIPELINE_FLOOD_MS",
                 2_000,
                 100,
                 60_000,
             )?),
-            flood_cap: to_usize(env_u64("TACK_ANC_PIPELINE_FLOOD_CAP", 2, 1, 64)?)?,
+            flood_cap: to_usize(env_u64("STACK_ANC_PIPELINE_FLOOD_CAP", 2, 1, 64)?)?,
         })
     }
 }
@@ -829,8 +829,8 @@ fn disassembly() -> Value {
 // ---------------------------------------------------------------- main
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if cfg!(debug_assertions) && std::env::var("TACK_ANC_PIPELINE_ALLOW_DEBUG").is_err() {
-        return Err("debug build: timings are not evidence; use --release (or set TACK_ANC_PIPELINE_ALLOW_DEBUG=1)".into());
+    if cfg!(debug_assertions) && std::env::var("STACK_ANC_PIPELINE_ALLOW_DEBUG").is_err() {
+        return Err("debug build: timings are not evidence; use --release (or set STACK_ANC_PIPELINE_ALLOW_DEBUG=1)".into());
     }
     let s = Settings::from_env()?;
     let env_before = env::snapshot();

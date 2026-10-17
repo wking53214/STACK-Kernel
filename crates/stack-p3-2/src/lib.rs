@@ -1,4 +1,4 @@
-// ≡TACK P3.2: Hard Preemption with Hybrid Boundary Model
+// ≡STACK P3.2: Hard Preemption with Hybrid Boundary Model
 //
 // PURPOSE: Enforce deadline preemption via signal handler + context-local state,
 // with full trap event logging for Sentinel analysis.

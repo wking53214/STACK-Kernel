@@ -52,34 +52,34 @@
 //! to the timed region.
 //!
 //! Environment variables (all optional; out-of-range values are an error):
-//! * `TACK_ADAPTIVE_N_PER_CLASS`: samples per class in `calibration` and
+//! * `STACK_ADAPTIVE_N_PER_CLASS`: samples per class in `calibration` and
 //!   `runs`, default 100000, bounds 10000 ..= 5000000.
-//! * `TACK_ADAPTIVE_POISON_PROBES`: probes per class in `poisoning`,
+//! * `STACK_ADAPTIVE_POISON_PROBES`: probes per class in `poisoning`,
 //!   default 10000, bounds 10000 ..= 1000000.
-//! * `TACK_ADAPTIVE_TRAJ_N`: samples per run in `trajectory`, default
+//! * `STACK_ADAPTIVE_TRAJ_N`: samples per run in `trajectory`, default
 //!   40000, bounds 1000 ..= 1000000.
-//! * `TACK_ADAPTIVE_ROUNDS`: `leaky_validate` calls per victim call,
+//! * `STACK_ADAPTIVE_ROUNDS`: `leaky_validate` calls per victim call,
 //!   default 256, bounds 1 ..= 100000.
-//! * `TACK_ADAPTIVE_BASE_ITERS`: base work iterations, default 10000,
+//! * `STACK_ADAPTIVE_BASE_ITERS`: base work iterations, default 10000,
 //!   bounds 0 ..= 100000000.
-//! * `TACK_ADAPTIVE_LOAD_MULT`: base work multiplier in the load phase,
+//! * `STACK_ADAPTIVE_LOAD_MULT`: base work multiplier in the load phase,
 //!   default 4, bounds 1 ..= 1000.
-//! * `TACK_ADAPTIVE_LOAD_THREADS`: memory-streaming threads in the load
+//! * `STACK_ADAPTIVE_LOAD_THREADS`: memory-streaming threads in the load
 //!   phase, default 2, bounds 0 ..= 64.
-//! * `TACK_ADAPTIVE_FLOOR_US`, `TACK_ADAPTIVE_CAP_US`: epoch ladder floor
+//! * `STACK_ADAPTIVE_FLOOR_US`, `STACK_ADAPTIVE_CAP_US`: epoch ladder floor
 //!   and cap (also the naive cap), defaults 64 and 2048.
-//! * `TACK_ADAPTIVE_EPOCH_MS`: epoch length, default 50.
-//! * `TACK_ADAPTIVE_BUDGET_BITS`: epoch leak budget per 60 s window in
+//! * `STACK_ADAPTIVE_EPOCH_MS`: epoch length, default 50.
+//! * `STACK_ADAPTIVE_BUDGET_BITS`: epoch leak budget per 60 s window in
 //!   `runs`, `poisoning`, `trajectory` and `flood`, default 1000000. This
 //!   is a measurement setting, not a production value: it keeps the
 //!   controller adapting so its behaviour can be measured, and every run
 //!   reports the bits it would have spent. Section 6 runs the production
 //!   default budget (128 bits per 60 s) to show when it is spent.
-//! * `TACK_ADAPTIVE_FLOOD_SECS`: wall seconds per flood config, default 3,
+//! * `STACK_ADAPTIVE_FLOOD_SECS`: wall seconds per flood config, default 3,
 //!   bounds 1 ..= 60.
-//! * `TACK_ADAPTIVE_FLOOD_CAP`: `max_concurrent` in the flood, default
+//! * `STACK_ADAPTIVE_FLOOD_CAP`: `max_concurrent` in the flood, default
 //!   max(1, CPU count / 2).
-//! * `TACK_ADAPTIVE_SEED`: class schedule seed, default 0x7ac4ada9. Not a
+//! * `STACK_ADAPTIVE_SEED`: class schedule seed, default 0x7ac4ada9. Not a
 //!   key.
 //!
 //! With the defaults the whole run took 511 s on the development host (4
@@ -952,31 +952,31 @@ fn flood(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n_per_class = to_usize(env_u64(
-        "TACK_ADAPTIVE_N_PER_CLASS",
+        "STACK_ADAPTIVE_N_PER_CLASS",
         100_000,
         10_000,
         5_000_000,
     )?)?;
     let probes = to_usize(env_u64(
-        "TACK_ADAPTIVE_POISON_PROBES",
+        "STACK_ADAPTIVE_POISON_PROBES",
         10_000,
         10_000,
         1_000_000,
     )?)?;
-    let traj_n = to_usize(env_u64("TACK_ADAPTIVE_TRAJ_N", 40_000, 1_000, 1_000_000)?)?;
-    let rounds = u32::try_from(env_u64("TACK_ADAPTIVE_ROUNDS", 256, 1, 100_000)?)?;
-    let base_iters = env_u64("TACK_ADAPTIVE_BASE_ITERS", 10_000, 0, 100_000_000)?;
-    let load_mult = env_u64("TACK_ADAPTIVE_LOAD_MULT", 4, 1, 1_000)?;
-    let load_threads = to_usize(env_u64("TACK_ADAPTIVE_LOAD_THREADS", 2, 0, 64)?)?;
-    let floor = Duration::from_micros(env_u64("TACK_ADAPTIVE_FLOOR_US", 64, 1, 1_000_000)?);
-    let cap = Duration::from_micros(env_u64("TACK_ADAPTIVE_CAP_US", 2_048, 1, 10_000_000)?);
-    let epoch = Duration::from_millis(env_u64("TACK_ADAPTIVE_EPOCH_MS", 50, 1, 3_600_000)?);
-    let budget_bits = env_u64("TACK_ADAPTIVE_BUDGET_BITS", 1_000_000, 1, 1_000_000)? as f64;
-    let flood_secs = env_u64("TACK_ADAPTIVE_FLOOD_SECS", 3, 1, 60)?;
+    let traj_n = to_usize(env_u64("STACK_ADAPTIVE_TRAJ_N", 40_000, 1_000, 1_000_000)?)?;
+    let rounds = u32::try_from(env_u64("STACK_ADAPTIVE_ROUNDS", 256, 1, 100_000)?)?;
+    let base_iters = env_u64("STACK_ADAPTIVE_BASE_ITERS", 10_000, 0, 100_000_000)?;
+    let load_mult = env_u64("STACK_ADAPTIVE_LOAD_MULT", 4, 1, 1_000)?;
+    let load_threads = to_usize(env_u64("STACK_ADAPTIVE_LOAD_THREADS", 2, 0, 64)?)?;
+    let floor = Duration::from_micros(env_u64("STACK_ADAPTIVE_FLOOR_US", 64, 1, 1_000_000)?);
+    let cap = Duration::from_micros(env_u64("STACK_ADAPTIVE_CAP_US", 2_048, 1, 10_000_000)?);
+    let epoch = Duration::from_millis(env_u64("STACK_ADAPTIVE_EPOCH_MS", 50, 1, 3_600_000)?);
+    let budget_bits = env_u64("STACK_ADAPTIVE_BUDGET_BITS", 1_000_000, 1, 1_000_000)? as f64;
+    let flood_secs = env_u64("STACK_ADAPTIVE_FLOOD_SECS", 3, 1, 60)?;
     let cpus = env::cpu_count().unwrap_or(1);
     let default_cap = u64::try_from((cpus / 2).max(1)).unwrap_or(1);
-    let flood_cap = to_usize(env_u64("TACK_ADAPTIVE_FLOOD_CAP", default_cap, 1, 4_096)?)?;
-    let seed = env_u64("TACK_ADAPTIVE_SEED", 0x7ac4_ada9, 0, u64::MAX)?;
+    let flood_cap = to_usize(env_u64("STACK_ADAPTIVE_FLOOD_CAP", default_cap, 1, 4_096)?)?;
+    let seed = env_u64("STACK_ADAPTIVE_SEED", 0x7ac4_ada9, 0, u64::MAX)?;
     let started = Instant::now();
     let env_before = env::snapshot();
 

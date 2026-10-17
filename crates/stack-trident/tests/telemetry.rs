@@ -126,7 +126,7 @@ fn verification_metrics_fire_with_closed_labels() {
     // closed vocabulary.
     let reason_spellings: Vec<&str> = ReasonCode::ALL.iter().map(|r| r.as_str()).collect();
     for s in &seen {
-        assert!(s.name.starts_with("tack_trident_"), "{}", s.name);
+        assert!(s.name.starts_with("stack_trident_"), "{}", s.name);
         if s.kind == MetricKind::Counter {
             assert!(s.name.ends_with("_total"), "{}", s.name);
         }

@@ -32,7 +32,7 @@
 //! and a guard's `Arc` is dropped after its `Drop` body has unlocked. So a
 //! slow or panicking `G::drop` cannot stall or poison the transmission.
 //! `shift()` drops the replaced gear only after its verdict is recorded and
-//! contains a panic from it (counted in `tack_transmission_gear_drop_panics_total`).
+//! contains a panic from it (counted in `stack_transmission_gear_drop_panics_total`).
 //! A guard that drops the last `Arc` of an old gear runs `G::drop` in the
 //! caller's thread and does not contain it, so `G::drop` must not panic.
 //!

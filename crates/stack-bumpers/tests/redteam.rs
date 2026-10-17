@@ -1,4 +1,4 @@
-//! Independent red-team tests for tack-bumpers.
+//! Independent red-team tests for stack-bumpers.
 //!
 //! Every test asserts the SAFE behaviour, so a test FAILS while the weakness
 //! it describes exists. Test names start with `redteam_`.
@@ -218,7 +218,7 @@ proptest! {
 
 /// The failure-mode table claims "NaN in any form ... as a Number" is
 /// TERMINAL_BREACH (non_finite), and the critical alert
-/// TackBumpersNonFiniteInput keys on reason=non_finite. A NaN sent to an
+/// StackBumpersNonFiniteInput keys on reason=non_finite. A NaN sent to an
 /// enum or string parameter, or under an undeclared key, should not be
 /// downgraded to a repairable RETRY that the alert never sees.
 #[test]
@@ -420,7 +420,7 @@ fn redteam_metric_labels_stay_closed_under_hostile_input() {
     for (ck, _, _, _) in snap.snapshot().into_vec() {
         let key = ck.key();
         let name = key.name().to_owned();
-        if !name.starts_with("tack_bumpers_") {
+        if !name.starts_with("stack_bumpers_") {
             bad.push(format!("name {name}"));
         }
         let mut ls = Vec::new();
@@ -805,18 +805,18 @@ fn redteam_metrics_fire_on_every_path() {
         }
     }
     assert_eq!(
-        counters.get("tack_bumpers_requests_total{outcome=terminal_breach}"),
+        counters.get("stack_bumpers_requests_total{outcome=terminal_breach}"),
         Some(&1),
         "{counters:#?}"
     );
     assert_eq!(
-        counters.get("tack_bumpers_trips_total{outcome=terminal_breach,reason=too_many_params}"),
+        counters.get("stack_bumpers_trips_total{outcome=terminal_breach,reason=too_many_params}"),
         Some(&1),
         "{counters:#?}"
     );
-    assert_eq!(counters.get("tack_bumpers_requests_total{outcome=retry}"), Some(&1), "{counters:#?}");
+    assert_eq!(counters.get("stack_bumpers_requests_total{outcome=retry}"), Some(&1), "{counters:#?}");
     assert!(
-        !counters.keys().any(|k| k.starts_with("tack_bumpers_corrections_total")),
+        !counters.keys().any(|k| k.starts_with("stack_bumpers_corrections_total")),
         "refused corrections were counted: {counters:#?}"
     );
 }

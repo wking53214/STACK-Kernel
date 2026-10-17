@@ -76,7 +76,7 @@ impl Rng {
 
 // ---- A metrics recorder that pauses a verification at a fixed point -----
 //
-// `tack_trident_hashed_bytes_total` is incremented after the custody check
+// `stack_trident_hashed_bytes_total` is incremented after the custody check
 // and the key-ring snapshot, and before the prong 3 lock is taken. Pausing
 // inside that increment gives a deterministic window in which another
 // thread can change receiver state while the paused verification holds
@@ -633,7 +633,7 @@ fn rt_metric_labels_stay_closed_under_attacker_strings() {
     let outcomes: BTreeSet<&str> = ["pass", "retry", "terminal_breach"].into_iter().collect();
     let resolutions: BTreeSet<&str> = ["accept", "reject", "quarantine", "halt"].into_iter().collect();
     for (_, name, labels, _) in &seen {
-        assert!(name.starts_with("tack_trident_"), "{name}");
+        assert!(name.starts_with("stack_trident_"), "{name}");
         for (k, v) in labels {
             let ok = match k.as_str() {
                 "reason" => reasons.contains(v.as_str()),

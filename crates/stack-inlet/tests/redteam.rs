@@ -1,4 +1,4 @@
-//! Red-team attacks on tack-inlet.
+//! Red-team attacks on stack-inlet.
 //!
 //! Every test asserts the SAFE behaviour, so a test FAILS while the weakness
 //! it names exists. Test names start with the attack class. Nothing here
@@ -9,7 +9,7 @@
 //! switched on per thread, so the tracing callsite-interest race that the
 //! builder hit in `tests/logging.rs` cannot hide events here.
 //!
-//! Run: cargo test -p tack-inlet --test redteam -- --nocapture
+//! Run: cargo test -p stack-inlet --test redteam -- --nocapture
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::cell::{Cell, RefCell};
@@ -876,7 +876,7 @@ fn telemetry_labels_closed_and_logs_never_carry_input() {
     let mut reasons: Vec<&str> = Reason::ALL.iter().map(|r| r.as_str()).collect();
     reasons.push("none");
     for (_, name, labels, _) in &rows {
-        assert!(name.starts_with("tack_inlet_"), "{name}");
+        assert!(name.starts_with("stack_inlet_"), "{name}");
         for (k, v) in labels {
             match k.as_str() {
                 "outcome" => assert!(outcomes.contains(&v.as_str()), "{v}"),
@@ -888,7 +888,7 @@ fn telemetry_labels_closed_and_logs_never_carry_input() {
 }
 
 /// `precheck` records the attacker's declared length in the
-/// tack_inlet_input_bytes histogram. One request declaring u64::MAX adds
+/// stack_inlet_input_bytes histogram. One request declaring u64::MAX adds
 /// 1.8e19 to the histogram's sum; at that magnitude an f64 cannot represent
 /// additions below 2048, so the mean input size is ruined from then on and
 /// every _sum-based panel is poisoned.
@@ -914,7 +914,7 @@ fn telemetry_precheck_poisons_input_bytes_histogram() {
 /// A stream that is dropped instead of finished emits no verdict, so a
 /// Trojan Source probe whose connection closes (or whose caller bails on
 /// OverLimit without calling finish) never reaches
-/// tack_inlet_quarantined_total or the TackInletTerminalBreach alert.
+/// stack_inlet_quarantined_total or the StackInletTerminalBreach alert.
 #[test]
 fn telemetry_abandoned_stream_is_invisible() {
     let _g = serial();

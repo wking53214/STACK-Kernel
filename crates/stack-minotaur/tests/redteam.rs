@@ -546,7 +546,7 @@ fn redteam_metric_labels_stay_closed_under_hostile_input() {
     ];
     let mut series = BTreeSet::new();
     for (_, name, labels, _) in &rows {
-        assert!(name.starts_with("tack_minotaur_"), "{name}");
+        assert!(name.starts_with("stack_minotaur_"), "{name}");
         for (k, v) in labels {
             let ok = allowed
                 .iter()

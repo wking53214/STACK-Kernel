@@ -21,7 +21,7 @@ static telemetry::SeccompAuditRing<1024> g_audit_ring;
 extern "C" {
 
 // Initialize host and seal with SECCOMP
-int tack_host_initialize_and_seal() {
+int stack_host_initialize_and_seal() {
     if (g_initialized.load()) return 0;
     
     // Allocate host instance
@@ -45,7 +45,7 @@ int tack_host_initialize_and_seal() {
 }
 
 // Set active capabilities mask (256-bit SIMD)
-void tack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t m3) {
+void stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t m3) {
     if (!g_host) return;
 
     host::CapabilityMask256 caps(m0, m1, m2, m3);
@@ -53,7 +53,7 @@ void tack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t 
 }
 
 // Execute governed transaction under deadline and token budget
-int tack_execute_governed_transaction(
+int stack_execute_governed_transaction(
     uint64_t context_id,
     uint64_t required_capability_bits,
     uint32_t required_tokens,
@@ -83,7 +83,7 @@ int tack_execute_governed_transaction(
 }
 
 // Audit ring: push event
-void tack_audit_push(uint8_t event_type, uint64_t context_id, uint32_t tokens) {
+void stack_audit_push(uint8_t event_type, uint64_t context_id, uint32_t tokens) {
     g_audit_ring.Push(
         static_cast<telemetry::AuditEventType>(event_type),
         context_id,
@@ -91,7 +91,7 @@ void tack_audit_push(uint8_t event_type, uint64_t context_id, uint32_t tokens) {
 }
 
 // Audit ring: read record safely (seqlock-protected)
-int tack_audit_read_slot(
+int stack_audit_read_slot(
     uint64_t index,
     uint64_t* out_timestamp,
     uint64_t* out_context_id,
@@ -117,7 +117,7 @@ int tack_audit_read_slot(
 // Arena allocator: allocate from the arena
 // Note: StaticArenaBuffer is designed for typed object allocation, not raw bytes.
 // This allocates an 8-byte block (uint64_t). Larger allocations require multiple calls.
-void* tack_arena_allocate(size_t size) {
+void* stack_arena_allocate(size_t size) {
     if (size == 0) return nullptr;
 
     // For simplicity, allocate one uint64_t per call
@@ -127,7 +127,7 @@ void* tack_arena_allocate(size_t size) {
 }
 
 // Hardware tick counter
-uint64_t tack_read_ticks() {
+uint64_t stack_read_ticks() {
 #ifdef __x86_64__
     unsigned int aux;
     return __rdtscp(&aux);

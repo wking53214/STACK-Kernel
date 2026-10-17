@@ -27,7 +27,7 @@ Terms used below:
 - **SHA-256 hex digest.** A 64-character fingerprint of some bytes. It identifies a value without revealing it.
 - **Fail closed.** Unknown or malformed input is refused, never passed.
 
-This is a new design. Only the Sentinel Hash-Chain exists today, in sentinel_os. The bumper is a standalone Rust crate, `tack-bumpers`, and no Python repository calls it yet.
+This is a new design. Only the Sentinel Hash-Chain exists today, in sentinel_os. The bumper is a standalone Rust crate, `stack-bumpers`, and no Python repository calls it yet.
 
 ### Mechanism
 
@@ -235,18 +235,18 @@ Metrics go through the `metrics` facade, a shared Rust API where the application
 
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
-| `tack_bumpers_requests_total` | Counter | `outcome`: pass, retry, terminal_breach | One per `Bumper::normalize` call, on every path, including the early return. |
-| `tack_bumpers_trips_total` | Counter | `reason`: one of 14 trip labels; `outcome`: retry or terminal_breach, fixed by the reason | One per trip in a refused request. One request can add several. |
-| `tack_bumpers_corrections_total` | Counter | `kind`: clamped, unit_converted, trimmed, case_folded, alias_resolved | One per correction, only in requests that passed. A refused request applies nothing. |
-| `tack_bumpers_corrections_per_request` | Histogram | None | Corrections applied per passing request, from 0 up to the budget. |
-| `tack_bumpers_normalize_duration_seconds` | Histogram | `outcome` | Wall time of one normalize call, in seconds. |
+| `stack_bumpers_requests_total` | Counter | `outcome`: pass, retry, terminal_breach | One per `Bumper::normalize` call, on every path, including the early return. |
+| `stack_bumpers_trips_total` | Counter | `reason`: one of 14 trip labels; `outcome`: retry or terminal_breach, fixed by the reason | One per trip in a refused request. One request can add several. |
+| `stack_bumpers_corrections_total` | Counter | `kind`: clamped, unit_converted, trimmed, case_folded, alias_resolved | One per correction, only in requests that passed. A refused request applies nothing. |
+| `stack_bumpers_corrections_per_request` | Histogram | None | Corrections applied per passing request, from 0 up to the budget. |
+| `stack_bumpers_normalize_duration_seconds` | Histogram | `outcome` | Wall time of one normalize call, in seconds. |
 
 A span is a named, timed scope in a trace, and an event is one log record inside it. DEBUG and WARN are log levels; production usually enables WARN and filters out DEBUG. Caller text appears only as its byte length and full SHA-256 digest, never raw or truncated.
 
 | Span or event | Level | Fields | When |
 |---|---|---|---|
-| Span `tack.bumpers.normalize` | DEBUG | `params` (entry count), `outcome`, then `corrections` or `trips` | Each `Bumper::normalize` call |
-| Span `tack.bumpers.build` | DEBUG | None | Each `Bumper::new` call |
+| Span `stack.bumpers.normalize` | DEBUG | `params` (entry count), `outcome`, then `corrections` or `trips` | Each `Bumper::normalize` call |
+| Span `stack.bumpers.build` | DEBUG | None | Each `Bumper::new` call |
 | Event `bumper trip` | DEBUG | `param` (rule name, absent for unknown keys and request-level trips), `reason`, `outcome`, `input_len`, and `input_sha256` or `input_over_cap=true` | Once per trip |
 | Event `bumper trip` (budget) | DEBUG | `corrections`, `budget`, `reason` | A request over the correction budget |
 | Event `bumper terminal breach` | WARN | `outcome`, `trips`, a count per TERMINAL reason, `retry_trips` | Exactly one per TERMINAL_BREACH request |
@@ -267,40 +267,40 @@ Alert rules are Prometheus expressions over these metrics. The histogram alert n
 
 ```yaml
 groups:
-  - name: tack-bumpers
+  - name: stack-bumpers
     rules:
-      - alert: TackBumpersTerminalBreach
-        expr: sum(rate(tack_bumpers_requests_total{outcome="terminal_breach"}[5m])) > 0
+      - alert: StackBumpersTerminalBreach
+        expr: sum(rate(stack_bumpers_requests_total{outcome="terminal_breach"}[5m])) > 0
         for: 5m
         labels: {severity: warning}
         annotations: {summary: "Callers keep hitting the concrete (hard band, NaN or infinity, size caps). Each is refused; a steady rate means a broken or hostile upstream."}
-      - alert: TackBumpersNonFiniteInput
-        expr: sum(increase(tack_bumpers_trips_total{reason="non_finite"}[10m])) > 0
+      - alert: StackBumpersNonFiniteInput
+        expr: sum(increase(stack_bumpers_trips_total{reason="non_finite"}[10m])) > 0
         for: 0m
         labels: {severity: critical}
         annotations: {summary: "NaN or infinity reached the ALPHA gate under some key. It was refused, but its upstream source needs finding."}
-      - alert: TackBumpersRetryRatioHigh
-        expr: sum(rate(tack_bumpers_requests_total{outcome="retry"}[15m])) / clamp_min(sum(rate(tack_bumpers_requests_total[15m])), 1e-9) > 0.05
+      - alert: StackBumpersRetryRatioHigh
+        expr: sum(rate(stack_bumpers_requests_total{outcome="retry"}[15m])) / clamp_min(sum(rate(stack_bumpers_requests_total[15m])), 1e-9) > 0.05
         for: 15m
         labels: {severity: warning}
         annotations: {summary: "Over 5% of requests are refused as repairable, often after a client release renamed parameters."}
-      - alert: TackBumpersCorrectionBudgetExhausted
-        expr: sum(rate(tack_bumpers_trips_total{reason="correction_budget_exceeded"}[15m])) > 0
+      - alert: StackBumpersCorrectionBudgetExhausted
+        expr: sum(rate(stack_bumpers_trips_total{reason="correction_budget_exceeded"}[15m])) > 0
         for: 15m
         labels: {severity: warning}
         annotations: {summary: "Callers keep needing more corrections than the budget allows. They should fix their inputs."}
-      - alert: TackBumpersDriftRising
-        expr: sum(rate(tack_bumpers_corrections_total[1h])) / clamp_min(sum(rate(tack_bumpers_requests_total{outcome="pass"}[1h])), 1e-9) > 0.5
+      - alert: StackBumpersDriftRising
+        expr: sum(rate(stack_bumpers_corrections_total[1h])) / clamp_min(sum(rate(stack_bumpers_requests_total{outcome="pass"}[1h])), 1e-9) > 0.5
         for: 1h
         labels: {severity: info}
         annotations: {summary: "Passing requests average over 0.5 corrections each. Break down by kind; a slow walk toward an edge can be deliberate."}
-      - alert: TackBumpersUnknownParamProbe
-        expr: sum(rate(tack_bumpers_trips_total{reason="unknown_param"}[5m])) > 1
+      - alert: StackBumpersUnknownParamProbe
+        expr: sum(rate(stack_bumpers_trips_total{reason="unknown_param"}[5m])) > 1
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "A sustained stream of unknown keys looks like parameter-name enumeration. Trip records carry key digests for correlation."}
-      - alert: TackBumpersSlowNormalize
-        expr: histogram_quantile(0.99, sum by (le) (rate(tack_bumpers_normalize_duration_seconds_bucket[5m]))) > 0.001
+      - alert: StackBumpersSlowNormalize
+        expr: histogram_quantile(0.99, sum by (le) (rate(stack_bumpers_normalize_duration_seconds_bucket[5m]))) > 0.001
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "p99 normalize time is over 1 ms. Needs exporter histogram buckets."}
@@ -344,7 +344,7 @@ Known limitations:
 - **Stateless.** The bumper cannot escalate repeated `unknown_param` trips to quarantine; a caller that tracks senders must.
 - **Open questions.** Should key case drift (`Timeout` for `timeout`) be corrected? Should integer-only numbers and optional defaults be supported? Which histogram buckets should the kernel standardize?
 
-`cargo clippy -p tack-bumpers --all-targets -- -D warnings` exits 0, and the doctest passes (1 passed). The final run of `cargo test -p tack-bumpers --all-targets` passed 122 tests in eight binaries: unit, corrections, float_edges, logging, properties, redteam, spec_construction and telemetry, in that order.
+`cargo clippy -p stack-bumpers --all-targets -- -D warnings` exits 0, and the doctest passes (1 passed). The final run of `cargo test -p stack-bumpers --all-targets` passed 122 tests in eight binaries: unit, corrections, float_edges, logging, properties, redteam, spec_construction and telemetry, in that order.
 
 ```text
 test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

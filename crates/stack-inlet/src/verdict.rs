@@ -10,7 +10,7 @@ use core::fmt;
 
 /// Name this gate reports itself under, for a caller building a CNS
 /// `GateResult` from a [`Verdict`].
-pub const GATE_NAME: &str = "tack_inlet";
+pub const GATE_NAME: &str = "stack_inlet";
 
 /// Which end of a decision a gate belongs to (CNS `GatePosition`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,7 +61,7 @@ impl GateOutcome {
 /// [`Resolution::Quarantine`]. It holds no state of its own, so there is
 /// nothing to roll back, and it never halts: if a single hostile input could
 /// stop the inlet, the inlet would itself be a denial-of-service lever. The
-/// other two variants exist so every TACK component shares one vocabulary.
+/// other two variants exist so every STACK component shares one vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {
     /// Nothing changed; the input is refused.

@@ -274,7 +274,7 @@ void test_layer5_event_types_all_recordable() {
 
 int main() {
     std::cout << "\n";
-    std::cout << "≡TACK KERNEL LAYER 5 RED-TEAM VALIDATION\n";
+    std::cout << "≡STACK KERNEL LAYER 5 RED-TEAM VALIDATION\n";
     std::cout << "========================================\n\n";
 
     std::cout << "LAYER 5: Audit Trail Event Recording\n";

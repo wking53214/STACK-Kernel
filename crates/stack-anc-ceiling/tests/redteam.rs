@@ -266,7 +266,7 @@ fn rt05_frozen_clock_trips_within_small_multiple_of_ceiling() {
 
 /// Every pad writes the same series `stack_anc_halted{strategy="ceiling"}`.
 /// A reset of a healthy pad sets it to 0 while another pad is still
-/// halted, which silences the critical TackAncCeilingHalted alert.
+/// halted, which silences the critical StackAncCeilingHalted alert.
 #[test]
 fn rt06_reset_of_other_pad_does_not_clear_halted_signal() {
     let recorder = DebuggingRecorder::new();
@@ -458,7 +458,7 @@ fn spin_flood() -> FloodResult {
 }
 
 // ---------------------------------------------------------------------
-// rt09: TackAncCeilingSpinOverBudget alert semantics.
+// rt09: StackAncCeilingSpinOverBudget alert semantics.
 // ---------------------------------------------------------------------
 
 /// Claim on the alert: reserved spin per second "is bounded by

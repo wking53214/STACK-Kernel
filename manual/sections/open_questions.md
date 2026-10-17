@@ -10,8 +10,8 @@ Each item is one question, then its tradeoff. They come from every builder's ope
 
 - [ ] Which component owns per-sender quotas and quarantine for repeated refusals: Inlet, a new admission layer, or each caller? Every component is stateless about senders, so floods starve honest clients; per-sender state costs memory and needs an authenticated identity.
 - [ ] Should kernel convention 4 log a keyed digest (HMAC under a per-process key) instead of plain SHA-256? A plain digest lets a log reader test guesses of a low-entropy input offline; a keyed one cannot be matched across processes.
-- [ ] Should GateOutcome and GatePosition move into one shared tack-core crate? Each crate re-declares the CNS vocabulary today, which can drift; a shared crate is one more dependency every component tracks.
-- [ ] Should every TACK fingerprint hash carry a domain-separation tag, a fixed prefix naming its purpose? Plain SHA-256 matches digests made elsewhere, which is convenient but lets a digest from one context pass in another.
+- [ ] Should GateOutcome and GatePosition move into one shared stack-core crate? Each crate re-declares the CNS vocabulary today, which can drift; a shared crate is one more dependency every component tracks.
+- [ ] Should every STACK fingerprint hash carry a domain-separation tag, a fixed prefix naming its purpose? Plain SHA-256 matches digests made elsewhere, which is convenient but lets a digest from one context pass in another.
 - [x] May the CNS subject_digest encoding be reproduced in Rust and in this manual? Resolved 2026-10-06: yes. CNS is public under Apache-2.0, so the confidentiality marking that raised this question no longer exists.
 - [ ] Which subject_digest format will Python producers and the Trident share: the CNS rendering or RFC 8785 canonical JSON? Today a producer using the CNS function fails every Trident envelope; either choice needs new code on one side.
 - [ ] Which histogram bucket boundaries should the kernel standardize? The metrics facade leaves buckets to the exporter, so components may export histograms that cannot be compared.
@@ -31,7 +31,7 @@ Each item is one question, then its tradeoff. They come from every builder's ope
 - [ ] Is it acceptable that one slow request per epoch pins every request at the adaptive cap? A percentile-based decrease would be undone by the next slow request; avoiding it means changing the core controller rule.
 - [ ] Should the async Hybrid tail grow past 2.5 ms, or the async API sleep on a dedicated timer thread? The 2.5 ms tail missed tokio wake-ups at p99.9 (3.6 ms late); a longer tail spins more CPU.
 - [ ] Should Strategy 3's response-time histogram default to off? For a leaky validator it is a histogram of the leak if the metrics endpoint is ever exposed; turning it off loses latency monitoring.
-- [ ] What threshold should the TackAncPipelineGuessing alert use? The 0.5 line is a placeholder. The denominator is settled: divide by `stack_anc_validated_total` (requests that reached the validator), so cheap malformed requests cannot dilute the ratio.
+- [ ] What threshold should the StackAncPipelineGuessing alert use? The 0.5 line is a placeholder. The denominator is settled: divide by `stack_anc_validated_total` (requests that reached the validator), so cheap malformed requests cannot dilute the ratio.
 - [ ] Should a secret made of one repeated byte, such as all 0xFF, be refused like all zeros? It catches common unset shapes; entropy remains the key generator's job.
 - [ ] Should CI estimate the harness's A/A false-positive rate from 1,000 runs, or raise the line for the largest of eight correlated statistics? 0 of 50 runs bounds the rate only below about 6 percent; a higher line weakens detection.
 - [ ] Should every crate's calibration use the same rule, the largest of eight statistics? Strategy 1 checks the control's uncropped \|t\| only, and Strategy 2's control once reached a cropped t of 10.8.
@@ -91,8 +91,8 @@ Each item is one question, then its tradeoff. They come from every builder's ope
 ### Sentinel (touches sentinel_os)
 
 - [ ] Should sentinel_os's truncated hashes be raised as an issue? `twin_custody.py` prints 16-character hash prefixes, against rule 4 of its CLAUDE.md; full hashes make messages longer but searchable.
-- [ ] Is the uneven treatment of retired keys in the Python intended? A retired-key signature passes, a retired-key seed is SEED_FORGED and a retired-key anchor is accepted; tack-sentinel now refuses the signature and anchor by default.
-- [ ] Should Python's `check_head_anchor` also refuse a signed anchor that seals zero rows? tack-sentinel now requires at least one row by default; Python still lets such an anchor vouch for any chain.
+- [ ] Is the uneven treatment of retired keys in the Python intended? A retired-key signature passes, a retired-key seed is SEED_FORGED and a retired-key anchor is accepted; stack-sentinel now refuses the signature and anchor by default.
+- [ ] Should Python's `check_head_anchor` also refuse a signed anchor that seals zero rows? stack-sentinel now requires at least one row by default; Python still lets such an anchor vouch for any chain.
 - [ ] Is the outcome mapping right: an unknown key or unreadable anchor is RETRY, and any inconsistency inside an export is TERMINAL_BREACH with quarantine? RETRY reflects that the auditor's own inputs can change the answer.
 - [ ] Should sentinel_os hash the columns VERIFIED ignores, such as `timestamp` and `call_sid`? It needs a ledger format change; today a 27-year move of a timestamp still verifies.
 - [ ] Should auditors require a fresh anchor, or raise `min_anchor_entries`? A chain cut back to an older genuine anchor still verifies; a stricter rule refuses honest chains whose anchor job stalled.
