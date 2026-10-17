@@ -76,6 +76,8 @@ An escalated release is not a trip: the value is returned and counted in `stack_
 | `stack_anc_target_changes_total{direction}` | `increase`, `decrease` or `rollback` |
 | `stack_anc_leak_budget_bits`, `stack_anc_leak_lifetime_bits` | Bits charged in this window, and since the last reset |
 | `stack_anc_controller_frozen`, `stack_anc_controller_frozen_until_reset` | 1 while the target is held at the cap |
+| `stack_anc_slots_open` | Slots open now (rises and falls with `SlotScaling`) |
+| `stack_anc_spilled_total` | Arrivals sent to the spillway; their wait is part of the observed time |
 | `stack_anc_spin_reserved_nanoseconds_total` | Spin reserved at admission; the spin actually done would reveal target minus work |
 
 Spans are `stack.anc.adaptive_pad` for each request, plus `stack.anc.adaptive_reset` and `stack.anc.adaptive_controller_reset`. Inputs are logged at debug level, after release, as their length and full SHA-256 hex. The change and budget metrics are derived from work times, so the metrics endpoint must stay private.

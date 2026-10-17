@@ -215,7 +215,7 @@ Reserved spin stayed under the bound, which is the rate times wall time plus the
 
 The cap is first come, first served. A flood thread that was just served resubmits at once and usually wins the free slot, so the legitimate client is starved. Per-sender quotas or quarantine must come from an upstream component, and which component owns that is an open decision.
 
-Every metric carries a closed `strategy="ceiling"` label, and every other label comes from a closed enum. These rules are from the crate docs and the build record; the spin threshold uses the default budget, summed over pads:
+Every metric carries a closed `strategy` label (`ceiling` for the standard lane and plain pads, `ceiling_fast` for the fast gate), and every other label comes from a closed enum. Two gauges and counters describe slot scaling: `stack_anc_slots_open{strategy}` (slots open now) and `stack_anc_spilled_total{strategy}` (arrivals sent to the spillway). These rules are from the crate docs and the build record; the spin threshold uses the default budget, summed over pads:
 
 ```yaml
 groups:
@@ -232,6 +232,9 @@ groups:
       - alert: StackAncCeilingOverrun
         expr: increase(stack_anc_overrun_total{strategy="ceiling"}[15m]) > 0
         labels: {severity: warning}
+      - alert: StackAncCeilingFastOverrun
+        expr: increase(stack_anc_overrun_total{strategy="ceiling_fast"}[5m]) > 0
+        labels: {severity: critical}
       - alert: StackAncCeilingHalted
         expr: max(stack_anc_halted{strategy="ceiling"}) > 0
         labels: {severity: critical}

@@ -32,6 +32,9 @@
 //!   traffic to tolerate.
 //! * The fast ceiling must be **shorter than the standard ceiling**, so
 //!   the fast gate cannot be used to buy a longer window.
+//! * Each lane has its own metric series: the fast gate reports under
+//!   `strategy="ceiling_fast"`, so a fast-lane overrun is a critical alert
+//!   of its own and never hides in the standard lane's numbers.
 //! * The two lanes have **separate slots**, spin budgets, scaling and
 //!   spillway, so a flood on one lane cannot shed requests on the other.
 //!
@@ -57,6 +60,7 @@ use crate::clock::MonotonicClock;
 use crate::config::{CeilingConfig, ConfigError};
 use crate::outcome::{PadResult, Trip};
 use crate::pad::CeilingPad;
+use crate::telemetry::STRATEGY_FAST;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -101,7 +105,7 @@ impl LanedPad {
         }
         Ok(Self {
             standard: CeilingPad::new(standard)?,
-            fast: CeilingPad::new(fast)?,
+            fast: CeilingPad::with_strategy(fast, STRATEGY_FAST)?,
             fast_overruns: AtomicU64::new(0),
         })
     }
@@ -168,7 +172,9 @@ impl FastLane<'_> {
     }
 
     fn note<T>(&self, result: PadResult<T>) -> PadResult<T> {
-        if matches!(result, Err(Trip::Overrun)) && self.overruns.fetch_add(1, Ordering::Relaxed) == 0 {
+        if matches!(result, Err(Trip::Overrun))
+            && self.overruns.fetch_add(1, Ordering::Relaxed) == 0
+        {
             tracing::warn!(
                 "fast lane operation ran past its ceiling: it is not a fixed-cost operation and belongs on the standard lane"
             );
