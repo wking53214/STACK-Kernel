@@ -58,7 +58,7 @@ The descent from a public starting level, the warm-up, is not charged; only its 
 | `SlotsFull` | RETRY | reject | Load, not the secret. Shed at admission, before any secret work. |
 | `InputTooLarge` | RETRY | reject | Length is public and checked first. The digest is not computed, so the sender cannot choose the logging cost. |
 | `Overrun`, work past the cap | RETRY | reject | The value is dropped. The reply leaves on the cap grid, and its multiple is charged to the budget. |
-| `OperationPanicked` | TERMINAL_BREACH | quarantine | Caught, released on schedule and counted. A halt would let one request stop the pad for everyone. |
+| `OperationPanicked` | TERMINAL_BREACH | quarantine | Caught, released on schedule and counted. The pad has no sender identity, so it only signals quarantine: the caller isolates the input or sender. A halt would let one request stop the pad for everyone. |
 | `ClockFailure` | TERMINAL_BREACH | halt | Padding cannot be trusted without a monotonic clock. |
 | `Halted` | TERMINAL_BREACH | halt | Every request after a clock failure, until an operator calls `reset()`. |
 | `LeakBudgetSpent`, controller | RETRY | rollback | The target returns to the cap for the rest of the window. Waiting repairs it, and requests are still served. |
