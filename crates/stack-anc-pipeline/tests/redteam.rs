@@ -440,7 +440,7 @@ fn telemetry_logs_do_not_carry_unkeyed_digest_of_the_secret() {
 /// once, inside `PipelineGate::new`. If the gate is built before the
 /// metrics recorder is installed (a common start-up order: parse config,
 /// build components, then start the exporter), the gauge is never
-/// emitted and `TackAncPipelineLeakyValidatorActive` never fires, even
+/// emitted and `StackAncPipelineLeakyValidatorActive` never fires, even
 /// though every request afterwards runs the leaky validator.
 #[test]
 fn telemetry_leaky_gauge_survives_recorder_installed_after_build() {
@@ -496,7 +496,7 @@ fn telemetry_leaky_gauge_clears_when_leaky_gate_is_dropped() {
     );
 }
 
-/// Attack (alert evasion by dilution): `TackAncPipelineGuessing` divides
+/// Attack (alert evasion by dilution): `StackAncPipelineGuessing` divides
 /// mismatches by ALL requests, sheds included. A guessing campaign in
 /// which every well-formed token is wrong hides under the 0.5 threshold by
 /// sending two cheap wrong-length requests per guess, which cost the

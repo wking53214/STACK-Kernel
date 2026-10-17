@@ -1,8 +1,8 @@
 //! # stack-minotaur: the Minotaur String
 //!
-//! **Status: new design.** Of the seven components of the TACK governance
+//! **Status: new design.** Of the seven components of the STACK governance
 //! kernel, only the Sentinel Hash-Chain exists today (in `sentinel_os`). The
-//! Minotaur String did not exist in any TACK repository before this crate;
+//! Minotaur String did not exist in any STACK repository before this crate;
 //! this is its first reference implementation, and nothing in `sentinel_os`,
 //! CNS, observe-perceive, ghost_tools or Resume_OS calls it yet.
 //!
@@ -155,7 +155,7 @@
 //! per step. Labels are closed enums only. Log events carry the breadcrumb
 //! path's length and full SHA-256 digest, never fingerprints. A refusal
 //! through a stale guard is counted as
-//! `tack_minotaur_trips_total{reason="stale_guard",outcome="retry"}`; a
+//! `stack_minotaur_trips_total{reason="stale_guard",outcome="retry"}`; a
 //! steady rate of it means a caller is ignoring the rollback contract.
 //!
 //! ## Timing (kernel convention 6)

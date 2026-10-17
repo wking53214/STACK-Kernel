@@ -26,11 +26,11 @@ Terms used below:
 - **Replay.** A genuine envelope, captured and sent again.
 - **Canonical encoding.** One exact byte form for every value, so sender and receiver hash identical bytes.
 
-This is a new design. No TACK repository has a Trident today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The crate borrows two things that do exist: the TRANSPLANTED check from sentinel_os and the gate vocabulary from CNS.
+This is a new design. No STACK repository has a Trident today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The crate borrows two things that do exist: the TRANSPLANTED check from sentinel_os and the gate vocabulary from CNS.
 
 ### Mechanism
 
-**The envelope.** A handoff travels as a JSON object with exactly ten fields. The producer fills them with `seal` or `seal_for`, and the receiver checks them with the `Trident` type in the `tack-trident` crate.
+**The envelope.** A handoff travels as a JSON object with exactly ten fields. The producer fills them with `seal` or `seal_for`, and the receiver checks them with the `Trident` type in the `stack-trident` crate.
 
 | Field | Meaning |
 |---|---|
@@ -45,7 +45,7 @@ This is a new design. No TACK repository has a Trident today; of the seven compo
 | `payload` | The content the sender's gate judged, any JSON |
 | `mac` | HMAC-SHA256 tag over the other nine fields |
 
-A fingerprint is the SHA-256 of `tack-trident/fingerprint/v1`, a newline and the key bytes. That fixed prefix is a domain separator: it stops a hash made for one purpose from matching a hash made for another. The MAC input likewise starts with `tack-trident/mac/v1` and a newline.
+A fingerprint is the SHA-256 of `stack-trident/fingerprint/v1`, a newline and the key bytes. That fixed prefix is a domain separator: it stops a hash made for one purpose from matching a hash made for another. The MAC input likewise starts with `stack-trident/mac/v1` and a newline.
 
 **Four stages.** The receiver runs four stages in order. The first two are cheap, depend only on public facts and return early. The prongs then always run in full.
 
@@ -209,7 +209,7 @@ Each reason maps to one CNS outcome. TERMINAL_BREACH means the envelope proves a
 | `malformed_envelope`: wrong field set or JSON type | RETRY | reject | A structural encoding bug, and repairable. |
 | `halted` | RETRY | halt | The receiver's state may be inconsistent, so it stops. A still-fresh envelope issued after the new floor may pass after `operator_reset`. |
 | `quarantined`: the claimed sender is isolated | TERMINAL_BREACH | quarantine | Only an operator `release` lifts it. Quarantine is not secret, so the early return reveals nothing. |
-| Breaker trip: 5 counted breaches from one sender in 60,000 ms | TERMINAL_BREACH | quarantine | Under the default attribution, repeated authenticated breaches mark the key holder as hostile or broken. The quarantine survives `operator_reset` and `replace_keyring`. A full sender table drops the breach and counts it in `tack_trident_breaker_untracked_total`. |
+| Breaker trip: 5 counted breaches from one sender in 60,000 ms | TERMINAL_BREACH | quarantine | Under the default attribution, repeated authenticated breaches mark the key holder as hostile or broken. The quarantine survives `operator_reset` and `replace_keyring`. A full sender table drops the breach and counts it in `stack_trident_breaker_untracked_total`. |
 | `malformed_sender`, `malformed_mac` | RETRY | reject | Encoding bugs. The HMAC still runs, with a throwaway key or against zeros, so the work is equal. |
 | `unknown_sender` | TERMINAL_BREACH | reject | No sender correction repairs it. It costs the same HMAC work as a known sender. |
 | `mac_mismatch` | TERMINAL_BREACH | reject | An integrity failure. The default breaker ignores it, so forgeries naming a sender cannot get that sender quarantined. |
@@ -235,89 +235,89 @@ Metrics go through the `metrics` facade, and every label value comes from a clos
 
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
-| `tack_trident_verifications_total` | counter | `outcome` (pass, retry, terminal_breach), `resolution` (accept, reject, quarantine, halt) | One per `verify` or `verify_wire` call. `outcome` is the Trident's own result. |
-| `tack_trident_check_failures_total` | counter | `check` (six groups), `reason` (28 spellings) | One per reported reason. Masked freshness results are not counted. |
-| `tack_trident_verify_duration_seconds` | histogram | `outcome` | Wall time from call entry to verdict, admission included. |
-| `tack_trident_hashed_bytes_total` | counter | none | Bytes fed to the prong 1 HMAC and the prong 2 SHA-256. Stays 0 for early admission and custody refusals. |
-| `tack_trident_quarantine_trips_total` | counter | none | Senders quarantined by the breaker. |
-| `tack_trident_quarantine_releases_total` | counter | none | Quarantines lifted by `release`. |
-| `tack_trident_quarantined_senders` | gauge | none | Senders currently quarantined. |
-| `tack_trident_replay_cache_entries` | gauge | none | Replay cache size; 0 after a reset. |
-| `tack_trident_replay_evictions_total` | counter | none | Entries evicted so a sender under its fair share could be accepted. |
-| `tack_trident_halts_total` | counter | `cause` (poisoned, operator) | Transitions into the halted state, once per transition. |
-| `tack_trident_operator_resets_total` | counter | none | Calls to `operator_reset`. |
-| `tack_trident_breaker_untracked_total` | counter | none | Counted breaches not recorded because the sender table was full. |
+| `stack_trident_verifications_total` | counter | `outcome` (pass, retry, terminal_breach), `resolution` (accept, reject, quarantine, halt) | One per `verify` or `verify_wire` call. `outcome` is the Trident's own result. |
+| `stack_trident_check_failures_total` | counter | `check` (six groups), `reason` (28 spellings) | One per reported reason. Masked freshness results are not counted. |
+| `stack_trident_verify_duration_seconds` | histogram | `outcome` | Wall time from call entry to verdict, admission included. |
+| `stack_trident_hashed_bytes_total` | counter | none | Bytes fed to the prong 1 HMAC and the prong 2 SHA-256. Stays 0 for early admission and custody refusals. |
+| `stack_trident_quarantine_trips_total` | counter | none | Senders quarantined by the breaker. |
+| `stack_trident_quarantine_releases_total` | counter | none | Quarantines lifted by `release`. |
+| `stack_trident_quarantined_senders` | gauge | none | Senders currently quarantined. |
+| `stack_trident_replay_cache_entries` | gauge | none | Replay cache size; 0 after a reset. |
+| `stack_trident_replay_evictions_total` | counter | none | Entries evicted so a sender under its fair share could be accepted. |
+| `stack_trident_halts_total` | counter | `cause` (poisoned, operator) | Transitions into the halted state, once per transition. |
+| `stack_trident_operator_resets_total` | counter | none | Calls to `operator_reset`. |
+| `stack_trident_breaker_untracked_total` | counter | none | Counted breaches not recorded because the sender table was full. |
 
 The two gauges carry no suffix, because the kernel convention defines suffixes only for counters and duration histograms.
 
-Spans, named `tack.trident.<operation>`:
+Spans, named `stack.trident.<operation>`:
 
-- `tack.trident.verify` (INFO). Fields: `path` (wire or in_process), `input_len`, `input_sha256`, `outcome`, `resolution`. It holds one event: WARN `tack.trident refused handoff` with the reason codes, or DEBUG `tack.trident accepted handoff`.
-- On a breaker trip, the verify span adds WARN `tack.trident sender quarantined by breaker`, naming the validated ring fingerprint in full. On a first halt it adds ERROR `tack.trident halted; operator reset required` with the cause.
-- `tack.trident.seal` (DEBUG). Producer-side sealing.
-- `tack.trident.release` (INFO). Field `sender`, the full fingerprint. Event INFO `tack.trident quarantine released by operator`.
-- `tack.trident.reset` (INFO). Event WARN `tack.trident reset by operator` with `epoch_floor_ms`.
-- `tack.trident.halt` (WARN). Wraps `operator_halt`.
-- `tack.trident.replace_keyring` (INFO). Field `keys`, the ring size.
+- `stack.trident.verify` (INFO). Fields: `path` (wire or in_process), `input_len`, `input_sha256`, `outcome`, `resolution`. It holds one event: WARN `stack.trident refused handoff` with the reason codes, or DEBUG `stack.trident accepted handoff`.
+- On a breaker trip, the verify span adds WARN `stack.trident sender quarantined by breaker`, naming the validated ring fingerprint in full. On a first halt it adds ERROR `stack.trident halted; operator reset required` with the cause.
+- `stack.trident.seal` (DEBUG). Producer-side sealing.
+- `stack.trident.release` (INFO). Field `sender`, the full fingerprint. Event INFO `stack.trident quarantine released by operator`.
+- `stack.trident.reset` (INFO). Event WARN `stack.trident reset by operator` with `epoch_floor_ms`.
+- `stack.trident.halt` (WARN). Wraps `operator_halt`.
+- `stack.trident.replace_keyring` (INFO). Field `keys`, the ring size.
 
 The verify span records the input's length and full 64-character SHA-256 digest, never the input itself. An input over the size cap is logged by length only, because hashing it is the work the cap prevents. On the in-process path the digest covers the canonical MAC input, since there are no raw bytes.
 
 ```yaml
 groups:
-  - name: tack-trident
+  - name: stack-trident
     rules:
       - alert: TridentSenderQuarantined
-        expr: increase(tack_trident_quarantine_trips_total[5m]) > 0
+        expr: increase(stack_trident_quarantine_trips_total[5m]) > 0
         labels: {severity: critical}
         annotations: {summary: "A key holder repeatedly signed digests that do not match the payload. Review, then release."}
       - alert: TridentHalted
-        expr: increase(tack_trident_halts_total[5m]) > 0
+        expr: increase(stack_trident_halts_total[5m]) > 0
         labels: {severity: critical}
         annotations: {summary: "The receiver refuses every handoff until operator_reset (cause poisoned or operator)."}
       - alert: TridentTransplantedVerdict
-        expr: increase(tack_trident_check_failures_total{reason="subject_digest_mismatch"}[5m]) > 0
+        expr: increase(stack_trident_check_failures_total{reason="subject_digest_mismatch"}[5m]) > 0
         labels: {severity: critical}
         annotations: {summary: "A payload does not match its signed digest: content swapped after judgement or in transit."}
       - alert: TridentForgeryAttempts
-        expr: sum(rate(tack_trident_check_failures_total{reason=~"mac_mismatch|unknown_sender"}[5m])) > 1
+        expr: sum(rate(stack_trident_check_failures_total{reason=~"mac_mismatch|unknown_sender"}[5m])) > 1
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "Sustained authenticity failures: forgery, a key-rotation mismatch or a missing ring entry."}
       - alert: TridentReplayDetected
-        expr: increase(tack_trident_check_failures_total{reason="replay"}[5m]) > 0
+        expr: increase(stack_trident_check_failures_total{reason="replay"}[5m]) > 0
         labels: {severity: warning}
         annotations: {summary: "An authenticated envelope was re-sent: a replay attack or a sender reusing nonces."}
       - alert: TridentCapacityExhausted
-        expr: increase(tack_trident_check_failures_total{check="capacity"}[5m]) > 0
+        expr: increase(stack_trident_check_failures_total{check="capacity"}[5m]) > 0
         labels: {severity: warning}
         annotations: {summary: "Replay cache or sender table is full, and honest traffic gets RETRY."}
       - alert: TridentReplayEvictions
-        expr: sum(rate(tack_trident_replay_evictions_total[5m])) > 0
+        expr: sum(rate(stack_trident_replay_evictions_total[5m])) > 0
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "Key holders are sending at or above the replay cache's design rate."}
       - alert: TridentReplayCacheNearFull
-        expr: tack_trident_replay_cache_entries > 0.9 * 65536
+        expr: stack_trident_replay_cache_entries > 0.9 * 65536
         for: 5m
         labels: {severity: warning}
         annotations: {summary: "Replay cache above 90% of the default capacity. Substitute the configured value."}
       - alert: TridentAdmissionFlood
-        expr: sum(rate(tack_trident_check_failures_total{check="admission"}[5m])) > 10
+        expr: sum(rate(stack_trident_check_failures_total{check="admission"}[5m])) > 10
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "Oversize, deep or malformed input at a sustained rate: a payload bomb or a broken producer."}
       - alert: TridentClockSkew
-        expr: sum(rate(tack_trident_check_failures_total{reason=~"stale|from_future"}[10m])) > 0.5
+        expr: sum(rate(stack_trident_check_failures_total{reason=~"stale|from_future"}[10m])) > 0.5
         for: 15m
         labels: {severity: warning}
         annotations: {summary: "Sender and receiver clocks disagree beyond the skew window."}
       - alert: TridentHighRefusalRatio
-        expr: sum(rate(tack_trident_verifications_total{outcome!="pass"}[5m])) / sum(rate(tack_trident_verifications_total[5m])) > 0.2
+        expr: sum(rate(stack_trident_verifications_total{outcome!="pass"}[5m])) / sum(rate(stack_trident_verifications_total[5m])) > 0.2
         for: 15m
         labels: {severity: warning}
         annotations: {summary: "More than 20% of handoffs are refused."}
       - alert: TridentSlowVerify
-        expr: histogram_quantile(0.99, sum by (le) (rate(tack_trident_verify_duration_seconds_bucket[5m]))) > 0.05
+        expr: histogram_quantile(0.99, sum by (le) (rate(stack_trident_verify_duration_seconds_bucket[5m]))) > 0.05
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "p99 verification time above 50 ms. Needs an exporter that renders histogram buckets."}
@@ -337,7 +337,7 @@ TOCTOU (time of check to time of use) names a check that goes stale before the a
 | Cross-receiver replay: one envelope accepted by two receivers sharing a sender key | Broke, then fixed by opt-in | New `audience` setting and `seal_for` bind the receiver into the MAC. Limitation: the default audience is empty, so binding is off until configured. |
 | Replay into a restarted receiver whose clock is 30 s behind | Broke, then fixed with caller help | `high_water_ms` to persist and `restored_high_water_ms` to restore. Limitation: without them, restart safety assumes the clock never went backwards. |
 | Replay after `operator_reset` with the clock stepped back 30 s | Broke, then fixed | The floor is the largest of its old value, now plus 5,000 ms, and the high-water mark plus 1. |
-| One key holder fills the shared replay cache (64-slot test) and starves others | Broke, then fixed | Per-sender nonce queues and a fair share of capacity divided by ring size. New counter `tack_trident_replay_evictions_total`. |
+| One key holder fills the shared replay cache (64-slot test) and starves others | Broke, then fixed | Per-sender nonce queues and a fair share of capacity divided by ring size. New counter `stack_trident_replay_evictions_total`. |
 | Replay at the exact retention boundary after a key-ring reload | Broke, then fixed | Retention is now 60,000 + 5,000 + 1 ms by default. Removed senders stay as tombstones until idle. |
 | Sequence regression after a key-ring reload drops and restores a sender | Broke, then fixed | Tombstones keep the sender's last accepted sequence. |
 | A ring larger than the sender table (1 slot, 2 keys) locks out a member | Broke, then fixed | A full table evicts one idle entry. Ring size is still not checked at construction. |
@@ -365,9 +365,9 @@ Known limitations that remain:
 - **Key zeroing.** `SecretKey` zeroes its bytes on drop as a best effort only, because the write cannot be volatile without `unsafe`.
 - **Timing evidence.** Equal work is shown by hashed-byte counts, not by a wall-clock measurement.
 
-Three property tests ran 512 cases each: a one-byte flip of a sealed envelope is refused, sealed envelopes pass, and re-encoding is stable. `cargo clippy -p tack-trident --all-targets -- -D warnings` exits 0 with no warnings.
+Three property tests ran 512 cases each: a one-byte flip of a sealed envelope is refused, sealed envelopes pass, and re-encoding is stable. `cargo clippy -p stack-trident --all-targets -- -D warnings` exits 0 with no warnings.
 
-The final run of `cargo test -p tack-trident --all-targets` passed 93 tests in five binaries: unit, properties, redteam, telemetry and trident, in that order.
+The final run of `cargo test -p stack-trident --all-targets` passed 93 tests in five binaries: unit, properties, redteam, telemetry and trident, in that order.
 
 ```text
 test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s

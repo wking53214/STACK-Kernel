@@ -13,7 +13,7 @@ use crate::fingerprint::Fingerprint;
 
 /// Name this component reports itself under, for a caller building a CNS
 /// `GateResult` from a [`Trip`].
-pub const GATE_NAME: &str = "tack_minotaur";
+pub const GATE_NAME: &str = "stack_minotaur";
 
 /// A verdict, in increasing order of finality (CNS `GateOutcome`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -44,7 +44,7 @@ impl GateOutcome {
 ///
 /// The Minotaur String produces [`Resolution::Rollback`],
 /// [`Resolution::Halt`] and, for a call made through a stale guard,
-/// [`Resolution::Reject`]. [`Resolution::Quarantine`] exists so every TACK
+/// [`Resolution::Reject`]. [`Resolution::Quarantine`] exists so every STACK
 /// component shares one vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {

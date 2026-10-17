@@ -37,7 +37,7 @@ pub const MIN_PHASE_LEN_NS: Nanos = 1_000;
 /// configurations with [`ConfigError::PhaseTooShortForDriver`]. (tokio's own
 /// timer is coarser still: 1 ms resolution, deadlines rounded up.) A 1 ms
 /// grid still misses phases when the thread waits a whole phase for a CPU;
-/// those are counted in `tack_greenwave_phases_missed_total`.
+/// those are counted in `stack_greenwave_phases_missed_total`.
 pub const DRIVER_MIN_PHASE_LEN_NS: Nanos = 1_000_000;
 /// How early the driver's thread wakes before a phase start: 200
 /// microseconds (never more than half a phase). It then busy-waits on the
@@ -107,7 +107,7 @@ impl LaneSpec {
 /// at this cap, dispatching one more request from that lane expires the
 /// lane's oldest live ticket, so one lane's slow or abandoned work never
 /// affects another lane's tickets. Expiries are counted in
-/// `tack_greenwave_tickets_expired_total`.
+/// `stack_greenwave_tickets_expired_total`.
 #[must_use]
 pub fn live_ticket_cap(spec: &LaneSpec, max_dispatch_per_phase: u32) -> usize {
     let per_epoch = u64::from(spec.weight).saturating_mul(u64::from(max_dispatch_per_phase));

@@ -38,7 +38,7 @@ impl GateOutcome {
 /// [`Resolution::Reject`]: the gate holds no state besides an in-flight
 /// counter that is restored when the request ends, so there is nothing to
 /// quarantine, roll back or halt. The other variants are listed so the
-/// vocabulary matches the other TACK components.
+/// vocabulary matches the other STACK components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {
     /// Nothing changed; the request is refused.
@@ -73,7 +73,7 @@ pub enum Trip {
     /// Well-formed token that does not match. The caller may resubmit with
     /// the right token. RETRY, reject. Repeated mismatches from one sender
     /// are a guessing attack; rate limiting and quarantine of the sender
-    /// belong to the caller (for example TACK Inlet), not to this crate.
+    /// belong to the caller (for example STACK Inlet), not to this crate.
     #[error("RETRY: token mismatch")]
     Mismatch,
 }

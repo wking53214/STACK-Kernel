@@ -13,7 +13,7 @@ The job has two parts. `unit` runs on every pull request, on a GitHub-hosted mac
 Timing runs apart from `unit` for two reasons. It measures for about 13 minutes: 232 s for Strategy 1, 453 to 511 s for Strategy 2, 9 s for Strategy 3. It also needs a quiet machine, and a shared hosted runner is noisier than even the VM used for this manual.
 
 ```yaml
-name: tack-kernel-verify
+name: stack-kernel-verify
 
 on:
   pull_request:
@@ -32,10 +32,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [tack-inlet, tack-trident, tack-bumpers, tack-minotaur,
-                tack-greenwave, tack-transmission, tack-sentinel,
-                tack-anc-harness, tack-anc-ceiling, tack-anc-adaptive,
-                tack-anc-pipeline]
+        crate: [stack-inlet, stack-trident, stack-bumpers, stack-minotaur,
+                stack-greenwave, stack-transmission, stack-sentinel,
+                stack-anc-harness, stack-anc-ceiling, stack-anc-adaptive,
+                stack-anc-pipeline]
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install 1.94 --profile minimal --component clippy
@@ -44,8 +44,8 @@ jobs:
 
   timing:
     if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, linux, x64, tack-timing]
-    concurrency: {group: tack-timing, cancel-in-progress: false}
+    runs-on: [self-hosted, linux, x64, stack-timing]
+    concurrency: {group: stack-timing, cancel-in-progress: false}
     timeout-minutes: 60
     env:
       CPU: "3"
@@ -64,10 +64,10 @@ jobs:
         run: |
           rustup toolchain install 1.94 --profile minimal
           mkdir -p bin out
-          cargo +1.94 build --release -p tack-anc-harness --example calibrate
+          cargo +1.94 build --release -p stack-anc-harness --example calibrate
           cp target/release/examples/calibrate bin/
           for c in ceiling adaptive pipeline; do
-            cargo +1.94 build --release -p tack-anc-$c --example verify
+            cargo +1.94 build --release -p stack-anc-$c --example verify
             cp target/release/examples/verify bin/verify-$c
           done
       - name: Calibrate the harness on this host
@@ -185,15 +185,15 @@ Runner and calibration failures are RETRY, because the instrument failed, not th
 The `unit` job fails today on three crates. The red teams' open findings stay as failing tests, never skipped, so a fix or an owner decision is what turns them green. The final summary lines of `cargo test -p <crate> --all-targets`, re-run for this section:
 
 ```text
-$ cargo test -p tack-anc-ceiling --all-targets
+$ cargo test -p stack-anc-ceiling --all-targets
 test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.64s
-error: test failed, to rerun pass `-p tack-anc-ceiling --test redteam`
-$ cargo test -p tack-anc-adaptive --all-targets
+error: test failed, to rerun pass `-p stack-anc-ceiling --test redteam`
+$ cargo test -p stack-anc-adaptive --all-targets
 test result: FAILED. 14 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
-error: test failed, to rerun pass `-p tack-anc-adaptive --test redteam`
-$ cargo test -p tack-anc-pipeline --all-targets
+error: test failed, to rerun pass `-p stack-anc-adaptive --test redteam`
+$ cargo test -p stack-anc-pipeline --all-targets
 test result: FAILED. 11 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.11s
-error: test failed, to rerun pass `-p tack-anc-pipeline --test redteam`
+error: test failed, to rerun pass `-p stack-anc-pipeline --test redteam`
 ```
 
 The other eight crates passed every test in this re-run, and clippy with warnings denied exited 0 for all eleven. Two timing-sensitive suites are flaky on a loaded host. They are Strategy 1's rt04 and Green Wave's driver tests, which failed 3 of 10 earlier full runs.

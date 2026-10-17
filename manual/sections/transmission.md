@@ -12,7 +12,7 @@ A governed service has operating modes: the policy version in force, the current
 
 The goal is that a mode changes only while no request is running. Every request then reads exactly one mode from start to finish.
 
-This is a new design. No TACK repository contains it today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The `tack-transmission` crate is its first implementation.
+This is a new design. No STACK repository contains it today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The `stack-transmission` crate is its first implementation.
 
 One name clash needs flagging. In sentinel_os, `queue_schema.py` calls its Redis job queue "the transmission" (`TransmissionQueue`). That queue moves jobs to workers and does not gate mode changes, and no code connects it to this crate.
 
@@ -224,29 +224,29 @@ The gear configuration may hold key material, so it is never logged, printed or 
 
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
-| `tack_transmission_engage_total` | Counter | `outcome` (pass, retry, terminal_breach) | One per `engage()` call |
-| `tack_transmission_shift_total` | Counter | `outcome` | One per `shift()` or `shift_from()` call |
-| `tack_transmission_trips_total` | Counter | `operation`, `reason` (10 values), `outcome`, `resolution` | One per refused call |
-| `tack_transmission_engage_wait_seconds` | Histogram | `outcome` | Wall time of one `engage()`, including any clutch wait |
-| `tack_transmission_shift_drain_seconds` | Histogram | `outcome` | How long the clutch was pressed, from press to swap or rollback |
-| `tack_transmission_in_flight` | Gauge | none | Drive guards out now |
-| `tack_transmission_waiting_engagers` | Gauge | none | Callers parked on the clutch |
-| `tack_transmission_clutch_pressed` | Gauge | none | 1 while a shift holds the clutch, else 0 |
-| `tack_transmission_gear_epoch` | Gauge | none | Engaged epoch; exact only up to 2^53 |
-| `tack_transmission_halted` | Gauge | none | 1 while halted, else 0 |
-| `tack_transmission_halts_total` | Counter | `cause` (operator, poisoned, invariant) | Moves into the halted state; a repeat halt is not counted |
-| `tack_transmission_operator_resets_total` | Counter | none | Resets that cleared a halt |
-| `tack_transmission_guard_panics_total` | Counter | none | Guards dropped during a panic; the count was still lowered |
-| `tack_transmission_lock_poison_recoveries_total` | Counter | none | Times the state lock was found poisoned and recovered |
-| `tack_transmission_gear_drop_panics_total` | Counter | none | Panics from a replaced gear's `G::drop`, contained inside `shift()` |
+| `stack_transmission_engage_total` | Counter | `outcome` (pass, retry, terminal_breach) | One per `engage()` call |
+| `stack_transmission_shift_total` | Counter | `outcome` | One per `shift()` or `shift_from()` call |
+| `stack_transmission_trips_total` | Counter | `operation`, `reason` (10 values), `outcome`, `resolution` | One per refused call |
+| `stack_transmission_engage_wait_seconds` | Histogram | `outcome` | Wall time of one `engage()`, including any clutch wait |
+| `stack_transmission_shift_drain_seconds` | Histogram | `outcome` | How long the clutch was pressed, from press to swap or rollback |
+| `stack_transmission_in_flight` | Gauge | none | Drive guards out now |
+| `stack_transmission_waiting_engagers` | Gauge | none | Callers parked on the clutch |
+| `stack_transmission_clutch_pressed` | Gauge | none | 1 while a shift holds the clutch, else 0 |
+| `stack_transmission_gear_epoch` | Gauge | none | Engaged epoch; exact only up to 2^53 |
+| `stack_transmission_halted` | Gauge | none | 1 while halted, else 0 |
+| `stack_transmission_halts_total` | Counter | `cause` (operator, poisoned, invariant) | Moves into the halted state; a repeat halt is not counted |
+| `stack_transmission_operator_resets_total` | Counter | none | Resets that cleared a halt |
+| `stack_transmission_guard_panics_total` | Counter | none | Guards dropped during a panic; the count was still lowered |
+| `stack_transmission_lock_poison_recoveries_total` | Counter | none | Times the state lock was found poisoned and recovered |
+| `stack_transmission_gear_drop_panics_total` | Counter | none | Panics from a replaced gear's `G::drop`, contained inside `shift()` |
 
 Gauges are written while the state lock is held, so two racing threads cannot leave a stale value behind. `Transmission::new` only registers the gauges, by adding zero. So building a second instance never clears another instance's halt signal.
 
 **Spans.** A span is a timed, named stretch of work that tracing tools draw as one bar.
 
-- `tack.transmission.engage` at DEBUG, because it is on the hot path. Fields: `timeout_ms`, `epoch`, `outcome`, `reason`.
-- `tack.transmission.shift` at INFO. Fields: `timeout_ms`, `from_epoch`, `to_epoch`, `clutch_held_ms`, `cooldown_wait_ms`, `outcome`, `reason`.
-- `tack.transmission.operator_halt` and `tack.transmission.operator_reset` at INFO.
+- `stack.transmission.engage` at DEBUG, because it is on the hot path. Fields: `timeout_ms`, `epoch`, `outcome`, `reason`.
+- `stack.transmission.shift` at INFO. Fields: `timeout_ms`, `from_epoch`, `to_epoch`, `clutch_held_ms`, `cooldown_wait_ms`, `outcome`, `reason`.
+- `stack.transmission.operator_halt` and `stack.transmission.operator_reset` at INFO.
 
 Log events carry only epochs, causes and reasons. ERROR marks each halt and each contained gear-drop panic. WARN marks a rollback, a guard released during a panic and an operator reset; INFO marks "gear shifted"; DEBUG marks the other refusals.
 
@@ -254,48 +254,48 @@ Log events carry only epochs, causes and reasons. ERROR marks each halt and each
 
 ```yaml
 groups:
-  - name: tack-transmission
+  - name: stack-transmission
     rules:
-      - alert: TackTransmissionHalted
-        expr: max(tack_transmission_halted) == 1
+      - alert: StackTransmissionHalted
+        expr: max(stack_transmission_halted) == 1
         for: 1m
         labels: { severity: critical }
         annotations:
           summary: "Transmission halted; all engage and shift calls are refused until operator_reset."
-      - alert: TackTransmissionLockPoisoned
-        expr: increase(tack_transmission_lock_poison_recoveries_total[1h]) > 0
+      - alert: StackTransmissionLockPoisoned
+        expr: increase(stack_transmission_lock_poison_recoveries_total[1h]) > 0
         labels: { severity: critical }
         annotations:
           summary: "A thread panicked while holding the transmission state lock. This points at a bug."
-      - alert: TackTransmissionClutchStuck
-        expr: max(tack_transmission_clutch_pressed) == 1
+      - alert: StackTransmissionClutchStuck
+        expr: max(stack_transmission_clutch_pressed) == 1
         for: 2m
         labels: { severity: critical }
         annotations:
           summary: "Clutch pressed longer than any allowed shift timeout; admission is paused."
-      - alert: TackTransmissionShiftRolledBack
-        expr: increase(tack_transmission_trips_total{operation="shift",reason="drain_timeout"}[15m]) > 0
+      - alert: StackTransmissionShiftRolledBack
+        expr: increase(stack_transmission_trips_total{operation="shift",reason="drain_timeout"}[15m]) > 0
         labels: { severity: warning }
         annotations:
           summary: "A mode change timed out draining and was rolled back; the old gear is still engaged."
-      - alert: TackTransmissionEngageRetryRatio
-        expr: sum(rate(tack_transmission_engage_total{outcome="retry"}[5m])) / clamp_min(sum(rate(tack_transmission_engage_total[5m])), 1e-9) > 0.05
+      - alert: StackTransmissionEngageRetryRatio
+        expr: sum(rate(stack_transmission_engage_total{outcome="retry"}[5m])) / clamp_min(sum(rate(stack_transmission_engage_total[5m])), 1e-9) > 0.05
         for: 10m
         labels: { severity: warning }
         annotations:
           summary: "More than 5% of engage calls are being told to retry (clutch waits or capacity)."
-      - alert: TackTransmissionInFlightSaturated
-        expr: increase(tack_transmission_trips_total{operation="engage",reason="in_flight_capacity"}[5m]) > 0
+      - alert: StackTransmissionInFlightSaturated
+        expr: increase(stack_transmission_trips_total{operation="engage",reason="in_flight_capacity"}[5m]) > 0
         labels: { severity: warning }
         annotations:
           summary: "max_in_flight reached; work is being refused."
-      - alert: TackTransmissionGuardPanics
-        expr: increase(tack_transmission_guard_panics_total[10m]) > 0
+      - alert: StackTransmissionGuardPanics
+        expr: increase(stack_transmission_guard_panics_total[10m]) > 0
         labels: { severity: warning }
         annotations:
           summary: "A worker panicked while holding a drive guard. The count was released, but the worker failed."
-      - alert: TackTransmissionGearDropPanics
-        expr: increase(tack_transmission_gear_drop_panics_total[1h]) > 0
+      - alert: StackTransmissionGearDropPanics
+        expr: increase(stack_transmission_gear_drop_panics_total[1h]) > 0
         labels: { severity: warning }
         annotations:
           summary: "A replaced configuration panicked in Drop during a shift. The shift completed; the configuration type has a bug."
@@ -348,7 +348,7 @@ A property test checks single-threaded operation sequences against a simple mode
 
 A stress test runs 8 workers with 1,500 successful engages each, plus 2 racing shifters. A rerun printed "stress: 48739 operations, 36268 engage retries, 420 shifts".
 
-`cargo clippy -p tack-transmission --all-targets -- -D warnings` finished with no warnings. The final run of `cargo test -p tack-transmission --all-targets` passed 45 tests in five binaries: unit, model, redteam, telemetry and threads, in that order.
+`cargo clippy -p stack-transmission --all-targets -- -D warnings` finished with no warnings. The final run of `cargo test -p stack-transmission --all-targets` passed 45 tests in five binaries: unit, model, redteam, telemetry and threads, in that order.
 
 ```text
 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s

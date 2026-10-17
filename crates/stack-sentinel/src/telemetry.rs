@@ -7,11 +7,11 @@
 //!
 //! | metric | type | labels |
 //! |---|---|---|
-//! | `tack_sentinel_verifications_total` | counter | `verdict`, `outcome` |
-//! | `tack_sentinel_trips_total` | counter | `verdict`, `reason`, `outcome`, `resolution` |
-//! | `tack_sentinel_input_rejected_total` | counter | `reason`, `outcome` |
-//! | `tack_sentinel_rows_checked_total` | counter | none |
-//! | `tack_sentinel_verify_duration_seconds` | histogram | `outcome` |
+//! | `stack_sentinel_verifications_total` | counter | `verdict`, `outcome` |
+//! | `stack_sentinel_trips_total` | counter | `verdict`, `reason`, `outcome`, `resolution` |
+//! | `stack_sentinel_input_rejected_total` | counter | `reason`, `outcome` |
+//! | `stack_sentinel_rows_checked_total` | counter | none |
+//! | `stack_sentinel_verify_duration_seconds` | histogram | `outcome` |
 
 use std::time::Duration;
 
@@ -19,16 +19,16 @@ use crate::error::VerifyError;
 use crate::verdict::{Finding, GateOutcome, Report};
 
 /// One per export that reached a verdict.
-pub const VERIFICATIONS_TOTAL: &str = "tack_sentinel_verifications_total";
+pub const VERIFICATIONS_TOTAL: &str = "stack_sentinel_verifications_total";
 /// One per finding in a report: the first finding and, when present, the
 /// anchor finding printed beside it and the escalation finding.
-pub const TRIPS_TOTAL: &str = "tack_sentinel_trips_total";
+pub const TRIPS_TOTAL: &str = "stack_sentinel_trips_total";
 /// One per export or key input refused before a verdict.
-pub const INPUT_REJECTED_TOTAL: &str = "tack_sentinel_input_rejected_total";
+pub const INPUT_REJECTED_TOTAL: &str = "stack_sentinel_input_rejected_total";
 /// Rows the chain walk examined.
-pub const ROWS_CHECKED_TOTAL: &str = "tack_sentinel_rows_checked_total";
+pub const ROWS_CHECKED_TOTAL: &str = "stack_sentinel_rows_checked_total";
 /// Wall time of one `verify_export` call, verdict or refusal.
-pub const VERIFY_DURATION_SECONDS: &str = "tack_sentinel_verify_duration_seconds";
+pub const VERIFY_DURATION_SECONDS: &str = "stack_sentinel_verify_duration_seconds";
 
 /// Register descriptions with the installed recorder. Optional.
 pub fn describe_metrics() {
@@ -103,8 +103,8 @@ pub struct AlertRule {
 /// The alert rules shipped with this crate.
 pub const ALERT_RULES: [AlertRule; 5] = [
     AlertRule {
-        name: "TackSentinelTamperEvidence",
-        expr: "sum(increase(tack_sentinel_trips_total{outcome=\"terminal_breach\"}[15m])) > 0",
+        name: "StackSentinelTamperEvidence",
+        expr: "sum(increase(stack_sentinel_trips_total{outcome=\"terminal_breach\"}[15m])) > 0",
         for_duration: None,
         severity: "critical",
         meaning: "An export failed a hash, link, signature, subject binding, seed or anchor-head check, \
@@ -112,17 +112,17 @@ pub const ALERT_RULES: [AlertRule; 5] = [
                   The ledger or its export was altered. Quarantine the export and compare it with the witness copy.",
     },
     AlertRule {
-        name: "TackSentinelTruncation",
-        expr: "sum(increase(tack_sentinel_trips_total{verdict=\"truncated\",outcome=\"terminal_breach\"}[15m])) > 0",
+        name: "StackSentinelTruncation",
+        expr: "sum(increase(stack_sentinel_trips_total{verdict=\"truncated\",outcome=\"terminal_breach\"}[15m])) > 0",
         for_duration: None,
         severity: "critical",
         meaning: "The chain is shorter than its signed anchor, or the anchored head is not in it, \
                   or the anchor itself was altered. Rows were cut or the chain was rebuilt.",
     },
     AlertRule {
-        name: "TackSentinelVerificationCannotComplete",
-        expr: "sum(increase(tack_sentinel_verifications_total{outcome=\"retry\"}[1h])) \
-               + sum(increase(tack_sentinel_input_rejected_total[1h])) > 3",
+        name: "StackSentinelVerificationCannotComplete",
+        expr: "sum(increase(stack_sentinel_verifications_total{outcome=\"retry\"}[1h])) \
+               + sum(increase(stack_sentinel_input_rejected_total[1h])) > 3",
         for_duration: Some("15m"),
         severity: "warning",
         meaning: "Verifications keep ending in RETRY: the anchor is missing, stale, empty or sealed \
@@ -130,16 +130,16 @@ pub const ALERT_RULES: [AlertRule; 5] = [
                   Audits are not happening even though nothing tripped.",
     },
     AlertRule {
-        name: "TackSentinelNoCleanVerification",
-        expr: "absent_over_time(tack_sentinel_verifications_total{verdict=\"verified\"}[26h])",
+        name: "StackSentinelNoCleanVerification",
+        expr: "absent_over_time(stack_sentinel_verifications_total{verdict=\"verified\"}[26h])",
         for_duration: None,
         severity: "warning",
         meaning: "No export verified cleanly in 26 hours. For a daily audit job this means the job \
                   stopped or every run failed.",
     },
     AlertRule {
-        name: "TackSentinelSlowVerification",
-        expr: "histogram_quantile(0.99, sum by (le) (rate(tack_sentinel_verify_duration_seconds_bucket[1h]))) > 60",
+        name: "StackSentinelSlowVerification",
+        expr: "histogram_quantile(0.99, sum by (le) (rate(stack_sentinel_verify_duration_seconds_bucket[1h]))) > 60",
         for_duration: Some("30m"),
         severity: "info",
         meaning: "Verification p99 above one minute. The ledger has outgrown the export cap planning, \

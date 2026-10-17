@@ -1,4 +1,4 @@
-# ≡TACK Rollout Manifest v1.0.0
+# ≡STACK Rollout Manifest v1.0.0
 # Component 20: Deployment Strategy for 17 Host Body Repositories
 
 ## Phase 1: Dependency Injection (Repos 1-5) [Core Infrastructure]
@@ -6,8 +6,8 @@
 **Target Repos**: host-body-core, minotaur-dispatcher, telemetry-aggregator, governor-daemon, seccomp-supervisor
 
 **Action**: 
-- Inject tack_containment CMake target via `cpp/CMakeLists.txt`
-- Update `#include` directives to reference `tack_kernel.hpp`, `tack_kinetic_governor.hpp`, `posix_deadline_timer_hardened.hpp`
+- Inject stack_containment CMake target via `cpp/CMakeLists.txt`
+- Update `#include` directives to reference `stack_kernel.hpp`, `stack_kinetic_governor.hpp`, `posix_deadline_timer_hardened.hpp`
 - Build with C++23, `-march=native`, `-fno-exceptions`
 
 ## Phase 2: Signal & Preemption Wiring (Repos 6-12) [Worker Execution]
@@ -24,8 +24,8 @@
 **Target Repos**: edge-gateway, audit-logger, capability-issuer, zero-trust-proxy, compliance-monitor
 
 **Action**:
-- Connect `SeccompAuditRing` to edge telemetry pipeline (via `tack_audit.hpp`)
-- Issue `SIMDCapabilityToken` structs at gateway layer (via `tack_host_binding.hpp`)
+- Connect `SeccompAuditRing` to edge telemetry pipeline (via `stack_audit.hpp`)
+- Issue `SIMDCapabilityToken` structs at gateway layer (via `stack_host_binding.hpp`)
 - Install `SeccompFilterEngine::InstallFilter()` after signal handler registration but before untrusted worker handoff
 
 ## Integration Checklist

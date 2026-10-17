@@ -2,7 +2,7 @@
 //! 64 KiB input. Reports ratios; asserts only deterministic facts, because a
 //! wall-clock bound would flake on a shared machine.
 //!
-//! Run with `cargo test -p tack-inlet --release --test timing -- --nocapture`
+//! Run with `cargo test -p stack-inlet --release --test timing -- --nocapture`
 //! to see the numbers from an optimised build.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

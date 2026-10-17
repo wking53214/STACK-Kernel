@@ -166,7 +166,7 @@ fn labels_are_closed_enums_and_names_follow_convention() {
         .chain(std::iter::once("none"))
         .collect();
     for (kind, name, labels, _) in &rows {
-        assert!(name.starts_with("tack_inlet_"), "{name}");
+        assert!(name.starts_with("stack_inlet_"), "{name}");
         if *kind == MetricKind::Counter {
             assert!(name.ends_with("_total"), "{name}");
         }

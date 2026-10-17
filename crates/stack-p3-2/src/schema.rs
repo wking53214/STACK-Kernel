@@ -1,4 +1,4 @@
-// ≡TACK P3.2 Schema: Relational model for execution contexts and trap events
+// ≡STACK P3.2 Schema: Relational model for execution contexts and trap events
 
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};

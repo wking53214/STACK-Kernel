@@ -355,7 +355,7 @@ pub enum ConfigError {
 }
 
 impl ConfigError {
-    /// The label value for this error, for `tack_greenwave_config_rejected_total`.
+    /// The label value for this error, for `stack_greenwave_config_rejected_total`.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {

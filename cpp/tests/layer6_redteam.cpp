@@ -343,7 +343,7 @@ void test_layer6_bytes_tracking() {
 
 int main() {
     std::cout << "\n";
-    std::cout << "≡TACK KERNEL LAYER 6 RED-TEAM VALIDATION\n";
+    std::cout << "≡STACK KERNEL LAYER 6 RED-TEAM VALIDATION\n";
     std::cout << "========================================\n\n";
 
     std::cout << "LAYER 6: Memory Isolation Arena\n";

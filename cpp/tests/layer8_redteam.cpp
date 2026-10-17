@@ -210,7 +210,7 @@ void test_layer8_multiple_transactions_isolated() {
 
 int main() {
     std::cout << "\n";
-    std::cout << "≡TACK KERNEL LAYER 8 RED-TEAM VALIDATION\n";
+    std::cout << "≡STACK KERNEL LAYER 8 RED-TEAM VALIDATION\n";
     std::cout << "========================================\n\n";
 
     std::cout << "LAYER 8: Concurrent Capability Mutation Re-validation\n";

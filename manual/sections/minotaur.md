@@ -8,7 +8,7 @@ The Minotaur String caps every walk at 64 levels of nesting and 100,000 steps by
 
 In the myth, Ariadne gives Theseus a ball of string before he enters the Minotaur's labyrinth. He ties one end at the entrance and lets it out as he walks. At any moment the string tells him how deep he is, whether he is crossing his own path, and how to get back out.
 
-The crate `tack-minotaur` gives a program the same string, called a `Thread`. Its tied end is the anchor: depth 0, no steps taken. A walk is one run of work from the anchor, such as an agent's chain of tool calls or a recursive planner.
+The crate `stack-minotaur` gives a program the same string, called a `Thread`. Its tied end is the anchor: depth 0, no steps taken. A walk is one run of work from the anchor, such as an agent's chain of tool calls or a recursive planner.
 
 Going one level deeper, such as a recursive call or a sub-agent, is a descend. Moving to a new state, such as a tool call with its arguments, is a record. Each record carries a fingerprint, a 32-byte SHA-256 digest that stands for that state.
 
@@ -21,7 +21,7 @@ The goal is to stop four failure patterns before they consume the machine, while
 | State-space explosion | A search keeps finding new states forever | `max_steps` and `max_untracked_transitions` |
 | Replay | The orchestrator rewinds and resubmits just before each cap | The lifetime budget |
 
-Facts first: the Minotaur String existed in no TACK repository before this crate. Nothing in sentinel_os, CNS, observe-perceive, ghost_tools or Resume_OS calls it yet, and no Python version exists. The default caps are engineering guesses, not values measured from real agent traces.
+Facts first: the Minotaur String existed in no STACK repository before this crate. Nothing in sentinel_os, CNS, observe-perceive, ghost_tools or Resume_OS calls it yet, and no Python version exists. The default caps are engineering guesses, not values measured from real agent traces.
 
 ### Mechanism
 
@@ -103,7 +103,7 @@ impl Drop for DepthGuard<'_> {
 `rewind()` and `operator_reset()` take `&mut Thread`, a mutable reference, which a guard never hands out. So code holding only a guard cannot call them. A doctest (an example in the docs that the test suite compiles) marked `compile_fail,E0596` in src/lib.rs must fail with exactly that compiler error:
 
 ```rust
-//! use tack_minotaur::{MinotaurConfig, Thread};
+//! use stack_minotaur::{MinotaurConfig, Thread};
 //! let mut thread = Thread::new(MinotaurConfig::default()).unwrap();
 //! let mut guard = thread.descend().unwrap();
 //! guard.rewind(); // error: cannot borrow data in dereference of `DepthGuard` as mutable
@@ -150,7 +150,7 @@ This excerpt of `Thread::record` (src/thread.rs) shows three cases: a known stat
         }
 ```
 
-**When the map is full, the Thread degrades instead of growing.** Two fixed-size detectors take over, and memory stays constant at the cost of some precision. The `tack_minotaur_degraded_total` counter fires once for that walk.
+**When the map is full, the Thread degrades instead of growing.** Two fixed-size detectors take over, and memory stays constant at the cost of some precision. The `stack_minotaur_degraded_total` counter fires once for that walk.
 
 - Brent's algorithm finds a cycle by comparing each new step against one saved step, called the tortoise. This streaming version (src/brent.rs) finds any strictly repeating cycle up to 256 steps long.
 - The recent-state table (src/recent.rs) holds up to 256 states the full map could not hold, the smaller of `max_cycle_period` and `max_distinct_states`. It keeps exact visit counts and applies the same loop rule as the map.
@@ -230,28 +230,28 @@ Every label value comes from a closed enum, never from caller data. A free-form 
 
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
-| `tack_minotaur_trips_total` | counter | `reason` (depth_exceeded, step_budget_exhausted, loop_detected, state_space_exhausted, halted, stale_guard, lifetime_budget_exhausted), `outcome` (retry, terminal_breach) | One per Trip, including refusals. |
-| `tack_minotaur_loops_detected_total` | counter | `detector` (exact, brent, recent) | Loops found, by the detector that found them. |
-| `tack_minotaur_rollbacks_total` | counter | none | Trips resolved by rewinding: every trip except `halted` and `stale_guard` refusals. |
-| `tack_minotaur_halts_total` | counter | none | Times a Thread entered the halted state. |
-| `tack_minotaur_operator_resets_total` | counter | none | Calls to `operator_reset`. |
-| `tack_minotaur_degraded_total` | counter | none | Walks whose exact map filled, counted once per walk. |
-| `tack_minotaur_walk_steps` | histogram | `end` (trip, rewind, operator_reset) | Transitions recorded when the walk ended. |
-| `tack_minotaur_walk_max_depth` | histogram | `end` | Deepest depth reached in the walk. |
-| `tack_minotaur_walk_distinct_states` | histogram | `end` | States held in the exact map when the walk ended. |
-| `tack_minotaur_walk_duration_seconds` | histogram | `end` | Wall time from the anchor to the end of the walk. |
+| `stack_minotaur_trips_total` | counter | `reason` (depth_exceeded, step_budget_exhausted, loop_detected, state_space_exhausted, halted, stale_guard, lifetime_budget_exhausted), `outcome` (retry, terminal_breach) | One per Trip, including refusals. |
+| `stack_minotaur_loops_detected_total` | counter | `detector` (exact, brent, recent) | Loops found, by the detector that found them. |
+| `stack_minotaur_rollbacks_total` | counter | none | Trips resolved by rewinding: every trip except `halted` and `stale_guard` refusals. |
+| `stack_minotaur_halts_total` | counter | none | Times a Thread entered the halted state. |
+| `stack_minotaur_operator_resets_total` | counter | none | Calls to `operator_reset`. |
+| `stack_minotaur_degraded_total` | counter | none | Walks whose exact map filled, counted once per walk. |
+| `stack_minotaur_walk_steps` | histogram | `end` (trip, rewind, operator_reset) | Transitions recorded when the walk ended. |
+| `stack_minotaur_walk_max_depth` | histogram | `end` | Deepest depth reached in the walk. |
+| `stack_minotaur_walk_distinct_states` | histogram | `end` | States held in the exact map when the walk ended. |
+| `stack_minotaur_walk_duration_seconds` | histogram | `end` | Wall time from the anchor to the end of the walk. |
 
 The crate opens five spans.
 
 | Span | Level | Covers |
 |---|---|---|
-| `tack.minotaur.descend` | trace | Every descend call |
-| `tack.minotaur.record` | trace | Every record call |
-| `tack.minotaur.trip` | info | Trip handling: rewind, metrics and the log event |
-| `tack.minotaur.rewind` | debug | An orchestrator rewind |
-| `tack.minotaur.operator_reset` | info | An operator reset |
+| `stack.minotaur.descend` | trace | Every descend call |
+| `stack.minotaur.record` | trace | Every record call |
+| `stack.minotaur.trip` | info | Trip handling: rewind, metrics and the log event |
+| `stack.minotaur.rewind` | debug | An orchestrator rewind |
+| `stack.minotaur.operator_reset` | info | An operator reset |
 
-Log events use the target `tack.minotaur`. A trip logs at warn, or at error when it halts the Thread, with reason, outcome, resolution, period, depth, steps, `path_len` and `path_sha256`. Refusals log "refused; nothing changed" at debug, and degrading and operator resets log at info.
+Log events use the target `stack.minotaur`. A trip logs at warn, or at error when it halts the Thread, with reason, outcome, resolution, period, depth, steps, `path_len` and `path_sha256`. Refusals log "refused; nothing changed" at debug, and degrading and operator resets log at info.
 
 No event carries a fingerprint or a state. `path_sha256` is the full 64-hex SHA-256 of the padded breadcrumb path, so two log lines can be matched without revealing the path.
 
@@ -259,56 +259,56 @@ The alert rules below are proposed and are not shipped in the crate. They were p
 
 ```yaml
 groups:
-  - name: tack-minotaur
+  - name: stack-minotaur
     rules:
-      - alert: TackMinotaurHalted
-        expr: increase(tack_minotaur_halts_total[5m]) > 0
+      - alert: StackMinotaurHalted
+        expr: increase(stack_minotaur_halts_total[5m]) > 0
         labels:
           severity: critical
         annotations:
           summary: "A Thread halted after max_trips_before_halt trips or its lifetime budget, and refuses work until operator_reset."
-      - alert: TackMinotaurWorkAgainstHaltedThread
-        expr: sum(rate(tack_minotaur_trips_total{reason="halted"}[5m])) > 0
+      - alert: StackMinotaurWorkAgainstHaltedThread
+        expr: sum(rate(stack_minotaur_trips_total{reason="halted"}[5m])) > 0
         for: 5m
         labels:
           severity: critical
         annotations:
           summary: "Callers keep sending work to a halted Thread: the orchestrator ignores TERMINAL_BREACH, or no operator has acted."
-      - alert: TackMinotaurStaleGuardSpin
-        expr: sum(rate(tack_minotaur_trips_total{reason="stale_guard"}[5m])) > 1
+      - alert: StackMinotaurStaleGuardSpin
+        expr: sum(rate(stack_minotaur_trips_total{reason="stale_guard"}[5m])) > 1
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "A caller keeps working through stale guards instead of unwinding to the root. These refusals never escalate to a halt."
-      - alert: TackMinotaurLoopStorm
-        expr: sum(rate(tack_minotaur_loops_detected_total[5m])) > 1
+      - alert: StackMinotaurLoopStorm
+        expr: sum(rate(stack_minotaur_loops_detected_total[5m])) > 1
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "Walks are looping at a sustained rate, for example an agent stuck in tool-call loops."
-      - alert: TackMinotaurRunawayRecursion
-        expr: sum(rate(tack_minotaur_trips_total{reason="depth_exceeded"}[5m])) > 0.1
+      - alert: StackMinotaurRunawayRecursion
+        expr: sum(rate(stack_minotaur_trips_total{reason="depth_exceeded"}[5m])) > 0.1
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "Sustained depth trips: recursion or sub-agent nesting is running away."
-      - alert: TackMinotaurStateSpaceExhausted
-        expr: increase(tack_minotaur_trips_total{reason="state_space_exhausted"}[15m]) > 0
+      - alert: StackMinotaurStateSpaceExhausted
+        expr: increase(stack_minotaur_trips_total{reason="state_space_exhausted"}[15m]) > 0
         labels:
           severity: warning
         annotations:
           summary: "A walk kept reaching new states after the exact map filled: a state-space explosion, or a loop with long gaps."
-      - alert: TackMinotaurLifetimeBudgetHalt
-        expr: increase(tack_minotaur_trips_total{reason="lifetime_budget_exhausted"}[15m]) > 0
+      - alert: StackMinotaurLifetimeBudgetHalt
+        expr: increase(stack_minotaur_trips_total{reason="lifetime_budget_exhausted"}[15m]) > 0
         labels:
           severity: warning
         annotations:
           summary: "A Thread used its lifetime budget: walks are being replayed, or a long-lived Thread lacks a periodic operator reset."
-      - alert: TackMinotaurDegradedOften
-        expr: sum(rate(tack_minotaur_degraded_total[15m])) / clamp_min(sum(rate(tack_minotaur_walk_steps_count[15m])), 1e-9) > 0.5
+      - alert: StackMinotaurDegradedOften
+        expr: sum(rate(stack_minotaur_degraded_total[15m])) / clamp_min(sum(rate(stack_minotaur_walk_steps_count[15m])), 1e-9) > 0.5
         for: 30m
         labels:
           severity: info
@@ -340,11 +340,11 @@ An independent red-team wrote 11 attacks and 2 control tests, each asserting the
 
 Four red-team tests were edited after the fixes, mainly because their attack lines no longer compiled. The compile errors are pinned by doctests instead, and each edit is listed in the fix record.
 
-Final run of `cargo test -p tack-minotaur --all-targets` (debug build): 60 tests in six targets, all passing. `cargo test -p tack-minotaur --doc` passed 6 of 6, including 4 compile_fail doctests, and clippy with `-D warnings` was clean.
+Final run of `cargo test -p stack-minotaur --all-targets` (debug build): 60 tests in six targets, all passing. `cargo test -p stack-minotaur --doc` passed 6 of 6, including 4 compile_fail doctests, and clippy with `-D warnings` was clean.
 
 ```text
-$ cargo test -p tack-minotaur --all-targets   (summary lines only)
-     Running unittests src/lib.rs (target/debug/deps/tack_minotaur-8585c0e493b6235e)
+$ cargo test -p stack-minotaur --all-targets   (summary lines only)
+     Running unittests src/lib.rs (target/debug/deps/stack_minotaur-8585c0e493b6235e)
 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
      Running tests/async_use.rs (target/debug/deps/async_use-daeb62f68e0af4b3)
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -356,6 +356,6 @@ test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
      Running tests/thread.rs (target/debug/deps/thread-33a6808a0fd668f3)
 test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
-$ cargo test -p tack-minotaur --doc
+$ cargo test -p stack-minotaur --doc
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
 ```

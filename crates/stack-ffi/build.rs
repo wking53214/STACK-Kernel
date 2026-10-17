@@ -17,7 +17,7 @@ fn main() {
         .flag("-Wextra")
         .include(cpp_include)
         .file("src/ffi_wrapper.cpp")
-        .compile("tack_ffi");
+        .compile("stack_ffi");
     
     println!("cargo:rustc-link-lib=atomic");
 }
