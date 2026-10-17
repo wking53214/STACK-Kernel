@@ -53,7 +53,7 @@
 //!   racing controllers do not silently lose updates and a replayed old
 //!   shift is not numbered as the newest gear.
 //!
-//! In CNS terms (`/home/user/CNS/cns/gate.py`) `engage()` and `shift()` are
+//! In CNS terms (`cns/gate.py` in the CNS repository) `engage()` and `shift()` are
 //! ALPHA-position gates: preconditions checked before any work runs.
 //!
 //! ### What this guarantees, and what it does not

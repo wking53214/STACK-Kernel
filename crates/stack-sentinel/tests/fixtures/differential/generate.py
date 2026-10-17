@@ -3,7 +3,7 @@
 
 Run with the sentinel_os virtualenv, pointing at a sentinel_os checkout:
 
-    SENTINEL_OS=/home/user/sentinel_os PYTHONDONTWRITEBYTECODE=1 \\
+    SENTINEL_OS=/path/to/sentinel_os PYTHONDONTWRITEBYTECODE=1 \\
         /opt/venvs/sos/bin/python tests/fixtures/differential/generate.py
 
 It is read-only with respect to sentinel_os: it imports twin_custody and
@@ -34,7 +34,9 @@ import subprocess
 import sys
 import tempfile
 
-SENTINEL_OS = os.environ.get("SENTINEL_OS", "/home/user/sentinel_os")
+SENTINEL_OS = os.environ.get("SENTINEL_OS")
+if not SENTINEL_OS:
+    sys.exit("set SENTINEL_OS to a sentinel_os checkout")
 KERNEL = os.path.join(SENTINEL_OS, "sentinel_os")
 TOOL = os.path.join(SENTINEL_OS, "tools", "verify_receipts.py")
 sys.dont_write_bytecode = True

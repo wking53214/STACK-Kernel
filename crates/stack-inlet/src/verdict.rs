@@ -1,7 +1,7 @@
 //! The typed verdict the inlet returns, in the CNS gate vocabulary.
 //!
 //! The enums here mirror `cns.gate` in the CNS repository
-//! (`/home/user/CNS/cns/gate.py`): [`GatePosition`] is `ALPHA` or `OMEGA`,
+//! (`cns/gate.py` in the CNS repository): [`GatePosition`] is `ALPHA` or `OMEGA`,
 //! and [`GateOutcome`] is `PASS`, `RETRY` or `TERMINAL_BREACH`, with the same
 //! string values. They are re-declared here, not imported, because CNS is a
 //! Python package; the string values are what must agree across languages.

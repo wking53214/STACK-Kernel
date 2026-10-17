@@ -41,7 +41,7 @@ A controller calls `shift(new_config, timeout)`, which runs five steps:
 
 If step 4 does not finish before the timeout, the shift rolls back. The clutch comes up, the old gear stays, and the unused configuration comes back inside `ShiftRefused` for resubmission. A gear is never half-shifted.
 
-The caller never picks the epoch, so epochs cannot be reused or skipped. A shift at epoch `u64::MAX` is refused by `checked_add` instead of wrapping to 0. In CNS terms (`/home/user/CNS/cns/gate.py`), `engage()` and `shift()` are ALPHA-position gates: preconditions checked before any work starts.
+The caller never picks the epoch, so epochs cannot be reused or skipped. A shift at epoch `u64::MAX` is refused by `checked_add` instead of wrapping to 0. In CNS terms (`cns/gate.py` in the CNS repository), `engage()` and `shift()` are ALPHA-position gates: preconditions checked before any work starts.
 
 **Caps.** Every queue and wait has a ceiling in `TransmissionConfig` (src/config.rs). A zero cap, a zero wait or a wait above 24 hours fails construction, and no bad value is replaced by a default. The last two rows are fixed constants in the same file.
 

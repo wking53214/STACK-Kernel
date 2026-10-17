@@ -154,7 +154,7 @@
 //! ## Open questions
 //!
 //! 1. **Interop with CNS `subject_digest`.** `cns.gate.subject_digest` in
-//!    `/home/user/CNS/cns/gate.py` does not hash JSON. It hashes a
+//!    `cns/gate.py` in the CNS repository does not hash JSON. It hashes a
 //!    type-tagged, length-prefixed rendering, and it accepts floats. A
 //!    Python producer that fills `subject_digest` with the CNS function
 //!    will fail prong 2 on every envelope. Either the envelope specifies
