@@ -1,0 +1,258 @@
+{
+  "schema": "cns-digest-vectors/1",
+  "note": "digest is cns.gate.subject_digest(content); regenerate with python -m cns_composition.digest_vectors --write",
+  "vectors": [
+    {
+      "name": "empty",
+      "content": {},
+      "digest": "c348e1722fbda6fbdd0ce8ec7831067eeff989c54b833673b8ebf6890883f012"
+    },
+    {
+      "name": "one_int",
+      "content": {
+        "a": 1
+      },
+      "digest": "32a98aef7315bc917ac0b650017f846e82bab90385cfe71b6fb53313ddf0006a"
+    },
+    {
+      "name": "null_bool_int",
+      "content": {
+        "n": null,
+        "t": true,
+        "f": false,
+        "z": 0
+      },
+      "digest": "f1f5dffeacf4d615ddb4871add870412420b31353cdcd47bcc6df60974e86bde"
+    },
+    {
+      "name": "bool_is_not_one",
+      "content": {
+        "v": true,
+        "w": 1
+      },
+      "digest": "525e4bb8f6ca1c3131980e369c25797ee4ba7f596b47e68471cad15e3d5d2aee"
+    },
+    {
+      "name": "separator_collision_left",
+      "content": {
+        "ab": "c"
+      },
+      "digest": "9c91082e6a9ec1dc9b26d6e16a13cf8e3786769e441760af4ddb93be4818670b"
+    },
+    {
+      "name": "separator_collision_right",
+      "content": {
+        "a": "bc"
+      },
+      "digest": "e4be55f20a1f111137a912fb3434b422b392060a6fec2111830f179da02765a1"
+    },
+    {
+      "name": "keys_sort_by_code_point",
+      "content": {
+        "b": 1,
+        "B": 2,
+        "a": 3,
+        "A": 4,
+        "_": 5,
+        "é": 6,
+        "z": 7,
+        "É": 8
+      },
+      "digest": "bbf67385935d6d25443b1b3752c5ac50ac16d0fd121d60f708f5b1a9f8816bbf"
+    },
+    {
+      "name": "key_order_ba",
+      "content": {
+        "b": 1,
+        "a": 2
+      },
+      "digest": "acd0be1d57187dae28a701535f4d6ac035f647d79281337902d0c55d60d5738a"
+    },
+    {
+      "name": "key_order_ab",
+      "content": {
+        "a": 2,
+        "b": 1
+      },
+      "digest": "acd0be1d57187dae28a701535f4d6ac035f647d79281337902d0c55d60d5738a"
+    },
+    {
+      "name": "length_counts_code_points_not_bytes",
+      "content": {
+        "s": "café ✓ 🙂"
+      },
+      "digest": "b1436e6d2c4c8b8ac453885da0ada4fe58a9ede9640f9f79fab7f6bae699719b"
+    },
+    {
+      "name": "combining_is_not_normalised",
+      "content": {
+        "composed": "é",
+        "combining": "é"
+      },
+      "digest": "9e01fd509d6ef3e164d9da946f309866c9c2f52d2307c8dc81200a8a035bed5e"
+    },
+    {
+      "name": "empty_string_and_list",
+      "content": {
+        "s": "",
+        "l": [],
+        "d": {}
+      },
+      "digest": "d857a7913538d8d7b81e16c2644d717698c99970a007ac69e047cb92a1ab833e"
+    },
+    {
+      "name": "string_that_looks_like_the_encoding",
+      "content": {
+        "s": "s:1:a",
+        "t": "d:0:",
+        "u": "i:5:"
+      },
+      "digest": "61ca0e132aae235dba24b9dc8f7c0e915a8a6209de363235484b39fac646b7f9"
+    },
+    {
+      "name": "nested",
+      "content": {
+        "x": [
+          1,
+          2,
+          {
+            "y": [
+              true,
+              null,
+              "z"
+            ]
+          }
+        ],
+        "w": {
+          "v": {
+            "u": []
+          }
+        }
+      },
+      "digest": "61567fcfc252385f02c87806eb3f58eabb56312e798a099794a7acc012c01937"
+    },
+    {
+      "name": "floats_simple",
+      "content": {
+        "a": 1.5,
+        "b": 0.1,
+        "c": 100.0,
+        "d": -2.25
+      },
+      "digest": "8c8f904c2f8e018e3537b98c6ba2cfa512b051b60c9411e4b9faa3e1bcd5feb0"
+    },
+    {
+      "name": "float_one_is_not_int_one",
+      "content": {
+        "i": 1,
+        "f": 1.0
+      },
+      "digest": "cd25f1bc921dc98bd2028b2205f7a13a0a3e68110d5027b0890bc4250779febc"
+    },
+    {
+      "name": "negative_zero",
+      "content": {
+        "z": -0.0
+      },
+      "digest": "893c683e0df0e4b902f166af65e70080691630f7ebd75b1fcb9c4998548b9b87"
+    },
+    {
+      "name": "positive_zero",
+      "content": {
+        "z": 0.0
+      },
+      "digest": "893c683e0df0e4b902f166af65e70080691630f7ebd75b1fcb9c4998548b9b87"
+    },
+    {
+      "name": "float_exponents",
+      "content": {
+        "a": 1e-07,
+        "b": 1e+22,
+        "c": 1.5e+300,
+        "d": 5e-324,
+        "e": 1.7976931348623157e+308
+      },
+      "digest": "9d83d02a537fc0355339432fca0136c4a05329096d31e2012817831598e46e1d"
+    },
+    {
+      "name": "float_shortest_round_trip",
+      "content": {
+        "a": 0.30000000000000004,
+        "b": 2.5e-05,
+        "c": 123456789.12345679
+      },
+      "digest": "808450da8cee8799e3e69b35de4525e8f61315d142d92dbd8133b755c49fc8d2"
+    },
+    {
+      "name": "ints_at_the_edges",
+      "content": {
+        "a": 9223372036854775807,
+        "b": -9223372036854775808,
+        "c": 0,
+        "d": -1
+      },
+      "digest": "49894986fa1b292624bae24b94efd64377ddd00579e73b89e4776bb9d0d46e95"
+    },
+    {
+      "name": "ints_past_64_bits",
+      "content": {
+        "a": 9223372036854775808,
+        "b": 18446744073709551616,
+        "c": -123456789012345678901234567890
+      },
+      "digest": "6c630763356972faf026213d9a2f4bdc4b2c8400163a252699d2f7bbde8964c0"
+    },
+    {
+      "name": "long_list",
+      "content": {
+        "l": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24
+        ]
+      },
+      "digest": "d0f6e218e56137266d133f461395b9c3d54a23b618abe1ce1885e72b18974d80"
+    },
+    {
+      "name": "deep",
+      "content": {
+        "a": {
+          "b": {
+            "c": {
+              "d": {
+                "e": {
+                  "f": {
+                    "g": "bottom"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "digest": "37adf00cf0b4bc2eb90324f8c8d63900af03002bfe90de82ca3d52b3c61a63ab"
+    }
+  ]
+}

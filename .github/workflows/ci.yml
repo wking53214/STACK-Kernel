@@ -16,3 +16,14 @@ jobs:
         run: cargo test -p stack-p3-2 --locked
       - name: Build the workload example
         run: cargo build -p stack-p3-2 --example governed_workload --locked
+
+  cns-vectors:
+    # stack-sentinel reproduces cns.gate.subject_digest in Rust. This holds it to CNS's own answer key
+    # (tests/fixtures/cns-digest-vectors.json, a copy of CNS's contracts/digest-vectors.json).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test the CNS digest vectors
+        run: cargo test -p stack-sentinel --test cns_vectors --locked
