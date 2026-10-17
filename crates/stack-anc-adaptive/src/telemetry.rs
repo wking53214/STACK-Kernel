@@ -88,6 +88,14 @@ pub mod names {
     /// Histogram, label `outcome`. Observed response time from admission to
     /// release, seconds, post-padding only.
     pub const RESPONSE_SECONDS: &str = "stack_anc_response_seconds";
+    /// Gauge, labels `strategy`, `controller`. Concurrency slots open right
+    /// now: `max_concurrent` up to `scaling.max_slots`, moved only by public
+    /// arrival counts. With several pads of one controller kind in a process
+    /// it follows whichever finished a request last.
+    pub const SLOTS_OPEN: &str = "stack_anc_slots_open";
+    /// Counter, labels `strategy`, `controller`. Requests that waited in the
+    /// spillway (whether they were then served or shed). Public load only.
+    pub const SPILLED_TOTAL: &str = "stack_anc_spilled_total";
 }
 
 /// Which overrun counter to bump.
@@ -121,11 +129,19 @@ pub(crate) struct Event {
     pub observed: Duration,
     pub changes: Changes,
     pub status: Option<ControllerStatus>,
+    /// This request waited in the spillway first.
+    pub spilled: bool,
 }
 
 impl Event {
-    pub(crate) fn early(kind: ControllerKind, trip: Trip, observed: Duration) -> Self {
+    pub(crate) fn early(
+        kind: ControllerKind,
+        trip: Trip,
+        observed: Duration,
+        spilled: bool,
+    ) -> Self {
         Self {
+            spilled,
             kind,
             outcome: trip.gate_outcome(),
             trip: Some(trip),
@@ -139,8 +155,18 @@ impl Event {
     }
 }
 
+/// Set the open-slot gauge.
+pub(crate) fn emit_slots_open(kind: ControllerKind, open: usize) {
+    metrics::gauge!(names::SLOTS_OPEN, "strategy" => STRATEGY, "controller" => kind.label())
+        .set(open as f64);
+}
+
 pub(crate) fn emit(ev: &Event) {
     let c = ev.kind.label();
+    if ev.spilled {
+        metrics::counter!(names::SPILLED_TOTAL, "strategy" => STRATEGY, "controller" => c)
+            .increment(1);
+    }
     metrics::counter!(
         names::REQUESTS_TOTAL,
         "strategy" => STRATEGY,

@@ -298,29 +298,35 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
     }
 
     /// Admit, waiting in the spillway first if need be. Returns the
-    /// admission and the instant the padded window starts from.
+    /// admission, the instant the padded window starts from, and whether the
+    /// request waited in the spillway. On refusal, also says whether it had.
     fn admit_blocking(
         &self,
         first: Instant,
         input_len: Option<usize>,
-    ) -> Result<(Admitted<'_>, Instant), Trip> {
-        if let Some(a) = self.admit(first, input_len, false)? {
-            return Ok((a, first));
+    ) -> Result<(Admitted<'_>, Instant, bool), (Trip, bool)> {
+        if let Some(a) = self
+            .admit(first, input_len, false)
+            .map_err(|t| (t, false))?
+        {
+            return Ok((a, first, false));
         }
         std::thread::sleep(self.slots.spill_wait());
         let start = self.clock.now();
-        self.admit(start, input_len, true)?
-            .map(|a| (a, start))
-            .ok_or(Trip::SlotsFull)
+        match self.admit(start, input_len, true) {
+            Ok(Some(a)) => Ok((a, start, true)),
+            Ok(None) => Err((Trip::SlotsFull, true)),
+            Err(t) => Err((t, true)),
+        }
     }
 
     fn run<T>(&self, input_len: Option<usize>, op: impl FnOnce() -> T) -> (PadResult<T>, Event) {
         let first = self.clock.now();
-        let (adm, start) = match self.admit_blocking(first, input_len) {
+        let (adm, start, spilled) = match self.admit_blocking(first, input_len) {
             Ok(a) => a,
-            Err(trip) => {
+            Err((trip, spilled)) => {
                 let observed = self.clock.now().saturating_duration_since(first);
-                return (Err(trip), Event::early(self.kind, trip, observed));
+                return (Err(trip), Event::early(self.kind, trip, observed, spilled));
             }
         };
         let (snap, admit_changes) = self.lock().admit(start);
@@ -338,9 +344,10 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
             observed: Duration::ZERO,
             changes: admit_changes,
             status: None,
+            spilled,
         };
         let Some(work) = completion.checked_duration_since(start) else {
-            return self.clock_failure(start, ev);
+            return self.clock_failure(first, ev);
         };
         // In Hybrid mode the request needs `spin_tail` of spin after it
         // finishes, so it is planned and recorded as `work + spin_tail`.
@@ -367,10 +374,13 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
             .ok_or(ClockFault)
             .and_then(|target| wait::wait(&self.clock, target, adm.mode, self.config.spin_tail));
         if waited.is_err() {
-            return self.clock_failure(start, ev);
+            return self.clock_failure(first, ev);
         }
-        let observed = self.clock.now().saturating_duration_since(start);
-        ev.observed = observed;
+        // `observed` is the padded window (what `ReleaseInfo` reports); the
+        // metric adds any spillway wait, which the client also sees.
+        let released = self.clock.now();
+        let observed = released.saturating_duration_since(start);
+        ev.observed = released.saturating_duration_since(first);
         let release = |disposition| ReleaseInfo {
             target: snap.target,
             release: plan.release(),
@@ -436,6 +446,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         input: Option<&[u8]>,
     ) {
         telemetry::emit(ev);
+        telemetry::emit_slots_open(ev.kind, self.slots.open());
         span.record("outcome", ev.outcome.as_str());
         span.record("trip", ev.trip.map_or("none", Trip::label));
         if let Ok(p) = result {

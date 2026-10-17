@@ -5,10 +5,12 @@ mod common;
 
 use common::{wait_for, BackwardsOnce};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+use stack_anc_ceiling::telemetry::{names, sha256_hex, STRATEGY, STRATEGY_FAST};
+use stack_anc_ceiling::{
+    CeilingConfig, CeilingPad, LanedPad, SlotScaling, SpinBudgetConfig, Trip, WaitMode,
+};
 use std::sync::mpsc;
 use std::time::Duration;
-use stack_anc_ceiling::telemetry::{names, sha256_hex, STRATEGY};
-use stack_anc_ceiling::{CeilingConfig, CeilingPad, SpinBudgetConfig, Trip, WaitMode};
 
 type Snap = Vec<(
     metrics_util::CompositeKey,
@@ -220,4 +222,131 @@ fn digest_is_full_length_hex() {
         d,
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
+}
+
+fn record(f: impl FnOnce()) -> Snap {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, f);
+    snapshotter.snapshot().into_vec()
+}
+
+fn gauge(snap: &Snap, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+    match find(snap, name, labels) {
+        Some(DebugValue::Gauge(g)) => Some(g.into_inner()),
+        _ => None,
+    }
+}
+
+fn ms(n: u64) -> Duration {
+    Duration::from_millis(n)
+}
+
+#[test]
+fn slots_open_gauge_follows_scaling() {
+    let snap = record(|| {
+        // Ceiling 2 ms, so a slot is held 8 ms (4 x ceiling hard ceiling).
+        let pad = CeilingPad::new(CeilingConfig {
+            mode: WaitMode::Sleep,
+            max_concurrent: 1,
+            scaling: SlotScaling {
+                max_slots: 3,
+                reaction_delay: ms(5),
+                ..SlotScaling::default()
+            },
+            ..CeilingConfig::new(ms(2))
+        })
+        .unwrap();
+        pad.pad(|| ()).unwrap();
+        // The only slot is held: shed, and that counts as pressure.
+        assert_eq!(pad.pad(|| ()), Err(Trip::SlotsFull));
+        std::thread::sleep(ms(12));
+        // The window rolled with pressure, so a second slot opened.
+        pad.pad(|| ()).unwrap();
+        assert_eq!(pad.slots_open(), 2);
+    });
+    let s = ("strategy", STRATEGY);
+    assert_eq!(gauge(&snap, names::SLOTS_OPEN, &[s]), Some(2.0));
+}
+
+#[test]
+fn spilled_arrivals_are_counted_and_their_wait_is_in_the_histogram() {
+    let snap = record(|| {
+        let pad = CeilingPad::new(CeilingConfig {
+            mode: WaitMode::Sleep,
+            max_concurrent: 1,
+            scaling: SlotScaling {
+                spillway_size: 1,
+                spillway_wait: ms(3),
+                ..SlotScaling::default()
+            },
+            ..CeilingConfig::new(ms(5))
+        })
+        .unwrap();
+        pad.pad(|| ()).unwrap();
+        // Finds the slot held, waits 3 ms, retries once, is shed.
+        assert_eq!(pad.pad(|| ()), Err(Trip::SlotsFull));
+    });
+    let s = ("strategy", STRATEGY);
+    assert_eq!(counter(&snap, names::SPILLED_TOTAL, &[s]), 1);
+    assert_eq!(
+        counter(&snap, names::SHED_TOTAL, &[s, ("reason", "slots_full")]),
+        1
+    );
+    match find(&snap, names::RESPONSE_SECONDS, &[s, ("outcome", "retry")]) {
+        Some(DebugValue::Histogram(h)) => {
+            assert!(h.iter().any(|v| v.into_inner() >= 0.003), "{h:?}");
+        }
+        other => panic!("retry histogram missing: {other:?}"),
+    }
+}
+
+#[test]
+fn the_fast_lane_has_its_own_series() {
+    let snap = record(|| {
+        let lanes = LanedPad::new(
+            CeilingConfig {
+                mode: WaitMode::Sleep,
+                ..CeilingConfig::new(ms(20))
+            },
+            CeilingConfig {
+                mode: WaitMode::Sleep,
+                hard_ceiling_buckets: 1,
+                retry_release_factor: 1,
+                ..CeilingConfig::new(ms(2))
+            },
+        )
+        .unwrap();
+        lanes.standard().pad(|| ()).unwrap();
+        lanes.fast().pad(|| ()).unwrap();
+        lanes.fast().pad(|| ()).unwrap();
+        std::thread::sleep(ms(10));
+        // A mislabeled operation: far past the fast ceiling.
+        assert_eq!(
+            lanes.fast().pad(|| std::thread::sleep(ms(8))),
+            Err(Trip::Overrun)
+        );
+        assert_eq!(lanes.fast_overruns(), 1);
+    });
+    let std_s = ("strategy", STRATEGY);
+    let fast_s = ("strategy", STRATEGY_FAST);
+    assert_eq!(
+        counter(&snap, names::REQUESTS_TOTAL, &[std_s, ("outcome", "pass")]),
+        1
+    );
+    assert_eq!(
+        counter(&snap, names::REQUESTS_TOTAL, &[fast_s, ("outcome", "pass")]),
+        2
+    );
+    assert_eq!(
+        counter(
+            &snap,
+            names::OVERRUN_TOTAL,
+            &[fast_s, ("disposition", "retry")]
+        ),
+        1
+    );
+    // The standard lane saw no overrun.
+    assert!(find(&snap, names::OVERRUN_TOTAL, &[std_s]).is_none());
+    assert!(gauge(&snap, names::SLOTS_OPEN, &[fast_s]).is_some());
 }
