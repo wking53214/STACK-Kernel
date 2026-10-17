@@ -37,6 +37,7 @@ fn epoch_pad_metrics_fire() {
                 },
                 max_concurrent: 1,
                 max_input_len: 8,
+                allow_naive_controller: false,
             },
             EpochConfig {
                 initial_level: 0,
@@ -219,7 +220,7 @@ fn leak_budget_exhaustion_metrics_fire() {
 fn naive_pad_metrics_fire() {
     let snap = record(|| {
         let pad = AdaptivePad::naive(
-            PadConfig::default(),
+            PadConfig { allow_naive_controller: true, ..PadConfig::default() },
             NaiveConfig {
                 statistic: WindowStatistic::Mean,
                 window: 4,

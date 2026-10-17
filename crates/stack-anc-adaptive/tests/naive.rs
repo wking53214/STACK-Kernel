@@ -86,7 +86,7 @@ fn leak_2_poisoning_through_a_real_pad() {
     // The same attack end to end, with sleeping operations (ms scale so
     // scheduler noise does not matter).
     let pad = AdaptivePad::naive(
-        PadConfig::default(),
+        PadConfig { allow_naive_controller: true, ..PadConfig::default() },
         NaiveConfig {
             statistic: WindowStatistic::Percentile { permille: 990 },
             window: 8,
@@ -175,7 +175,7 @@ fn cap_holds_under_slow_flood() {
     assert_eq!(c.target(), cap);
 
     // Through a pad with concurrent slow work: past the cap is a RETRY.
-    let pad = AdaptivePad::naive(PadConfig::default(), NaiveConfig::new(ms(3))).unwrap();
+    let pad = AdaptivePad::naive(PadConfig { allow_naive_controller: true, ..PadConfig::default() }, NaiveConfig::new(ms(3))).unwrap();
     std::thread::scope(|s| {
         for _ in 0..4 {
             s.spawn(|| {

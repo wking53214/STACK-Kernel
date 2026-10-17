@@ -81,7 +81,7 @@ fn calibrated_naive_leaks_epoch_does_not() {
     // Naive, mean of a mixed window plus 20 us: about 122 us, below class
     // B's 164 us, so class B is released late (leak 1).
     let naive = AdaptivePad::naive(
-        PadConfig::default(),
+        PadConfig { allow_naive_controller: true, ..PadConfig::default() },
         NaiveConfig {
             statistic: WindowStatistic::Mean,
             window: 64,

@@ -540,7 +540,7 @@ fn poisoning(
     // Naive p99 over a short window: the attacker refills it with fast
     // requests before every probe.
     let naive = AdaptivePad::naive(
-        PadConfig::default(),
+        PadConfig { allow_naive_controller: true, ..PadConfig::default() },
         NaiveConfig {
             window: POISON_WINDOW,
             ..naive_cfg(p, WindowStatistic::Percentile { permille: 990 })
@@ -603,7 +603,7 @@ fn poisoning(
     // Slow flood against the naive pad: the target rises to the cap and
     // no further.
     let slow_pad = AdaptivePad::naive(
-        PadConfig::default(),
+        PadConfig { allow_naive_controller: true, ..PadConfig::default() },
         naive_cfg(p, WindowStatistic::Percentile { permille: 990 }),
     )?;
     for _ in 0..64 {
@@ -684,7 +684,7 @@ fn trajectory(
                 (run, epoch_leak(&pad))
             } else {
                 let pad =
-                    AdaptivePad::naive(PadConfig::default(), naive_cfg(p, WindowStatistic::Mean))?;
+                    AdaptivePad::naive(PadConfig { allow_naive_controller: true, ..PadConfig::default() }, naive_cfg(p, WindowStatistic::Mean))?;
                 let run = collect(classes, toks, wl, p.load_threads, |c| {
                     obs(&pad.pad(|| wl.run(c)))
                 });
@@ -1057,7 +1057,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("naive_p99", WindowStatistic::Percentile { permille: 990 }),
     ] {
         let cfg = naive_cfg(&p, stat);
-        let pad: AdaptivePad<NaiveRollingTarget> = AdaptivePad::naive(PadConfig::default(), cfg)?;
+        let pad: AdaptivePad<NaiveRollingTarget> = AdaptivePad::naive(PadConfig { allow_naive_controller: true, ..PadConfig::default() }, cfg)?;
         let run = collect(
             schedule(p.n_total, seed, None),
             toks,

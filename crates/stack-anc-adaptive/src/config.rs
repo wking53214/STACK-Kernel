@@ -173,6 +173,12 @@ pub struct PadConfig {
     /// Largest input accepted by [`crate::AdaptivePad::pad_input`]. Default
     /// [`DEFAULT_MAX_INPUT_LEN`]. Bounds: 0 ..= [`MAX_INPUT_LEN_LIMIT`].
     pub max_input_len: usize,
+    /// Allow [`crate::AdaptivePad::naive`]. Default `false`. The naive
+    /// controller releases a slow request at completion, so its response
+    /// time is the raw, secret-dependent work time. It exists to measure that
+    /// leak, never for deployment, so building one is refused unless this is
+    /// set on purpose.
+    pub allow_naive_controller: bool,
 }
 
 impl Default for PadConfig {
@@ -183,6 +189,7 @@ impl Default for PadConfig {
             spin_budget: SpinBudgetConfig::default(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
             max_input_len: DEFAULT_MAX_INPUT_LEN,
+            allow_naive_controller: false,
         }
     }
 }
