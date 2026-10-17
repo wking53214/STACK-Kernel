@@ -199,7 +199,28 @@ The same idea already exists in sentinel_os. Its `api_key_auth.py` compares keys
 
 Debug logs carry the input length, plus the full SHA-256 hex for inputs within the 32-byte cap; raw input is never logged. Hashing 32 bytes costs the same for every value, so it adds no class-dependent time. A red-team test with debug logging and a live recorder on the path stayed at max |t| 1.81, in a debug build.
 
-A gate built with a leaky validator sets the gauge (a metric that holds a current value) `stack_anc_leaky_validator_active` to 1. The critical alert `StackAncPipelineLeakyValidatorActive` fires on it. The red team found two ways this alert misses or goes stale, listed in the last subsection.
+A gate built with a leaky validator sets the gauge (a metric that holds a current value) `stack_anc_leaky_validator_active` to 1. The critical alert `StackAncPipelineLeakyValidatorActive` fires on it. The red team found two ways this alert misses or goes stale, listed in the last subsection. The crate's four proposed rules follow. They have not been loaded into Prometheus.
+
+```yaml
+groups:
+  - name: stack-anc-pipeline
+    rules:
+      - alert: StackAncPipelineLeakyValidatorActive
+        expr: max(stack_anc_leaky_validator_active{strategy="pipeline"}) > 0
+        labels: {severity: critical}
+      - alert: StackAncPipelineShedding
+        expr: rate(stack_anc_shed_total{strategy="pipeline",reason="slots_full"}[1m]) > 0
+        for: 5m
+        labels: {severity: warning}
+      - alert: StackAncPipelineBadLengthInput
+        expr: rate(stack_anc_shed_total{strategy="pipeline",reason=~"input_too_large|malformed"}[5m]) > 0
+        for: 10m
+        labels: {severity: info}
+      - alert: StackAncPipelineGuessing
+        expr: sum(rate(stack_anc_token_mismatch_total{strategy="pipeline"}[5m])) / clamp_min(sum(rate(stack_anc_requests_total{strategy="pipeline"}[5m])), 1e-9) > 0.5
+        for: 10m
+        labels: {severity: warning}
+```
 
 Two rules keep the telemetry from leaking. Metrics are emitted inside the window the client times, so their cost may depend only on the outcome and trip reason. The test `class_a_and_class_b_take_the_same_telemetry_path` checks this for guesses wrong at bytes 0 and 31.
 

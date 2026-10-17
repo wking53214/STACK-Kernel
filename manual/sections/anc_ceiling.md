@@ -24,13 +24,13 @@ The idea of the fix is a train that leaves on the timetable, not when the last p
 4. Read the clock again. Compute the bucket k: the smallest whole number for which k times the ceiling reaches the completion time. On time is k = 1.
 5. Wait until `start + k * ceiling`, then return the reply. The pad never releases early.
 
-**Three ways to wait.** Figures come from the three release runs at a 300 microsecond (us) ceiling. "Late" is release time minus target, measured idle, and p50 is the median; p99 is the time 99 percent of replies beat.
+**Three ways to wait.** Figures come from the three release runs at a 300 microsecond (µs) ceiling. "Late" is release time minus target, measured idle, and p50 is the median; p99 is the time 99 percent of replies beat.
 
 | Wait mode | How it waits | CPU per request | Late at p50, idle | Weak point |
 |---|---|---|---|---|
-| Sleep | Asks the operating system to wake the thread at the target | 28 to 30 us | 97 to 126 us | The scheduler sets the wake-up time, and cache state left by the work can nudge it |
-| Spin | Busy-waits: loops reading the clock instead of giving up the CPU | 306 to 308 us | 0.11 to 0.13 us | Burns a core for the whole wait; paused by the scheduler when CPUs are oversubscribed |
-| Hybrid | Sleeps until the target minus a short tail, then spins the tail (150 us here) | 100 to 104 us | 0.12 to 0.15 us | Late whenever the sleep overshoots the tail |
+| Sleep | Asks the operating system to wake the thread at the target | 28 to 30 µs | 97 to 126 µs | The scheduler sets the wake-up time, and cache state left by the work can nudge it |
+| Spin | Busy-waits: loops reading the clock instead of giving up the CPU | 306 to 308 µs | 0.11 to 0.13 µs | Burns a core for the whole wait; paused by the scheduler when CPUs are oversubscribed |
+| Hybrid | Sleeps until the target minus a short tail, then spins the tail (150 µs here) | 100 to 104 µs | 0.12 to 0.15 µs | Late whenever the sleep overshoots the tail |
 
 **Overruns.** An overrun is work that ends after the ceiling. The hard ceiling is the ceiling times `hard_ceiling_buckets`, default 4.
 
@@ -76,14 +76,14 @@ Quarantine and rollback are not used, because the pad keeps no per-sender state 
 2. **The fix released the RETRY later than the analysis asked.** The ANC analysis wants an overrun RETRY to leave at the ceiling. A blocking worker cannot be stopped mid-task, so the code drops the value and releases at 64 ceilings by default.
 3. **The flood rules bound CPU, not service.** At 4 to 10 times the admission capacity, a legitimate client finished as few as 1 of 45 requests. Across all 9 flood runs, it succeeded on the first try once.
 
-The brief's claim that every response leaves at the same offset held at the median: Spin and Hybrid class medians sat within 4 ns. At p99.9, the time 99.9 percent of replies beat, replies took 0.93 to 2.03 ms against a 300 us ceiling. Scheduler stalls caused that tail, and they hit both classes alike.
+The brief's claim that every response leaves at the same offset held at the median: Spin and Hybrid class medians sat within 4 ns. At p99.9, the time 99.9 percent of replies beat, replies took 0.93 to 2.03 ms against a 300 µs ceiling. Scheduler stalls caused that tail, and they hit both classes alike.
 
 | Approach | Pros | Cons |
 |---|---|---|
-| Ceiling padding as a whole | Release time does not depend on how long the work took. There is no adaptive target, so no bits leak through target changes. It wraps code that cannot be made constant time. | Every reply pays the full ceiling: the median went from 40 to 65 ns of work to about 301 us. Work past the ceiling leaks. There is no default ceiling, so each operation needs its own measured one. |
-| Sleep | Uses almost no CPU: 28 to 30 us per request. Under flood it cost 0.011 to 0.042 cores inside the pad. | 97 to 126 us late at p50, so the median reply took 398 to 407 us. Class medians differed by 154 to 274 ns, which no test flagged. |
-| Spin | Most precise when idle: 0.11 to 0.13 us late at p50. | Burns the whole wait: 306 to 308 us of CPU per request. Without a budget a flood takes about one core per slot. Late by 1.1 ms at p99 under an unpinned flood. |
-| Hybrid (recommended) | Spin-grade precision at a third of the CPU: 0.12 to 0.15 us late at p50 for 100 to 104 us of CPU. The budget held flood CPU to 0.15 to 0.18 cores inside the pad. | Late when the sleep overshoots the tail. A flood can drain the budget and force Sleep: 2,397 of 5,457 replies fell back in the unpinned run. |
+| Ceiling padding as a whole | Release time does not depend on how long the work took. There is no adaptive target, so no bits leak through target changes. It wraps code that cannot be made constant time. | Every reply pays the full ceiling: the median went from 40 to 65 ns of work to about 301 µs. Work past the ceiling leaks. There is no default ceiling, so each operation needs its own measured one. |
+| Sleep | Uses almost no CPU: 28 to 30 µs per request. Under flood it cost 0.011 to 0.042 cores inside the pad. | 97 to 126 µs late at p50, so the median reply took 398 to 407 µs. Class medians differed by 154 to 274 ns, which no test flagged. |
+| Spin | Most precise when idle: 0.11 to 0.13 µs late at p50. | Burns the whole wait: 306 to 308 µs of CPU per request. Without a budget a flood takes about one core per slot. Late by 1.1 ms at p99 under an unpinned flood. |
+| Hybrid (recommended) | Spin-grade precision at a third of the CPU: 0.12 to 0.15 µs late at p50 for 100 to 104 µs of CPU. The budget held flood CPU to 0.15 to 0.18 cores inside the pad. | Late when the sleep overshoots the tail. A flood can drain the budget and force Sleep: 2,397 of 5,457 replies fell back in the unpinned run. |
 
 ### Recommended Rust pattern
 
@@ -134,9 +134,9 @@ Three lines carry the red-team fixes. `drop(value)` runs before the wait, so a s
 
 | Field | Default | Accepted range | Recommendation |
 |---|---|---|---|
-| `ceiling` | None; required | 1 us to 10 s | Above the worst-case work time, measured on the target host |
+| `ceiling` | None; required | 1 µs to 10 s | Above the worst-case work time, measured on the target host |
 | `mode` | Hybrid | Sleep, Spin, Hybrid | Hybrid |
-| `spin_tail` | 250 us | 0 to 10 s | Cover the host's blocking sleep lateness at p99 |
+| `spin_tail` | 250 µs | 0 to 10 s | Cover the host's blocking sleep lateness at p99 |
 | `async_spin_tail` | 2.5 ms | 0 to 10 s | Longer than tokio's 1 ms timer tick |
 | `spin_budget` | 250 ms of spin per second, 50 ms burst | Each up to 64 s; burst at least one request's charge | Keep it limited; `Unlimited` is for experiments only |
 | `max_concurrent` | 64 | 1 to 65,536 | At or below the CPU count when using Spin |
@@ -208,7 +208,7 @@ Offered load was 4.0 to 4.5 times admission capacity when pinned and 9.2 to 10.3
 | Flood configuration | Served / shed | Spin reserved vs budget bound | Legitimate requests completed |
 |---|---|---|---|
 | Spin, no budget | 2,920 / 9,908; 2,974 / 10,484; 5,647 / 49,814 | No bound | 9 of 51; 15 of 54; 38 of 60 |
-| Hybrid, budget 250 ms/s plus 25 ms burst, tail 250 us | 2,919 / 9,036; 2,978 / 10,196; 5,457 / 56,744 | 0.730, 0.745 and 0.765 s vs 0.777 s | 8 of 46; 3 of 48; 67 of 82 |
+| Hybrid, budget 250 ms/s plus 25 ms burst, tail 250 µs | 2,919 / 9,036; 2,978 / 10,196; 5,457 / 56,744 | 0.730, 0.745 and 0.765 s vs 0.777 s | 8 of 46; 3 of 48; 67 of 82 |
 | Sleep | 2,698 / 9,617; 2,724 / 10,067; 5,110 / 55,844 | None reserved | 1 of 45; 2 of 47; 50 of 71 |
 
 Reserved spin stayed under the bound, which is the rate times wall time plus the burst. In the pinned runs the single slot already limited spin to the budget rate, so no request fell back. Only the unpinned run made the budget act.
@@ -249,7 +249,7 @@ A Kolmogorov-Smirnov (KS) test, which compares the whole shape of two distributi
 
 | Layer | Runs in CI | Build | n per class | What it checks |
 |---|---|---|---|---|
-| `tests/leak.rs` | Yes, in `cargo test --all-targets` | Debug | 20,000 | Calibration, then Spin at a 50 us ceiling; about 2.4 s |
+| `tests/leak.rs` | Yes, in `cargo test --all-targets` | Debug | 20,000 | Calibration, then Spin at a 50 µs ceiling; about 2.4 s |
 | `tests/behaviour.rs`, `tests/redteam.rs`, `tests/telemetry.rs` | Yes | Debug | Not statistical | Never early, overrun rounding, drop cost absorbed, budget fallback, shedding, metrics firing under a test recorder |
 | `examples/verify.rs` | No; CI only compiles it | Release | 100,000 | The reported numbers below; about 4 minutes per run |
 
@@ -269,7 +269,7 @@ The CI guard's assertions follow, from `tests/leak.rs`; crops are held to the lo
     assert!(padded.a.median.unwrap() >= 50_000.0);
 ```
 
-**Measured results on this machine.** One 4-vCPU virtual machine, CPU model string "Intel(R) Xeon(R) Processor @ 2.10GHz", load average 0.1 to 0.9. All runs used the verify defaults: 300 us ceiling, 150 us Hybrid tail and seed 0x7ac4ce11, with no spin budget in the leak runs.
+**Measured results on this machine.** One 4-vCPU virtual machine, CPU model string "Intel(R) Xeon(R) Processor @ 2.10GHz", load average 0.1 to 0.9. All runs used the verify defaults: 300 µs ceiling, 150 µs Hybrid tail and seed 0x7ac4ce11, with no spin budget in the leak runs.
 
 Runs 1 and 2 were pinned to one CPU with `taskset`; run 3 was an unpinned extra run on 4 CPUs. Each cell lists runs 1, 2 and 3. CPU under flood is thread CPU inside pad calls, with whole-process CPU in brackets.
 
@@ -301,7 +301,7 @@ The 10 unit tests, the leak guard and both telemetry tests passed every time the
 
 ### What this does not guarantee
 
-- **It is not a proof.** A pass means no detectable leak at about 100,000 per class on one virtual machine. The smallest mean shift these runs could flag was 1.9 to 4.7 us, about 80 to 210 times the 22 to 24 ns gap.
+- **It is not a proof.** A pass means no detectable leak at about 100,000 per class on one virtual machine. The smallest mean shift these runs could flag was 1.9 to 4.7 µs, about 80 to 210 times the 22 to 24 ns gap.
 - **The stronger evidence is the design.** The release time is computed from `start` alone, and Spin and Hybrid class medians matched within 4 ns. Those two facts, not the t-test alone, carry the claim.
 - **Sleep mode has an unexplained gap.** Its class medians differed by 154 to 274 ns, with class A later in all 3 runs. No test flagged it, and 3 runs cannot separate it from chance, so measure Sleep at a larger n before relying on it.
 - **Work past the ceiling leaks.** Each overrun can reveal up to log2(H + 1) bits, where H is `hard_ceiling_buckets`, while work plus drop ends inside W. In the blocking API, each further W of work time t adds one more release time: log2(H + ceil(t / W)) bits.

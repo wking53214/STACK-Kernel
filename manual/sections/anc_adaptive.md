@@ -16,7 +16,7 @@ At the production leak budget the fix also spent most of its time at its fixed c
 
 The crate's own picture is a bus timetable. Strategy 1 prints one timetable and never changes it. Strategy 2 rewrites it from recent boarding times, and the danger is that the timetable becomes a record of who boarded.
 
-**The brief's design, kept so it can be measured.** `NaiveRollingTarget` sets the target to the mean, or the 99th percentile (p99), of the last 256 work times plus 10 us (microseconds). The target stays between a floor, the lowest allowed target, and a cap, the hard ceiling. It has three leaks, each shown in `tests/naive.rs`:
+**The brief's design, kept so it can be measured.** `NaiveRollingTarget` sets the target to the mean, or the 99th percentile (p99), of the last 256 work times plus 10 µs (microseconds). The target stays between a floor, the lowest allowed target, and a cap, the hard ceiling. It has three leaks, each shown in `tests/naive.rs`:
 
 1. **Late release.** A request slower than the target leaves when it finishes, so its reply time is its raw, secret-dependent work time.
 2. **Poisoning.** An attacker fills the window with fast requests, pulls the target below the slow path, then probes.
@@ -24,7 +24,7 @@ The crate's own picture is a bus timetable. Strategy 1 prints one timetable and 
 
 **The fix: an epoch-quantized target.** `EpochQuantizedTarget` follows predictive mitigation (Askarov, Zhang and Myers, CCS 2010). The server predicts a release time and changes the prediction only when a reply misses it. Its rules are short:
 
-- The target is always a public level: the floor times a power of two, never above the cap. The verify runs used 64, 128, 256, 512, 1,024 and 2,048 us.
+- The target is always a public level: the floor times a power of two, never above the cap. The verify runs used 64, 128, 256, 512, 1,024 and 2,048 µs.
 - A misprediction is work that runs past the target. The level doubles until it covers the work, and the reply leaves at that level, never at the raw time. This is an escalated release.
 - The level steps down by one only at an epoch boundary, a wall-clock tick fixed at construction. The epoch that ended must have had requests, no misprediction, and work the lower level would also have covered.
 - Work past the cap is a RETRY. The value is dropped and the reply leaves at the next whole multiple of the cap.
@@ -48,7 +48,7 @@ The descent from a public starting level, the warm-up, is not charged; only its 
 3. Take a snapshot of the target from the controller.
 4. Run the operation under `catch_unwind`, so a panic cannot escape the pad.
 5. Plan the release from the snapshot, then record the work time in the controller. Both run inside the padded wait.
-6. Wait until the admission time plus the planned release. Sleep mode sleeps; Hybrid mode sleeps, then busy-waits (spins) the last 250 us by default, for precision.
+6. Wait until the admission time plus the planned release. Sleep mode sleeps; Hybrid mode sleeps, then busy-waits (spins) the last 250 µs by default, for precision.
 7. Only then free the slot, emit metrics and logs, and return.
 
 **Trips and resolutions.** Each trip maps to the CNS GateOutcome vocabulary (PASS, RETRY, TERMINAL_BREACH) and to one state resolution. RETRY means the caller may resubmit; TERMINAL_BREACH means no correction repairs it.
@@ -109,15 +109,15 @@ Where the measurements contradict the brief:
 
 1. **Feedback that carries the delta instead of cancelling it.** The rolling mean changed about 189,000 times in 202,000 requests, a bound near 3.5 million bits.
 2. **No room on this host for both adapting and a small budget.** Under a 1,000,000-bit measurement budget, the epoch target made 734 and 855 changes per one-minute Sleep run, about 13,700 and 15,900 bits. The 128-bit production budget froze it within 0.55 to 0.95 s, leaving 82 and 98 percent of those runs' replies at the cap.
-3. **A target path that still followed the class mix, which the ANC analysis asked to avoid.** Level sequences differed in every run, and class A's mean reply moved 8.7 and 9.9 us between mixes (rolling mean: 20.2 and 14.0 us). The crate predicts this when the floor, 64 us here, is below the worst-case work under load.
+3. **A target path that still followed the class mix, which the ANC analysis asked to avoid.** Level sequences differed in every run, and class A's mean reply moved 8.7 and 9.9 µs between mixes (rolling mean: 20.2 and 14.0 µs). The crate predicts this when the floor, 64 µs here, is below the worst-case work under load.
 4. **A budget trip that changed class.** The ANC analysis mapped a spent budget to TERMINAL_BREACH, but the red team showed one slow request could then force an operator-only freeze. A window spend is now RETRY, and only a lifetime spend is terminal.
 
 | Design | Pros | Cons |
 |---|---|---|
-| Naive rolling target (the brief) | Lowest added median latency for class A: about 80 us (mean) and 108 us (p99) over the unprotected victim. One ring buffer, little code. | Leaks through late release, poisoning and target history. The mean form was detected in every run. Never deploy it, yet its constructor is still public (open finding). |
-| Epoch target, Sleep | No detectable leak on \|t\| in any run. Every visible change is counted and budgeted. No CPU while waiting: 53 to 54 us of thread CPU per request. | Adds about 180 to 184 us at the class A median. KS flagged a difference between the classes in all 3 full-size pinned runs. |
-| Epoch target, Hybrid, 250 us tail | Lowest max \|t\| (2.27 and 1.29), and KS did not flag it. | The target must cover the tail, so it sat at 512 us and added about 500 us at the median. About 219 us of CPU per request, 4 times Sleep. |
-| Epoch target at the production budget | Leak capped at 128 bits per window and 1,024 bits between operator resets. | On this host it froze within a second and held 82 to 98 percent of replies at the 2,048 us cap. It then behaves like strategy 1 with more moving parts. |
+| Naive rolling target (the brief) | Lowest added median latency for class A: about 80 µs (mean) and 108 µs (p99) over the unprotected victim. One ring buffer, little code. | Leaks through late release, poisoning and target history. The mean form was detected in every run. Never deploy it, yet its constructor is still public (open finding). |
+| Epoch target, Sleep | No detectable leak on \|t\| in any run. Every visible change is counted and budgeted. No CPU while waiting: 53 to 54 µs of thread CPU per request. | Adds about 180 to 184 µs at the class A median. KS flagged a difference between the classes in all 3 full-size pinned runs. |
+| Epoch target, Hybrid, 250 µs tail | Lowest max \|t\| (2.27 and 1.29), and KS did not flag it. | The target must cover the tail, so it sat at 512 µs and added about 500 µs at the median. About 219 µs of CPU per request, 4 times Sleep. |
+| Epoch target at the production budget | Leak capped at 128 bits per window and 1,024 bits between operator resets. | On this host it froze within a second and held 82 to 98 percent of replies at the 2,048 µs cap. It then behaves like strategy 1 with more moving parts. |
 
 ### Recommended Rust pattern
 
@@ -147,7 +147,7 @@ The pattern has three parts: a pure release plan, a controller update inside the
         }
 ```
 
-`snap.plan` is pure arithmetic, so the release schedule is testable without a clock. In Hybrid mode the pad plans `work + spin_tail`, so every released request sleeps, then spins. Without that rule, replies after a sleep ran about 0.9 us slower, and the classes differed at KS D 0.69 on the development host.
+`snap.plan` is pure arithmetic, so the release schedule is testable without a clock. In Hybrid mode the pad plans `work + spin_tail`, so every released request sleeps, then spins. Without that rule, replies after a sleep ran about 0.9 µs slower, and the classes differed at KS D 0.69 on the development host.
 
 The upward rule, from `src/controller/epoch.rs`. Every miss is charged, even when a concurrent request already raised the level:
 
@@ -222,7 +222,7 @@ The crate answers with four limits, all applied before any secret-dependent work
 - **Sleep by default.** A sleeping request blocks its thread and holds a slot, but uses no CPU.
 - **A concurrency cap.** A non-blocking semaphore, a counter of free slots, sheds requests at admission with RETRY. It never queues, because a queue would make admission time depend on position.
 - **A spin budget.** Hybrid spinning draws on a token bucket, a counter that refills at a fixed rate. Each request reserves a fixed charge that is never refunded, so the fallback to Sleep depends only on public load.
-- **The cap.** A slow flood cannot push the target past it. In verify, all 256 slow requests against the rolling target got RETRY, and the target stopped at the 2,048 us cap.
+- **The cap.** A slow flood cannot push the target past it. In verify, all 256 slow requests against the rolling target got RETRY, and the target stopped at the 2,048 µs cap.
 
 Admission, from `src/pad.rs`:
 
@@ -255,7 +255,7 @@ Every limit lives in a config struct. Out-of-range values are rejected at constr
 | Limit | Default | Accepted range |
 |---|---|---|
 | `max_concurrent` (slots) | 64 | 1 to 65,536 |
-| `spin_tail` (Hybrid) | 250 us | 0 to 10 s, and below the cap |
+| `spin_tail` (Hybrid) | 250 µs | 0 to 10 s, and below the cap |
 | `spin_budget` | 250 ms of CPU per second, 50 ms burst | above 0, at most 64 s each |
 | `max_input_len` | 64 KiB | 0 to 64 MiB |
 | `cap` | none; the operator must choose | floor to 10 s |
@@ -291,7 +291,7 @@ Calibration comes first. The harness must flag the unpadded `leaky_validate` and
 
 | Layer | Where | Profile and n | Runs in `cargo test`? | Role |
 |---|---|---|---|---|
-| Smoke test | `tests/leak.rs` | Debug, 2,000 per class, victim amplified to about 40 and 164 us | Yes | Calibration at that n, rolling mean flagged, epoch Hybrid passes. Not evidence. |
+| Smoke test | `tests/leak.rs` | Debug, 2,000 per class, victim amplified to about 40 and 164 µs | Yes | Calibration at that n, rolling mean flagged, epoch Hybrid passes. Not evidence. |
 | Controller rules | `tests/epoch.rs`, `tests/naive.rs` | Synthetic clock times | Yes | Doubling, decreases, both budgets, freeze and thaw, and identical trajectories when the floor covers both classes. A property test with 64 cases keeps the target on the ladder. |
 | Metrics | `tests/telemetry.rs` | `DebuggingRecorder` with `metrics::with_local_recorder` | Yes | 15 of the 20 metrics are asserted to fire, with closed-set labels. The 5 added by the fixes, for the lifetime budget and panics, are not yet. |
 | Red team | `tests/redteam.rs` | 17 attack tests; one property test with 2,000 cases | Yes | 3 tests for open findings fail. |
@@ -325,7 +325,7 @@ Each max |t| and CPU cell lists run 1 / run 2. Classes were drawn at random, so 
 | Naive rolling p99 | 100,322 A, 99,678 B | 3.01 / 3.88 | No, 0 of 2 (marginal) | not flooded |
 | Naive p99, fast-flood poisoning | 10,017 A, 9,983 B | 9.47 / 11.09 | Yes, 2 of 2 | not flooded |
 | Epoch, Sleep | 100,322 A, 99,678 B | 3.68 / 2.06 | No by \|t\|; KS flagged 2 of 2 | 0.272 / 0.280 cores (Sleep flood) |
-| Epoch, Hybrid, 250 us tail | 100,322 A, 99,678 B | 2.27 / 1.29 | No, 0 of 2 | 0.258 / 0.248 cores (Hybrid flood, 100 ms per second spin budget) |
+| Epoch, Hybrid, 250 µs tail | 100,322 A, 99,678 B | 2.27 / 1.29 | No, 0 of 2 | 0.258 / 0.248 cores (Hybrid flood, 100 ms per second spin budget) |
 | Epoch, same poisoning attack | 10,017 A, 9,983 B | 1.38 / 0.94 | No, 0 of 2 | not flooded |
 | Epoch, Sleep, production budget | 19,980 A, 20,020 B | 0.99 / 1.24 | No, 0 of 2 | not flooded |
 
@@ -335,11 +335,11 @@ KS flagged epoch Sleep in all 3 full-size pinned runs, with D of 0.0148, 0.0150 
 
 KS also flagged the constant-time control once (run 2, p 7e-6), so this line has false alarms here. But the Sleep flag repeated in every run, and the control's did not.
 
-One untested candidate cause: in Sleep mode the sleep lasts target minus work, so class B sleeps roughly 5 to 9 us less. If wake-up delay depends on sleep length, that is a timing side channel under kernel convention 6.
+One untested candidate cause: in Sleep mode the sleep lasts target minus work, so class B sleeps roughly 5 to 9 µs less. If wake-up delay depends on sleep length, that is a timing side channel under kernel convention 6.
 
-Uncropped, the smallest mean shift the test could flag was 13.4 to 13.9 us (Sleep) and 20.0 to 20.4 us (Hybrid). The secret's own median gap, 5.5 to 8.9 us, is smaller, so the cropped tests carry the sensitivity. They found the unprotected gap at |t| 1,551 and 1,129.
+Uncropped, the smallest mean shift the test could flag was 13.4 to 13.9 µs (Sleep) and 20.0 to 20.4 µs (Hybrid). The secret's own median gap, 5.5 to 8.9 µs, is smaller, so the cropped tests carry the sensitivity. They found the unprotected gap at |t| 1,551 and 1,129.
 
-At the production budget the controller froze after 6,102 and 2,069 requests, warm-up included (0.95 and 0.55 s). It thawed at the next 60 s window boundary, then froze again. Its mean target was 1,711 and 2,020 us, against 148 and 163 us for the same pad under the measurement budget.
+At the production budget the controller froze after 6,102 and 2,069 requests, warm-up included (0.95 and 0.55 s). It thawed at the next 60 s window boundary, then froze again. Its mean target was 1,711 and 2,020 µs, against 148 and 163 µs for the same pad under the measurement budget.
 
 **Test suite status.** `cargo clippy -p stack-anc-adaptive --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, 61 tests pass and 3 fail across 8 targets. The passes are unit 14, epoch 14, leak 1, naive 6, pad 7, red team 14 of 17 and telemetry 5.
 

@@ -1,6 +1,6 @@
 ## Sources
 
-Five web pages and six local files were opened; seven papers the network blocked are cited only from memory and search summaries.
+Five web pages and twelve local files were opened; seven papers the network blocked are cited only from memory and search summaries.
 
 *Sources opened while writing this manual; the local files are read-only repositories and the reference workspace*
 
@@ -23,6 +23,13 @@ Five web pages and six local files were opened; seven papers the network blocked
 | `sentinel_os/sentinel_os/canonical_fields.py` | `OPTIONAL_HASHED_FIELDS`, the shared list of optional columns that enter a row's hash when present. |
 | `sentinel_os/sentinel_os/api_key_auth.py` | `_find_key_constant_time` checks every key with `hmac.compare_digest` and no early exit; its two failure replies differ in text. |
 | `observe-perceive/observe_consolidated.py` | `sanitize_context` returns a cleaned copy plus notes: the repair approach the Inlet deliberately does not take. |
+| `sentinel_os/sentinel_os/governance/ledger_postgres.py` | The writer, its anchor seal and `verify_chain`. |
+| `sentinel_os/sentinel_os/governance/authorized_by_attestation.py` | The abv2 and abv3 signatures and seed derivation. |
+| `sentinel_os/tools/verify_receipts.py` | The offline command and its six verdicts. |
+| `sentinel_os/APPLY_verdict_receipts.md` | Section 6, the service-key holder limitation. |
+| `sentinel_os/sentinel_os/rate_limiter_v2.py` | A Redis token bucket that fails open. |
+| `sentinel_os/sentinel_os/queue_schema.py` | One Redis list per queue, and `TransmissionQueue`. |
+| `sentinel_os/CLAUDE.md` | Rule 4: never truncate a hash. |
 | [stack-anc-harness victim.rs](../../crates/stack-anc-harness/src/victim.rs) | The early-exit victim `leaky_validate` and the constant-time control `ct_validate`, over a 32-byte token. |
 
 These claims rest on memory or search-engine summaries, because the network refused the papers:
