@@ -518,20 +518,22 @@ fn rt16_spin_cpu_bounded_by_rate_plus_burst_under_flood() {
 // rt10: secret-dependent overrun changes another client's shed verdict.
 // ---------------------------------------------------------------------
 
-/// Attack class "shedding decisions that depend on a secret". The shed
-/// check itself reads only the slot counter, but an overrun holds its slot
-/// until k * ceiling, so a second observer probing at 1.5 ceilings is shed
-/// or served depending on whether the victim's secret work overran.
+/// Attack class "shedding decisions that depend on a secret". A slot is held
+/// for one fixed time from admission (the hard ceiling), so a second
+/// observer probing at 1.5 ceilings gets the same verdict whether or not the
+/// victim's secret work overran.
 #[test]
 fn rt10_probe_shed_verdict_independent_of_victim_secret() {
     let ceiling = Duration::from_millis(4);
-    let pad = CeilingPad::new(CeilingConfig {
-        max_concurrent: 1,
-        ..cfg(ceiling, WaitMode::Sleep)
-    })
-    .unwrap();
     let mut verdicts = Vec::new();
     for victim_work in [Duration::ZERO, Duration::from_millis(5)] {
+        // A fresh pad per victim: a slot is held for a fixed time after
+        // admission, so a reused pad would still hold the last victim's slot.
+        let pad = CeilingPad::new(CeilingConfig {
+            max_concurrent: 1,
+            ..cfg(ceiling, WaitMode::Sleep)
+        })
+        .unwrap();
         let started = AtomicBool::new(false);
         let probe = std::thread::scope(|s| {
             let v = s.spawn(|| {
@@ -868,7 +870,9 @@ fn rt17_concurrent_hammer_keeps_invariants() {
         h.join().unwrap();
     }
     println!("rt17 max in flight {}", max_seen.load(Ordering::Relaxed));
-    assert!(max_seen.load(Ordering::Relaxed) <= 3);
+    // Slots free on a clock, so a request past its hold can overlap newer
+    // ones; the backstop (4 x max_concurrent) bounds the pile-up.
+    assert!(max_seen.load(Ordering::Relaxed) <= 12);
     assert_eq!(pad.in_flight(), 0);
     assert!(!pad.is_halted());
 }

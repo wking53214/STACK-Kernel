@@ -57,7 +57,7 @@ pub fn release_bucket(elapsed: Duration, ceiling: Duration) -> u64 {
 
 | Trip | When | CNS outcome | Resolution | Why |
 |---|---|---|---|---|
-| `SlotsFull` | All `max_concurrent` slots are held | RETRY | reject | Load, not a fault. It is refused before any secret work and returned at once, so the fast reply reflects load only. |
+| `SlotsFull` | All `max_concurrent` slots are held, or `4 x max_concurrent` requests are still inside the pad | RETRY | reject | Load, not a fault. It is refused before any secret work and returned at once, so the fast reply reflects load only. |
 | `InputTooLarge` | Input longer than `max_input_len` | RETRY | reject | The sender already knows the length. A shorter input can pass. |
 | `Overrun` | Work ended past the hard ceiling | RETRY | reject | The late value is discarded, so nothing changed. The reply leaves on the retry window, never at the completion time. |
 | `ClockFailure` | The clock went backwards, stopped, or overflowed | TERMINAL_BREACH | halt | Padding means nothing without a trustworthy clock. The pad refuses all work until an operator calls `reset()`. |
@@ -130,7 +130,7 @@ The order of events inside the pad is the reusable pattern. Read the clock befor
 
 Three lines carry the red-team fixes. `drop(value)` runs before the wait, so a slow destructor is absorbed by the padding instead of added after it. `retry_target` rounds up to the retry window, and `retry_wait` never spins longer than the charge reserved at admission.
 
-`conclude` reads the release time first; only then does the slot go free and telemetry run. The async API, `pad_async`, serves code built on tokio, Rust's common async runtime, and follows the same order. It also cancels the work at the hard ceiling, and treats work that finished late before the timer fired as the same hard overrun.
+`conclude` reads the release time first; only then does telemetry run. The slot does not free here: it frees on its own clock, one hard ceiling after admission (see the slot-hold finding below). The async API, `pad_async`, serves code built on tokio, Rust's common async runtime, and follows the same order. It also cancels the work at the hard ceiling, and treats work that finished late before the timer fired as the same hard overrun.
 
 | Field | Default | Accepted range | Recommendation |
 |---|---|---|---|
@@ -181,7 +181,7 @@ Admission checks run in a fixed order, all on public facts, before the operation
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire().ok_or(Trip::SlotsFull)?;
+        let permit = self.slots.try_acquire(start).ok_or(Trip::SlotsFull)?;
         let charge = if async_api {
             self.config.async_spin_charge()
         } else {
@@ -305,7 +305,7 @@ The 10 unit tests, the leak guard and both telemetry tests passed every time the
 - **The stronger evidence is the design.** The release time is computed from `start` alone, and Spin and Hybrid class medians matched within 4 ns. Those two facts, not the t-test alone, carry the claim.
 - **Sleep mode has an unexplained gap.** Its class medians differed by 154 to 274 ns, with class A later in all 3 runs. No test flagged it, and 3 runs cannot separate it from chance, so measure Sleep at a larger n before relying on it.
 - **Work past the ceiling leaks.** Each overrun can reveal up to log2(H + 1) bits, where H is `hard_ceiling_buckets`, while work plus drop ends inside W. In the blocking API, each further W of work time t adds one more release time: log2(H + ceil(t / W)) bits.
-- **Other clients can see an overrun.** An overrunning request holds its slot longer, so a probe that arrives meanwhile is shed. Red-team test rt10 shows this and still fails; it is documented, not fixed.
+- **Slot hold time (fixed in this version).** Every admitted request holds its slot for one fixed time, the hard ceiling (`ceiling x hard_ceiling_buckets`), counted from admission, whatever its work time. A probe is shed or served by arrival times alone, so a third party can no longer tell whether a victim overran (red-team test rt10 now passes). The cost is capacity: each slot admits one request per hard ceiling, so throughput is at most `max_concurrent / hard ceiling`. Raise `max_concurrent` to compensate. The hard ceiling is the posted speed limit and is a placeholder until measured work times set it. A backstop of `4 x max_concurrent` requests inside the pad bounds requests stuck past the hold; it leaks only after an attacker has already pushed requests over the limit.
 - **A RETRY is visible as content.** An overrun RETRY reads differently from a value. It is counted, not hidden.
 - **Service under flood is not protected.** The cap bounds CPU but lets the flood starve legitimate clients.
 - **Two paths were never leak-tested.** The t-tests used an unlimited spin budget, so replies served during a budget fallback were not measured. The async API was measured for precision only, and its Sleep mode was 1.17 to 1.18 ms late at p50.

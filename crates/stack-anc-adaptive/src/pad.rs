@@ -130,7 +130,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         let kind = controller.kind();
         telemetry::emit_status(&status);
         Ok(Self {
-            slots: Slots::new(config.max_concurrent),
+            slots: Slots::new(config.max_concurrent, status.cap),
             budget: SpinBudget::new(config.spin_budget, now),
             controller: Mutex::new(controller),
             kind,
@@ -150,7 +150,9 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         self.kind
     }
 
-    /// Requests currently holding a concurrency slot.
+    /// Requests admitted and not yet returned. A finished request frees its
+    /// concurrency slot only when its fixed hold time (the controller cap)
+    /// is over, so this is not the number of busy slots.
     pub fn in_flight(&self) -> usize {
         self.slots.in_use()
     }
@@ -259,7 +261,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire().ok_or(Trip::SlotsFull)?;
+        let permit = self.slots.try_acquire(start).ok_or(Trip::SlotsFull)?;
         let charge = self.config.spin_charge();
         let (mode, reserved, fallback) = if self.budget.try_reserve(charge, start) {
             (self.config.mode, charge, false)
