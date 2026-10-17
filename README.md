@@ -4,6 +4,8 @@ Reference implementation of the ≡STACK governance kernel, written in Rust and 
 
 These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](https://github.com/wking53214/CNS), Apache-2.0). Several source comments reference that contract.
 
+`stack-sentinel` reproduces CNS's subject digest (`cns.gate.subject_digest`) in Rust, and it is held to CNS's own answer key: `crates/stack-sentinel/tests/fixtures/cns-digest-vectors.json` is a copy of CNS's `contracts/digest-vectors.json` (contents and the digest CNS gives each, chosen to catch near-misses), and `cargo test -p stack-sentinel --test cns_vectors` recomputes every one. CNS checks this copy against its own, so a stale one is reported there.
+
 ## What is here
 
 | Crate | Component |
