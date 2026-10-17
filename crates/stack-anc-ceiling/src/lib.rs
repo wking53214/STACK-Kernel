@@ -155,11 +155,13 @@ pub mod telemetry;
 pub mod wait;
 
 mod budget;
+mod lanes;
 mod pad;
 mod slots;
 
 pub use clock::{Clock, MonotonicClock};
 pub use config::{CeilingConfig, ConfigError, SlotScaling, SpinBudgetConfig, WaitMode};
 pub use outcome::{GateOutcome, PadResult, Padded, ReleaseInfo, Resolution, Trip};
+pub use lanes::{FastLane, LanedPad};
 pub use pad::CeilingPad;
 pub use wait::{bucket_offset, release_bucket};
