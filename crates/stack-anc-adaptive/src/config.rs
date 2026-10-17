@@ -43,6 +43,8 @@ pub const MAX_EPOCH: Duration = Duration::from_secs(3_600);
 pub const MAX_LEAK_WINDOW: Duration = Duration::from_secs(86_400);
 /// Largest accepted leak budget, in bits per window.
 pub const MAX_LEAK_BUDGET_BITS: f64 = 1.0e6;
+/// Largest accepted `tolerated_slow_permille`: half of all requests.
+pub const MAX_TOLERATED_SLOW_PERMILLE: u16 = 500;
 /// Largest accepted lifetime budget, in whole window budgets.
 pub const MAX_LEAK_LIFETIME_WINDOWS: u32 = 1_000_000;
 
@@ -498,6 +500,20 @@ pub struct EpochConfig {
     /// [`DEFAULT_LEAK_LIFETIME_WINDOWS`]. Bounds: 1 ..=
     /// [`MAX_LEAK_LIFETIME_WINDOWS`].
     pub leak_lifetime_windows: u32,
+    /// How many slow requests per thousand the controller treats as rare.
+    /// Default `0`: no tolerance, so one slow request per epoch can hold
+    /// every request at the cap (see the availability finding in the
+    /// manual). With a value above zero, requests that run past the target
+    /// are *rare* while their count stays at or below this share of the
+    /// epoch's traffic (the larger of this epoch's requests so far and the
+    /// last epoch's). A rare slow request is released at its own covering
+    /// level and charged to the leak budget, but it does not raise the
+    /// shared level, and rare slow requests do not block a step down. The
+    /// attacker then needs more than this share of the honest volume, not
+    /// one request per epoch, to hold the level up. Small counts are never
+    /// rare, so low-volume services keep the strict behavior. Bounds:
+    /// 0 ..= [`MAX_TOLERATED_SLOW_PERMILLE`].
+    pub tolerated_slow_permille: u16,
 }
 
 impl EpochConfig {
@@ -512,6 +528,7 @@ impl EpochConfig {
             epoch: DEFAULT_EPOCH,
             leak_budget: LeakBudgetConfig::default(),
             leak_lifetime_windows: DEFAULT_LEAK_LIFETIME_WINDOWS,
+            tolerated_slow_permille: 0,
         };
         c.initial_level = c.top_level();
         c
@@ -570,6 +587,12 @@ impl EpochConfig {
             return bad(
                 "leak_budget.window",
                 "outside MIN_EPOCH ..= MAX_LEAK_WINDOW",
+            );
+        }
+        if self.tolerated_slow_permille > MAX_TOLERATED_SLOW_PERMILLE {
+            return bad(
+                "tolerated_slow_permille",
+                "above MAX_TOLERATED_SLOW_PERMILLE",
             );
         }
         if self.leak_lifetime_windows == 0 || self.leak_lifetime_windows > MAX_LEAK_LIFETIME_WINDOWS {
