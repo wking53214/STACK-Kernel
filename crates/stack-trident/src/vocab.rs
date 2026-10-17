@@ -8,7 +8,7 @@
 use std::fmt;
 
 /// Which end of a decision the sender's gate ran at. Mirrors
-/// `cns.gate.GatePosition` in `/home/user/CNS/cns/gate.py`.
+/// `cns.gate.GatePosition` in `cns/gate.py` in the CNS repository.
 ///
 /// `Alpha` runs before execution (a precondition). `Omega` runs on the
 /// produced result (an outcome check).

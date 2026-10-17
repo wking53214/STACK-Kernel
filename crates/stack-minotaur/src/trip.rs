@@ -1,7 +1,7 @@
 //! The typed verdict a [`crate::Thread`] returns when a cap is hit.
 //!
 //! [`GateOutcome`] mirrors `GateOutcome` in `cns.gate` (the CNS repository,
-//! `/home/user/CNS/cns/gate.py`) with the same string values. It is
+//! `cns/gate.py` in the CNS repository) with the same string values. It is
 //! re-declared here, not imported, because CNS is a Python package; the
 //! string values are what must agree across languages.
 

@@ -195,7 +195,7 @@ pub fn rollback_on_trip<S: Clone, T>(
 }
 ```
 
-**CNS vocabulary.** Each `Trip` carries a `GateOutcome` whose strings match `GateOutcome` in /home/user/CNS/cns/gate.py: `pass`, `retry` and `terminal_breach`. The enum is re-declared in Rust, not imported, because CNS is a Python package.
+**CNS vocabulary.** Each `Trip` carries a `GateOutcome` whose strings match `GateOutcome` in cns/gate.py in the CNS repository: `pass`, `retry` and `terminal_breach`. The enum is re-declared in Rust, not imported, because CNS is a Python package.
 
 The crate sets no `GatePosition`. An in-flight guard is neither ALPHA (before execution) nor OMEGA (on the result), so that choice is still open.
 
