@@ -706,8 +706,8 @@ fn naive_late_release_is_raw_work_time_by_design() {
     let b = s.plan(us(456));
     println!("naive plans: {a:?} {b:?}");
     assert!(
-        a.release() != b.release(),
-        "naive late releases should still differ with the work time, got {:?} and {:?}",
+        a.release() == us(123) && b.release() == us(456),
+        "documented leak: naive late releases equal the raw work times {:?} and {:?}",
         a.release(),
         b.release()
     );
