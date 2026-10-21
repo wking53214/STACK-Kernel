@@ -1,4 +1,4 @@
-//! Independent red-team tests for tack-transmission.
+//! Independent red-team tests for stack-transmission.
 //!
 //! Each test asserts the SAFE behaviour. A failing test means the weakness
 //! named in its doc comment exists. Test keys and configs here are test
@@ -238,8 +238,8 @@ fn a4_halt_then_quick_reset_must_still_cancel_the_pending_shift() {
 
 /// A5. `Transmission::new` writes the process-global gauges (halted,
 /// in_flight, clutch_pressed, gear_epoch) to 0. Weakness: building any
-/// second instance while the first is halted sets tack_transmission_halted
-/// to 0 and silences the critical TackTransmissionHalted alert.
+/// second instance while the first is halted sets stack_transmission_halted
+/// to 0 and silences the critical StackTransmissionHalted alert.
 #[test]
 fn a5_constructing_a_second_instance_must_not_clear_the_halt_gauge() {
     let rec = DebuggingRecorder::new();
@@ -401,7 +401,7 @@ impl Drop for DropBomb {
 /// A8. The crate says no call panics across a request boundary. The old
 /// gear is dropped inside `shift()`, after unlock. If the caller's G::drop
 /// panics, the panic leaves `shift()` after the swap, and the shift is never
-/// counted in tack_transmission_shift_total. State itself stays consistent.
+/// counted in stack_transmission_shift_total. State itself stays consistent.
 #[test]
 fn a8_panicking_old_gear_drop_must_not_escape_shift() {
     let t = Transmission::new(DropBomb { armed: true }, TransmissionConfig::default()).unwrap();

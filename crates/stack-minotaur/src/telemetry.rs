@@ -1,6 +1,6 @@
 //! Metrics, span names and log events.
 //!
-//! Every metric name starts `tack_minotaur_`. Labels come only from closed
+//! Every metric name starts `stack_minotaur_`. Labels come only from closed
 //! enums ([`crate::Reason`], [`crate::GateOutcome`], [`crate::Detector`] and
 //! [`WalkEnd`]). Nothing derived from a fingerprint or any caller data is
 //! ever a label, because a free-form label is a cardinality attack (each new
@@ -31,41 +31,41 @@ use crate::trip::{Trip, TripKind};
 
 /// Counter, labels `reason` and `outcome`: one per trip, including refusals
 /// while halted (`reason="halted"`).
-pub const TRIPS_TOTAL: &str = "tack_minotaur_trips_total";
+pub const TRIPS_TOTAL: &str = "stack_minotaur_trips_total";
 /// Counter, label `detector` (`exact`, `brent` or `recent`): loops found.
-pub const LOOPS_DETECTED_TOTAL: &str = "tack_minotaur_loops_detected_total";
+pub const LOOPS_DETECTED_TOTAL: &str = "stack_minotaur_loops_detected_total";
 /// Counter, no labels: trips resolved by rewinding to the anchor (every trip
 /// except a refusal while halted and a refusal through a stale guard).
-pub const ROLLBACKS_TOTAL: &str = "tack_minotaur_rollbacks_total";
+pub const ROLLBACKS_TOTAL: &str = "stack_minotaur_rollbacks_total";
 /// Counter, no labels: times a Thread entered the halted state.
-pub const HALTS_TOTAL: &str = "tack_minotaur_halts_total";
+pub const HALTS_TOTAL: &str = "stack_minotaur_halts_total";
 /// Counter, no labels: `operator_reset` calls.
-pub const OPERATOR_RESETS_TOTAL: &str = "tack_minotaur_operator_resets_total";
+pub const OPERATOR_RESETS_TOTAL: &str = "stack_minotaur_operator_resets_total";
 /// Counter, no labels: walks whose exact set filled up, switching them to
 /// Brent's detection. Counted once per walk.
-pub const DEGRADED_TOTAL: &str = "tack_minotaur_degraded_total";
+pub const DEGRADED_TOTAL: &str = "stack_minotaur_degraded_total";
 /// Histogram, label `end`: transitions recorded in a walk when it ended.
-pub const WALK_STEPS: &str = "tack_minotaur_walk_steps";
+pub const WALK_STEPS: &str = "stack_minotaur_walk_steps";
 /// Histogram, label `end`: deepest depth reached in a walk.
-pub const WALK_MAX_DEPTH: &str = "tack_minotaur_walk_max_depth";
+pub const WALK_MAX_DEPTH: &str = "stack_minotaur_walk_max_depth";
 /// Histogram, label `end`: states held in the exact set when a walk ended.
-pub const WALK_DISTINCT_STATES: &str = "tack_minotaur_walk_distinct_states";
+pub const WALK_DISTINCT_STATES: &str = "stack_minotaur_walk_distinct_states";
 /// Histogram, label `end`: wall time from the anchor to the end of a walk,
 /// in seconds.
-pub const WALK_DURATION_SECONDS: &str = "tack_minotaur_walk_duration_seconds";
+pub const WALK_DURATION_SECONDS: &str = "stack_minotaur_walk_duration_seconds";
 
 /// Span names.
 pub mod spans {
     /// One `descend` call (trace level).
-    pub const DESCEND: &str = "tack.minotaur.descend";
+    pub const DESCEND: &str = "stack.minotaur.descend";
     /// One `record` call (trace level).
-    pub const RECORD: &str = "tack.minotaur.record";
+    pub const RECORD: &str = "stack.minotaur.record";
     /// Handling a trip: rewind, metrics, log event (info level).
-    pub const TRIP: &str = "tack.minotaur.trip";
+    pub const TRIP: &str = "stack.minotaur.trip";
     /// A caller-initiated rewind to the anchor (debug level).
-    pub const REWIND: &str = "tack.minotaur.rewind";
+    pub const REWIND: &str = "stack.minotaur.rewind";
     /// An operator reset that clears a halt (info level).
-    pub const OPERATOR_RESET: &str = "tack.minotaur.operator_reset";
+    pub const OPERATOR_RESET: &str = "stack.minotaur.operator_reset";
 }
 
 /// How a walk ended; the `end` label on walk histograms.
@@ -150,7 +150,7 @@ pub(crate) fn walk_ended(end: WalkEnd, s: WalkStats) {
 pub(crate) fn degraded(tracked: usize, steps: u64) {
     counter!(DEGRADED_TOTAL).increment(1);
     tracing::info!(
-        target: "tack.minotaur",
+        target: "stack.minotaur",
         tracked,
         steps,
         "exact revisit set full; degrading to Brent cycle detection"
@@ -159,7 +159,7 @@ pub(crate) fn degraded(tracked: usize, steps: u64) {
 
 pub(crate) fn operator_reset(was_halted: bool, trips: u32) {
     counter!(OPERATOR_RESETS_TOTAL).increment(1);
-    tracing::info!(target: "tack.minotaur", was_halted, trips, "operator reset");
+    tracing::info!(target: "stack.minotaur", was_halted, trips, "operator reset");
 }
 
 /// Full SHA-256 hex of the concatenated bytes of `padded`, the breadcrumb
@@ -197,7 +197,7 @@ pub(crate) fn trip(t: &Trip, halted_now: bool, digest: Option<&str>) {
     if refusal {
         // A halted Thread under load, or a caller spinning on a stale guard,
         // would otherwise flood the log at warn.
-        tracing::debug!(target: "tack.minotaur", reason, outcome, "refused; nothing changed");
+        tracing::debug!(target: "stack.minotaur", reason, outcome, "refused; nothing changed");
         return;
     }
     let path_sha256 = digest.unwrap_or_default();
@@ -205,16 +205,16 @@ pub(crate) fn trip(t: &Trip, halted_now: bool, digest: Option<&str>) {
     let resolution = t.resolution.as_str();
     if halted_now {
         tracing::error!(
-            target: "tack.minotaur",
+            target: "stack.minotaur",
             reason, outcome, resolution, period,
             depth = t.depth, steps = t.steps,
             path_len = t.path.len(),
             path_sha256,
             "minotaur trip; thread halted until operator reset"
         );
-    } else if tracing::enabled!(target: "tack.minotaur", tracing::Level::WARN) {
+    } else if tracing::enabled!(target: "stack.minotaur", tracing::Level::WARN) {
         tracing::warn!(
-            target: "tack.minotaur",
+            target: "stack.minotaur",
             reason, outcome, resolution, period,
             depth = t.depth, steps = t.steps,
             path_len = t.path.len(),

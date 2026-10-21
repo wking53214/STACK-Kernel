@@ -1,7 +1,7 @@
 //! The typed verdict a [`crate::Thread`] returns when a cap is hit.
 //!
 //! [`GateOutcome`] mirrors `GateOutcome` in `cns.gate` (the CNS repository,
-//! `/home/user/CNS/cns/gate.py`) with the same string values. It is
+//! `cns/gate.py` in the CNS repository) with the same string values. It is
 //! re-declared here, not imported, because CNS is a Python package; the
 //! string values are what must agree across languages.
 
@@ -13,7 +13,7 @@ use crate::fingerprint::Fingerprint;
 
 /// Name this component reports itself under, for a caller building a CNS
 /// `GateResult` from a [`Trip`].
-pub const GATE_NAME: &str = "tack_minotaur";
+pub const GATE_NAME: &str = "stack_minotaur";
 
 /// A verdict, in increasing order of finality (CNS `GateOutcome`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -44,7 +44,7 @@ impl GateOutcome {
 ///
 /// The Minotaur String produces [`Resolution::Rollback`],
 /// [`Resolution::Halt`] and, for a call made through a stale guard,
-/// [`Resolution::Reject`]. [`Resolution::Quarantine`] exists so every TACK
+/// [`Resolution::Reject`]. [`Resolution::Quarantine`] exists so every STACK
 /// component shares one vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {

@@ -328,7 +328,7 @@ pub fn verify_rows(rows: &[LedgerRow], keys: &KeySet) -> ChainWalk {
 /// re-derive may only mean the auditor supplied the wrong key, which is the
 /// RETRY the first finding already reports.
 pub fn verify_rows_with(rows: &[LedgerRow], keys: &KeySet, config: &VerifierConfig) -> ChainWalk {
-    let _span = tracing::info_span!("tack.sentinel.verify_rows", rows = rows.len()).entered();
+    let _span = tracing::info_span!("stack.sentinel.verify_rows", rows = rows.len()).entered();
     let genesis = Value::Str(GENESIS.to_owned());
     let mut prev: &Value = &genesis;
     let mut policy: Option<Policy<'_>> = None;
@@ -420,7 +420,7 @@ fn unhashed_columns(rows: &[LedgerRow]) -> (Vec<&'static str>, bool) {
 /// and then discarded without being built, so it costs no memory. The
 /// parse runs under the allocation budget in `config.json`.
 pub fn parse_export(bytes: &[u8], config: &VerifierConfig) -> Result<Vec<LedgerRow>, VerifyError> {
-    let _span = tracing::info_span!("tack.sentinel.parse_export", export_len = bytes.len()).entered();
+    let _span = tracing::info_span!("stack.sentinel.parse_export", export_len = bytes.len()).entered();
     if bytes.len() > config.max_export_bytes {
         return Err(VerifyError::ExportTooLarge {
             len: bytes.len(),
@@ -474,7 +474,7 @@ impl Verifier {
         if keys.trusted_len() == 0 {
             let err = VerifyError::NoTrustedKeyMaterial;
             telemetry::record_rejected(&err, None);
-            tracing::warn!(reason = err.label(), "tack.sentinel refused to build a verifier with no trusted key");
+            tracing::warn!(reason = err.label(), "stack.sentinel refused to build a verifier with no trusted key");
             return Err(err);
         }
         Ok(Verifier { config, keys })
@@ -497,7 +497,7 @@ impl Verifier {
     pub fn verify_export(&self, export: &[u8], anchor: Option<&[u8]>) -> Result<Report, VerifyError> {
         let started = Instant::now();
         let span = tracing::info_span!(
-            "tack.sentinel.verify_export",
+            "stack.sentinel.verify_export",
             export_len = export.len(),
             export_sha256 = tracing::field::Empty,
             anchor_len = anchor.map(<[u8]>::len),
@@ -542,7 +542,7 @@ impl Verifier {
                             resolution = f.reason.resolution().as_str(),
                             row_id = f.row_id,
                             row_position = f.row_position,
-                            "tack.sentinel export failed verification"
+                            "stack.sentinel export failed verification"
                         );
                     }
                 }
@@ -550,7 +550,7 @@ impl Verifier {
             }
             Err(err) => {
                 span.record("outcome", err.gate_outcome().as_str());
-                tracing::warn!(reason = err.label(), outcome = err.gate_outcome().as_str(), "tack.sentinel export refused");
+                tracing::warn!(reason = err.label(), outcome = err.gate_outcome().as_str(), "stack.sentinel export refused");
                 telemetry::record_rejected(err, Some(started.elapsed()));
             }
         }
@@ -585,7 +585,7 @@ impl Verifier {
             None => return Ok(early(Reason::AnchorMissing, "no head anchor was supplied".to_owned())),
             Some(bytes) => {
                 let s = tracing::info_span!(
-                    "tack.sentinel.parse_anchor",
+                    "stack.sentinel.parse_anchor",
                     anchor_len = bytes.len(),
                     anchor_sha256 = tracing::field::Empty
                 )
@@ -612,7 +612,7 @@ impl Verifier {
         }
         let walk = verify_rows_with(&rows, &self.keys, &self.config);
         let anchored = {
-            let _s = tracing::info_span!("tack.sentinel.check_anchor").entered();
+            let _s = tracing::info_span!("stack.sentinel.check_anchor").entered();
             check_head_anchor_with(&rows, &parsed, &self.keys, &self.config)
         };
         let vouched = !anchored.as_ref().is_some_and(|f| {

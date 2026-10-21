@@ -175,7 +175,7 @@ fn rt_request_ids_do_not_leak_cross_lane_volume() {
 // ---------------------------------------------------------------------------
 
 /// Cop A halts on a clock regression (gauge 1, critical alert). Building any
-/// other cop in the same process sets tack_greenwave_halted back to 0 while A
+/// other cop in the same process sets stack_greenwave_halted back to 0 while A
 /// is still halted, which silently clears the critical alert.
 #[test]
 fn rt_halted_gauge_not_cleared_by_second_cop() {

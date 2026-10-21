@@ -1,4 +1,4 @@
-//! ≡TACK C++/Rust FFI Bridge
+//! ≡STACK C++/Rust FFI Bridge
 //! 
 //! Safe Rust bindings to the C++23 containment stack.
 //! Compiles C++ directly via `cc` crate for hardened integration.
@@ -7,30 +7,30 @@
 #![allow(non_camel_case_types)]
 
 extern "C" {
-    pub fn tack_host_initialize_and_seal() -> i32;
-    pub fn tack_host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64);
-    pub fn tack_execute_governed_transaction(
+    pub fn stack_host_initialize_and_seal() -> i32;
+    pub fn stack_host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64);
+    pub fn stack_execute_governed_transaction(
         context_id: u64,
         required_capability_m0: u64,
         required_tokens: u32,
         deadline_budget_ticks: u64,
         hard_timeout_nanoseconds: u64,
     ) -> i32;
-    pub fn tack_audit_push(event_type: u8, context_id: u64, tokens: u32);
-    pub fn tack_audit_read_slot(
+    pub fn stack_audit_push(event_type: u8, context_id: u64, tokens: u32);
+    pub fn stack_audit_read_slot(
         index: u64,
         out_timestamp: *mut u64,
         out_context_id: *mut u64,
         out_tokens: *mut u32,
     ) -> i32;
-    pub fn tack_arena_allocate(size: usize) -> *mut u8;
-    pub fn tack_read_ticks() -> u64;
+    pub fn stack_arena_allocate(size: usize) -> *mut u8;
+    pub fn stack_read_ticks() -> u64;
 }
 
 /// Safe wrapper for host initialization
 pub fn host_initialize_and_seal() -> Result<(), HostError> {
     unsafe {
-        match tack_host_initialize_and_seal() {
+        match stack_host_initialize_and_seal() {
             0 => Ok(()),
             _ => Err(HostError::InitializationFailed),
         }
@@ -40,7 +40,7 @@ pub fn host_initialize_and_seal() -> Result<(), HostError> {
 /// Safe wrapper for setting active capabilities
 pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) {
     unsafe {
-        tack_host_set_capabilities(m0, m1, m2, m3);
+        stack_host_set_capabilities(m0, m1, m2, m3);
     }
 }
 
@@ -53,7 +53,7 @@ pub fn execute_governed_transaction(
     hard_timeout_nanoseconds: u64,
 ) -> Result<(), TransactionError> {
     unsafe {
-        match tack_execute_governed_transaction(
+        match stack_execute_governed_transaction(
             context_id,
             required_capability_m0,
             required_tokens,
@@ -69,7 +69,7 @@ pub fn execute_governed_transaction(
 /// Safe wrapper for audit ring push
 pub fn audit_push(event_type: u8, context_id: u64, tokens: u32) {
     unsafe {
-        tack_audit_push(event_type, context_id, tokens);
+        stack_audit_push(event_type, context_id, tokens);
     }
 }
 
@@ -80,7 +80,7 @@ pub fn audit_read_slot(index: u64) -> Option<AuditRecord> {
         let mut context_id = 0u64;
         let mut tokens = 0u32;
         
-        if tack_audit_read_slot(index, &mut timestamp, &mut context_id, &mut tokens) != 0 {
+        if stack_audit_read_slot(index, &mut timestamp, &mut context_id, &mut tokens) != 0 {
             Some(AuditRecord {
                 timestamp_ticks: timestamp,
                 context_id,
@@ -94,7 +94,7 @@ pub fn audit_read_slot(index: u64) -> Option<AuditRecord> {
 
 /// Read hardware tick counter
 pub fn read_ticks() -> u64 {
-    unsafe { tack_read_ticks() }
+    unsafe { stack_read_ticks() }
 }
 
 #[derive(Debug, Clone, Copy)]

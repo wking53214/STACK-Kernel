@@ -90,6 +90,8 @@ fn metrics_fire_for_every_outcome() {
     assert_eq!(counter(&s, names::REQUESTS_TOTAL, &with("pass")), 1);
     assert_eq!(counter(&s, names::REQUESTS_TOTAL, &with("retry")), 4);
     assert_eq!(counter(&s, names::TOKEN_MISMATCH_TOTAL, &base), 2);
+    // One pass and two mismatches reached the validator; the two sheds did not.
+    assert_eq!(counter(&s, names::VALIDATED_TOTAL, &base), 3);
     let shed = |r: &'static str| [("strategy", "pipeline"), ("reason", r)];
     assert_eq!(counter(&s, names::SHED_TOTAL, &shed("input_too_large")), 1);
     assert_eq!(counter(&s, names::SHED_TOTAL, &shed("malformed")), 1);

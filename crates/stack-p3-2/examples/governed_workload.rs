@@ -9,9 +9,20 @@
 // Output, one JSON object per line: {"trap": <TrapEvent>, "expected_load": bool, "kernel_made": bool},
 // then {"summary": {...}}.
 //
+// Validation canary (the governance side's TrapBridge.canary_plan): with --canary-share S and
+// --canary-ns D0, every round(1/S)th task by sequence number runs on deadline D0 (the original) instead
+// of the governed one, its trap events carry "canary": true, and the summary reports canary_tasks and
+// canary_deadline_traps. The governance side compares the two groups to judge the tightening.
+//
+// With --canary-key K the canary tasks are chosen by a keyed hash (64-bit FNV-1a over the UTF-8 bytes
+// of "K|agent|seq", a multiple of round(1/S)) instead of by sequence number, so an agent that knows
+// the rule cannot complete exactly the canaries and hang the rest (T16 in the governance threat model).
+// The Python model uses the same hash.
+//
 // usage: governed_workload --agent NAME --round N --tasks N --default-ns N
 //          ( --profile healthy|runaway|slowed|regressed --seed N | --csv FILE )
 //          [--tokens-cap N --memory-cap N] [--ttl-s N] ( --port P [--token T] | --static )
+//          [--canary-share S --canary-ns D0 [--canary-key K]]
 
 use stack_p3_2::governed_limits::HttpSource;
 use stack_p3_2::{ContextLocal, GovernedLimits, HardPreemptionKernel, LimitKind, P32Config, TrapEvent};
@@ -32,7 +43,25 @@ impl Rng {
     }
 }
 
+/// 64-bit FNV-1a; must match `fnv1a64` in experimental/experiments/stack_trace_sim.py.
+fn fnv1a64(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in data {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+fn is_canary_task(agent: &str, seq: u64, every: u64, key: Option<&str>) -> bool {
+    match key {
+        None => seq % every == 0,
+        Some(k) => fnv1a64(format!("{k}|{agent}|{seq}").as_bytes()) % every == 0,
+    }
+}
+
 struct Task {
+    seq: u64,
     dur_ns: u64,
     tokens: u64,
     memory: u64,
@@ -60,6 +89,7 @@ fn csv_tasks(path: &str, agent: &str, lo: u64, hi: u64) -> Vec<Task> {
             continue;
         }
         out.push(Task {
+            seq,
             dur_ns: f[cd].parse().expect("bad duration"),
             tokens: f[ct].parse().expect("bad tokens"),
             memory: f[cm].parse().expect("bad memory"),
@@ -82,10 +112,10 @@ fn generated_tasks(profile: &str, agent: &str, round: u64, n: u64, seed: u64) ->
         "regressed" => (if round < 20 { 20.0 } else { 60.0 }, 0.0),
         other => panic!("unknown profile {other}"),
     };
-    (0..n).map(|_| {
+    (0..n).map(|i| {
         let bad = rng.next() < runaway_p;
         let dur_ns = if bad { 500_000_000 } else { (median_ms * (0.5 * rng.normal()).exp() * 1e6) as u64 };
-        Task { dur_ns, tokens: 800, memory: 100 << 20, expected: false, bad }
+        Task { seq: round * n + i, dur_ns, tokens: 800, memory: 100 << 20, expected: false, bad }
     }).collect()
 }
 
@@ -115,6 +145,16 @@ fn main() {
     let round = num("round", 0);
     let (default_ns, tokens_cap, memory_cap) = (num("default-ns", 100_000_000), num("tokens-cap", 4000), num("memory-cap", 512 << 20));
     let ttl = Duration::from_secs(num("ttl-s", 0));
+    let canary_every: u64 = match m.get("canary-share").map(|v| v.parse::<f64>().expect("bad --canary-share")) {
+        Some(s) if s > 0.0 && s <= 1.0 => (1.0 / s).round().max(1.0) as u64,
+        Some(_) => panic!("--canary-share must be in (0, 1]"),
+        None => 0,
+    };
+    let canary_ns = num("canary-ns", 0);
+    if (canary_every > 0) != (canary_ns > 0) { panic!("--canary-share and --canary-ns go together"); }
+    let canary_key = m.get("canary-key").cloned();
+    debug_assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
+    debug_assert_eq!(fnv1a64(b"k-7f3a|agent-1|42"), 0xca8a5faaefe020a3);   // Python reference
 
     let tasks = match m.get("csv") {
         Some(path) => csv_tasks(path, &agent, round * n, (round + 1) * n),
@@ -138,15 +178,21 @@ fn main() {
 
     let (mut legit, mut legit_failed, mut bad, mut bad_caught, mut expected_trapped) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut deadline_traps, mut token_traps, mut memory_traps) = (0u64, 0u64, 0u64);
+    let (mut canary_tasks, mut canary_deadline_traps) = (0u64, 0u64);
     let (mut total_ns, mut bad_ns) = (0u128, 0u128);
     let (mut budget_last, mut tokens_last, mut memory_last) = (default_ns, tokens_cap, memory_cap);
     let mut completed: Vec<u64> = Vec::new();
     let digest = [0u8; 32];
     for t in &tasks {
-        let budget = eff(LimitKind::DeadlineNs, default_ns);
+        let governed = eff(LimitKind::DeadlineNs, default_ns);
         let tok_budget = eff(LimitKind::TokensCapacity, tokens_cap);
         let mem_budget = eff(LimitKind::MemoryCapacityBytes, memory_cap);
-        (budget_last, tokens_last, memory_last) = (budget, tok_budget, mem_budget);
+        (budget_last, tokens_last, memory_last) = (governed, tok_budget, mem_budget);
+        // The canary runs on the original deadline only while the governed one is tighter.
+        let is_canary = canary_every > 0 && governed < canary_ns
+            && is_canary_task(&agent, t.seq, canary_every, canary_key.as_deref());
+        let budget = if is_canary { canary_ns } else { governed };
+        if is_canary { canary_tasks += 1; }
         let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
         let deadline_abs = now_ns + budget;
         let tx = kernel.begin_transaction(agent.clone(), digest, deadline_abs).unwrap();
@@ -155,8 +201,9 @@ fn main() {
         if t.dur_ns > budget {
             trapped = true;
             deadline_traps += 1;
+            if is_canary { canary_deadline_traps += 1; }
             if let Err(trap) = kernel.check_preemption_boundary(tx, &ctx, true) {
-                println!("{}", serde_json::json!({ "trap": trap, "expected_load": t.expected, "kernel_made": true }));
+                println!("{}", serde_json::json!({ "trap": trap, "expected_load": t.expected, "kernel_made": true, "canary": is_canary }));
                 // keep a kernel-made trap around as the template for the synthetic ones
                 let _ = &trap;
             }
@@ -171,7 +218,7 @@ fn main() {
                 memory_traps += 1;
                 synthetic_trap(&template, "memory_exceeded", None, Some(t.memory))
             };
-            println!("{}", serde_json::json!({ "trap": trap, "expected_load": t.expected, "kernel_made": false }));
+            println!("{}", serde_json::json!({ "trap": trap, "expected_load": t.expected, "kernel_made": false, "canary": is_canary }));
         }
         if !trapped { completed.push(t.dur_ns); }
         let cost = t.dur_ns.min(budget) as u128;
@@ -194,6 +241,7 @@ fn main() {
         "agent": agent, "round": round, "tasks": tasks.len(), "legit": legit, "legit_failed": legit_failed,
         "expected_trapped": expected_trapped, "bad": bad, "bad_caught": bad_caught,
         "deadline_traps": deadline_traps, "token_traps": token_traps, "memory_traps": memory_traps,
+        "canary_tasks": canary_tasks, "canary_deadline_traps": canary_deadline_traps,
         "completed_median_ns": completed_median, "completed_q": q, "total_ns": total_ns.to_string(), "bad_ns": bad_ns.to_string(),
         "budget_last_ns": budget_last, "tokens_last": tokens_last, "memory_last": memory_last } }));
 }

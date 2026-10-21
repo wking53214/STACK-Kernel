@@ -1,10 +1,10 @@
 ## ANC strategy 1: deterministic ceiling padding
 
-Ceiling padding showed no detectable leak in 9 of 9 release runs at about 100,000 per class (worst max |t| 2.93; leak line 4.5).
+Ceiling padding showed no detectable leak in 9 of 9 release runs at about 100,000 per class (worst max |t| 2.92; leak line 4.5).
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `tack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 A pass here means no detectable leak at that sample size, on one 4-vCPU (virtual CPU) machine. It is never a proof. The same runs, plus a red-team pass, also show where the brief's design had to change.
 
@@ -24,13 +24,13 @@ The idea of the fix is a train that leaves on the timetable, not when the last p
 4. Read the clock again. Compute the bucket k: the smallest whole number for which k times the ceiling reaches the completion time. On time is k = 1.
 5. Wait until `start + k * ceiling`, then return the reply. The pad never releases early.
 
-**Three ways to wait.** Figures come from the three release runs at a 300 microsecond (us) ceiling. "Late" is release time minus target, measured idle, and p50 is the median; p99 is the time 99 percent of replies beat.
+**Three ways to wait.** Figures come from the three release runs at a 300 microsecond (µs) ceiling. "Late" is release time minus target, measured idle, and p50 is the median; p99 is the time 99 percent of replies beat.
 
 | Wait mode | How it waits | CPU per request | Late at p50, idle | Weak point |
 |---|---|---|---|---|
-| Sleep | Asks the operating system to wake the thread at the target | 28 to 30 us | 97 to 126 us | The scheduler sets the wake-up time, and cache state left by the work can nudge it |
-| Spin | Busy-waits: loops reading the clock instead of giving up the CPU | 306 to 308 us | 0.11 to 0.13 us | Burns a core for the whole wait; paused by the scheduler when CPUs are oversubscribed |
-| Hybrid | Sleeps until the target minus a short tail, then spins the tail (150 us here) | 100 to 104 us | 0.12 to 0.15 us | Late whenever the sleep overshoots the tail |
+| Sleep | Asks the operating system to wake the thread at the target | 28 to 30 µs | 97 to 126 µs | The scheduler sets the wake-up time, and cache state left by the work can nudge it |
+| Spin | Busy-waits: loops reading the clock instead of giving up the CPU | 306 to 308 µs | 0.11 to 0.13 µs | Burns a core for the whole wait; paused by the scheduler when CPUs are oversubscribed |
+| Hybrid | Sleeps until the target minus a short tail, then spins the tail (150 µs here) | 100 to 104 µs | 0.12 to 0.15 µs | Late whenever the sleep overshoots the tail |
 
 **Overruns.** An overrun is work that ends after the ceiling. The hard ceiling is the ceiling times `hard_ceiling_buckets`, default 4.
 
@@ -57,7 +57,7 @@ pub fn release_bucket(elapsed: Duration, ceiling: Duration) -> u64 {
 
 | Trip | When | CNS outcome | Resolution | Why |
 |---|---|---|---|---|
-| `SlotsFull` | All `max_concurrent` slots are held | RETRY | reject | Load, not a fault. It is refused before any secret work and returned at once, so the fast reply reflects load only. |
+| `SlotsFull` | All `max_concurrent` slots are held, or `4 x max_concurrent` requests are still inside the pad | RETRY | reject | Load, not a fault. It is refused before any secret work and returned at once, so the fast reply reflects load only. |
 | `InputTooLarge` | Input longer than `max_input_len` | RETRY | reject | The sender already knows the length. A shorter input can pass. |
 | `Overrun` | Work ended past the hard ceiling | RETRY | reject | The late value is discarded, so nothing changed. The reply leaves on the retry window, never at the completion time. |
 | `ClockFailure` | The clock went backwards, stopped, or overflowed | TERMINAL_BREACH | halt | Padding means nothing without a trustworthy clock. The pad refuses all work until an operator calls `reset()`. |
@@ -76,14 +76,14 @@ Quarantine and rollback are not used, because the pad keeps no per-sender state 
 2. **The fix released the RETRY later than the analysis asked.** The ANC analysis wants an overrun RETRY to leave at the ceiling. A blocking worker cannot be stopped mid-task, so the code drops the value and releases at 64 ceilings by default.
 3. **The flood rules bound CPU, not service.** At 4 to 10 times the admission capacity, a legitimate client finished as few as 1 of 45 requests. Across all 9 flood runs, it succeeded on the first try once.
 
-The brief's claim that every response leaves at the same offset held at the median: Spin and Hybrid class medians sat within 4 ns. At p99.9, the time 99.9 percent of replies beat, replies took 0.93 to 2.03 ms against a 300 us ceiling. Scheduler stalls caused that tail, and they hit both classes alike.
+The brief's claim that every response leaves at the same offset held at the median: Spin and Hybrid class medians sat within 4 ns. At p99.9, the time 99.9 percent of replies beat, replies took 0.93 to 2.03 ms against a 300 µs ceiling. Scheduler stalls caused that tail, and they hit both classes alike.
 
 | Approach | Pros | Cons |
 |---|---|---|
-| Ceiling padding as a whole | Release time does not depend on how long the work took. There is no adaptive target, so no bits leak through target changes. It wraps code that cannot be made constant time. | Every reply pays the full ceiling: the median went from 40 to 65 ns of work to about 301 us. Work past the ceiling leaks. There is no default ceiling, so each operation needs its own measured one. |
-| Sleep | Uses almost no CPU: 28 to 30 us per request. Under flood it cost 0.011 to 0.042 cores inside the pad. | 97 to 126 us late at p50, so the median reply took 398 to 407 us. Class medians differed by 154 to 274 ns, which no test flagged. |
-| Spin | Most precise when idle: 0.11 to 0.13 us late at p50. | Burns the whole wait: 306 to 308 us of CPU per request. Without a budget a flood takes about one core per slot. Late by 1.1 ms at p99 under an unpinned flood. |
-| Hybrid (recommended) | Spin-grade precision at a third of the CPU: 0.12 to 0.15 us late at p50 for 100 to 104 us of CPU. The budget held flood CPU to 0.15 to 0.18 cores inside the pad. | Late when the sleep overshoots the tail. A flood can drain the budget and force Sleep: 2,397 of 5,457 replies fell back in the unpinned run. |
+| Ceiling padding as a whole | Release time does not depend on how long the work took. There is no adaptive target, so no bits leak through target changes. It wraps code that cannot be made constant time. | Every reply pays the full ceiling: the median went from 40 to 65 ns of work to about 301 µs. Work past the ceiling leaks. There is no default ceiling, so each operation needs its own measured one. |
+| Sleep | Uses almost no CPU: 28 to 30 µs per request. Under flood it cost 0.011 to 0.042 cores inside the pad. | 97 to 126 µs late at p50, so the median reply took 398 to 407 µs. Class medians differed by 154 to 274 ns, which no test flagged. |
+| Spin | Most precise when idle: 0.11 to 0.13 µs late at p50. | Burns the whole wait: 306 to 308 µs of CPU per request. Without a budget a flood takes about one core per slot. Late by 1.1 ms at p99 under an unpinned flood. |
+| Hybrid (recommended) | Spin-grade precision at a third of the CPU: 0.12 to 0.15 µs late at p50 for 100 to 104 µs of CPU. The budget held flood CPU to 0.15 to 0.18 cores inside the pad. | Late when the sleep overshoots the tail. A flood can drain the budget and force Sleep: 2,397 of 5,457 replies fell back in the unpinned run. |
 
 ### Recommended Rust pattern
 
@@ -130,13 +130,13 @@ The order of events inside the pad is the reusable pattern. Read the clock befor
 
 Three lines carry the red-team fixes. `drop(value)` runs before the wait, so a slow destructor is absorbed by the padding instead of added after it. `retry_target` rounds up to the retry window, and `retry_wait` never spins longer than the charge reserved at admission.
 
-`conclude` reads the release time first; only then does the slot go free and telemetry run. The async API, `pad_async`, serves code built on tokio, Rust's common async runtime, and follows the same order. It also cancels the work at the hard ceiling, and treats work that finished late before the timer fired as the same hard overrun.
+`conclude` reads the release time first; only then does telemetry run. The slot does not free here: it frees on its own clock, one hard ceiling after admission (see the slot-hold finding below). The async API, `pad_async`, serves code built on tokio, Rust's common async runtime, and follows the same order. It also cancels the work at the hard ceiling, and treats work that finished late before the timer fired as the same hard overrun.
 
 | Field | Default | Accepted range | Recommendation |
 |---|---|---|---|
-| `ceiling` | None; required | 1 us to 10 s | Above the worst-case work time, measured on the target host |
+| `ceiling` | None; required | 1 µs to 10 s | Above the worst-case work time, measured on the target host |
 | `mode` | Hybrid | Sleep, Spin, Hybrid | Hybrid |
-| `spin_tail` | 250 us | 0 to 10 s | Cover the host's blocking sleep lateness at p99 |
+| `spin_tail` | 250 µs | 0 to 10 s | Cover the host's blocking sleep lateness at p99 |
 | `async_spin_tail` | 2.5 ms | 0 to 10 s | Longer than tokio's 1 ms timer tick |
 | `spin_budget` | 250 ms of spin per second, 50 ms burst | Each up to 64 s; burst at least one request's charge | Keep it limited; `Unlimited` is for experiments only |
 | `max_concurrent` | 64 | 1 to 65,536 | At or below the CPU count when using Spin |
@@ -181,7 +181,7 @@ Admission checks run in a fixed order, all on public facts, before the operation
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire().ok_or(Trip::SlotsFull)?;
+        let permit = self.slots.try_acquire(start).ok_or(Trip::SlotsFull)?;
         let charge = if async_api {
             self.config.async_spin_charge()
         } else {
@@ -208,32 +208,35 @@ Offered load was 4.0 to 4.5 times admission capacity when pinned and 9.2 to 10.3
 | Flood configuration | Served / shed | Spin reserved vs budget bound | Legitimate requests completed |
 |---|---|---|---|
 | Spin, no budget | 2,920 / 9,908; 2,974 / 10,484; 5,647 / 49,814 | No bound | 9 of 51; 15 of 54; 38 of 60 |
-| Hybrid, budget 250 ms/s plus 25 ms burst, tail 250 us | 2,919 / 9,036; 2,978 / 10,196; 5,457 / 56,744 | 0.730, 0.745 and 0.765 s vs 0.777 s | 8 of 46; 3 of 48; 67 of 82 |
+| Hybrid, budget 250 ms/s plus 25 ms burst, tail 250 µs | 2,919 / 9,036; 2,978 / 10,196; 5,457 / 56,744 | 0.730, 0.745 and 0.765 s vs 0.777 s | 8 of 46; 3 of 48; 67 of 82 |
 | Sleep | 2,698 / 9,617; 2,724 / 10,067; 5,110 / 55,844 | None reserved | 1 of 45; 2 of 47; 50 of 71 |
 
 Reserved spin stayed under the bound, which is the rate times wall time plus the burst. In the pinned runs the single slot already limited spin to the budget rate, so no request fell back. Only the unpinned run made the budget act.
 
 The cap is first come, first served. A flood thread that was just served resubmits at once and usually wins the free slot, so the legitimate client is starved. Per-sender quotas or quarantine must come from an upstream component, and which component owns that is an open decision.
 
-Every metric carries a closed `strategy="ceiling"` label, and every other label comes from a closed enum. These rules are from the crate docs and the build record; the spin threshold uses the default budget, summed over pads:
+Every metric carries a closed `strategy` label (`ceiling` for the standard lane and plain pads, `ceiling_fast` for the fast gate), and every other label comes from a closed enum. Two gauges and counters describe slot scaling: `stack_anc_slots_open{strategy}` (slots open now) and `stack_anc_spilled_total{strategy}` (arrivals sent to the spillway). These rules are from the crate docs and the build record; the spin threshold uses the default budget, summed over pads:
 
 ```yaml
 groups:
-  - name: tack-anc-ceiling
+  - name: stack-anc-ceiling
     rules:
-      - alert: TackAncCeilingShedSustained
-        expr: sum(rate(tack_anc_shed_total{strategy="ceiling",reason="slots_full"}[1m])) > 0
+      - alert: StackAncCeilingShedSustained
+        expr: sum(rate(stack_anc_shed_total{strategy="ceiling",reason="slots_full"}[1m])) > 0
         for: 5m
         labels: {severity: warning}
-      - alert: TackAncCeilingSpinOverBudget
-        expr: sum(rate(tack_anc_spin_reserved_nanoseconds_total{strategy="ceiling"}[5m])) / 1e9 > 0.25 + 0.05 / 300
+      - alert: StackAncCeilingSpinOverBudget
+        expr: sum(rate(stack_anc_spin_reserved_nanoseconds_total{strategy="ceiling"}[5m])) / 1e9 > 0.25 + 0.05 / 300
         for: 10m
         labels: {severity: warning}
-      - alert: TackAncCeilingOverrun
-        expr: increase(tack_anc_overrun_total{strategy="ceiling"}[15m]) > 0
+      - alert: StackAncCeilingOverrun
+        expr: increase(stack_anc_overrun_total{strategy="ceiling"}[15m]) > 0
         labels: {severity: warning}
-      - alert: TackAncCeilingHalted
-        expr: max(tack_anc_halted{strategy="ceiling"}) > 0
+      - alert: StackAncCeilingFastOverrun
+        expr: increase(stack_anc_overrun_total{strategy="ceiling_fast"}[5m]) > 0
+        labels: {severity: critical}
+      - alert: StackAncCeilingHalted
+        expr: max(stack_anc_halted{strategy="ceiling"}) > 0
         labels: {severity: critical}
 ```
 
@@ -249,7 +252,7 @@ A Kolmogorov-Smirnov (KS) test, which compares the whole shape of two distributi
 
 | Layer | Runs in CI | Build | n per class | What it checks |
 |---|---|---|---|---|
-| `tests/leak.rs` | Yes, in `cargo test --all-targets` | Debug | 20,000 | Calibration, then Spin at a 50 us ceiling; about 2.4 s |
+| `tests/leak.rs` | Yes, in `cargo test --all-targets` | Debug | 20,000 | Calibration, then Spin at a 50 µs ceiling; about 2.4 s |
 | `tests/behaviour.rs`, `tests/redteam.rs`, `tests/telemetry.rs` | Yes | Debug | Not statistical | Never early, overrun rounding, drop cost absorbed, budget fallback, shedding, metrics firing under a test recorder |
 | `examples/verify.rs` | No; CI only compiles it | Release | 100,000 | The reported numbers below; about 4 minutes per run |
 
@@ -269,7 +272,7 @@ The CI guard's assertions follow, from `tests/leak.rs`; crops are held to the lo
     assert!(padded.a.median.unwrap() >= 50_000.0);
 ```
 
-**Measured results on this machine.** One 4-vCPU virtual machine, CPU model string "Intel(R) Xeon(R) Processor @ 2.10GHz", load average 0.1 to 0.9. All runs used the verify defaults: 300 us ceiling, 150 us Hybrid tail and seed 0x7ac4ce11, with no spin budget in the leak runs.
+**Measured results on this machine.** One 4-vCPU virtual machine, CPU model string "Intel(R) Xeon(R) Processor @ 2.10GHz", load average 0.1 to 0.9. All runs used the verify defaults: 300 µs ceiling, 150 µs Hybrid tail and seed 0x7ac4ce11, with no spin budget in the leak runs.
 
 Runs 1 and 2 were pinned to one CPU with `taskset`; run 3 was an unpinned extra run on 4 CPUs. Each cell lists runs 1, 2 and 3. CPU under flood is thread CPU inside pad calls, with whole-process CPU in brackets.
 
@@ -279,7 +282,7 @@ Runs 1 and 2 were pinned to one CPU with `taskset`; run 3 was an unpinned extra 
 | Unpadded `ct_validate` (control) | 100,084 A, 99,916 B | 1.65, 1.24, 1.54 | No, 0 of 3 | Not run: no pad |
 | Padded, Sleep | 100,084 A, 99,916 B | 1.42, 2.73, 2.70 | No, 0 of 3 | 0.013, 0.011, 0.042 cores (0.106, 0.095, 0.49) |
 | Padded, Spin (flood with no budget) | 100,084 A, 99,916 B | 1.23, 1.86, 1.37 | No, 0 of 3 | 0.92, 0.92, 1.74 cores (0.995, 0.994, 2.15) |
-| Padded, Hybrid (flood with budget) | 100,084 A, 99,916 B | 1.30, 2.36, 2.93 | No, 0 of 3 | 0.15, 0.18, 0.18 cores (0.245, 0.248, 0.63) |
+| Padded, Hybrid (flood with budget) | 100,084 A, 99,916 B | 1.30, 2.36, 2.92 | No, 0 of 3 | 0.15, 0.18, 0.18 cores (0.245, 0.248, 0.63) |
 
 Across the 9 padded runs, second-order |t| was at most 1.26, and KS p was 0.044 or higher. The calibration leak came from the 50th-percentile crop each time; the uncropped |t| alone ranged from 1.5 to 16.8.
 
@@ -287,7 +290,7 @@ Overruns were rare: 9 released late and 3 RETRYs in 1.8 million padded requests.
 
 **Red team and test status.** A red-team pass wrote 17 attack tests against the first build: 9 broke it, 1 partly broke it, and 7 held. The fixes made all 9 pass, though rt04 is now flaky.
 
-One pre-existing async test had its upper bound raised from 50 ms to 300 ms for the new retry window. My final re-run of `cargo test -p tack-anc-ceiling --all-targets` ended with this summary line:
+One pre-existing async test had its upper bound raised from 50 ms to 300 ms for the new retry window. The final re-run for this manual of `cargo test -p stack-anc-ceiling --all-targets` ended with this summary line:
 
 ```text
 test result: FAILED. 15 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s
@@ -301,11 +304,13 @@ The 10 unit tests, the leak guard and both telemetry tests passed every time the
 
 ### What this does not guarantee
 
-- **It is not a proof.** A pass means no detectable leak at about 100,000 per class on one virtual machine. The smallest mean shift these runs could flag was 1.9 to 4.7 us, about 80 to 210 times the 22 to 24 ns gap.
+- **It is not a proof.** A pass means no detectable leak at about 100,000 per class on one virtual machine. The smallest mean shift these runs could flag was 1.9 to 4.7 µs, about 80 to 210 times the 22 to 24 ns gap.
 - **The stronger evidence is the design.** The release time is computed from `start` alone, and Spin and Hybrid class medians matched within 4 ns. Those two facts, not the t-test alone, carry the claim.
 - **Sleep mode has an unexplained gap.** Its class medians differed by 154 to 274 ns, with class A later in all 3 runs. No test flagged it, and 3 runs cannot separate it from chance, so measure Sleep at a larger n before relying on it.
 - **Work past the ceiling leaks.** Each overrun can reveal up to log2(H + 1) bits, where H is `hard_ceiling_buckets`, while work plus drop ends inside W. In the blocking API, each further W of work time t adds one more release time: log2(H + ceil(t / W)) bits.
-- **Other clients can see an overrun.** An overrunning request holds its slot longer, so a probe that arrives meanwhile is shed. Red-team test rt10 shows this and still fails; it is documented, not fixed.
+- **Fast lane (opt-in, `LanedPad`).** Two gates, each its own pad with its own slots, spin budget, scaling and spillway. Handlers do not choose a gate per request: each route is wired to one gate at startup (`lanes.standard()` or `lanes.fast()`), so a sender cannot pick a lane. The fast gate is for operations of fixed, known cost that never touch a secret, and gives them a much shorter fixed time. It has no input method, a hard ceiling of exactly one ceiling (an operation that runs long is discarded and answered with a RETRY, never released late), and a ceiling strictly shorter than the standard one. Every fast-lane overrun is counted (`fast_overruns()`, should stay zero) and the first is logged at warn level; a nonzero count means a mislabeled operation. A flood on one lane does not shed the other. Each lane has its own timing test (`the_fast_lane_hides_the_cost_of_cheap_operations`, `the_standard_lane_hides_the_cost_of_cheap_operations`). The pad cannot prove an operation is fixed-cost: choosing what goes on the fast gate is a code-review decision. Strategy 2 (`stack-anc-adaptive`) has no lanes, because its time is chosen by a controller rather than fixed.
+- **Extra slots on backlog and a spillway (opt-in).** Set `scaling.max_slots` above `max_concurrent` and the pad opens `step` more slots after any window of `scaling.reaction_delay` in which an arrival found every open slot held, then closes `step` after `scaling.cooldown_windows` quiet windows in a row, never outside `max_concurrent ..= max_slots`. Set `scaling.spillway_size` above zero and that many arrivals that find every slot held wait exactly `scaling.spillway_wait`, then try once more. Both use only arrival times, never work times: the slots-taken test reads the held times (arrival plus a constant), and a shed caused by the backstop is deliberately not counted as backlog because it depends on when requests returned. A full spillway sheds at once. Both are off by default. Red-team tests `rt20 and rt21` and the slot unit tests show the open-slot count, the spillway wait and the verdict are the same whichever way a victim's secret work went. `slots_open()` reports the current count. Open item: no metric yet exports the open-slot count.
+- **Slot hold time (fixed in this version).** Every admitted request holds its slot for one fixed time, the hard ceiling (`ceiling x hard_ceiling_buckets`), counted from admission, whatever its work time. A probe is shed or served by arrival times alone, so a third party can no longer tell whether a victim overran (red-team test rt10 now passes). The cost is capacity: each slot admits one request per hard ceiling, so throughput is at most `max_concurrent / hard ceiling`. Raise `max_concurrent` to compensate. The hard ceiling is the posted speed limit and is a placeholder until measured work times set it. A backstop of `4 x max_concurrent` requests inside the pad bounds requests stuck past the hold; it leaks only after an attacker has already pushed requests over the limit.
 - **A RETRY is visible as content.** An overrun RETRY reads differently from a value. It is counted, not hidden.
 - **Service under flood is not protected.** The cap bounds CPU but lets the flood starve legitimate clients.
 - **Two paths were never leak-tested.** The t-tests used an unlimited spin budget, so replies served during a budget fallback were not measured. The async API was measured for precision only, and its Sleep mode was 1.17 to 1.18 ms late at p50.

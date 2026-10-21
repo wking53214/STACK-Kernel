@@ -1,4 +1,4 @@
-//! The verdict vocabulary shared across the TACK kernel.
+//! The verdict vocabulary shared across the STACK kernel.
 //!
 //! These enums mirror `GateOutcome` and `GatePosition` in the CNS contracts
 //! package (`cns/gate.py`). They are redeclared here, not imported, because

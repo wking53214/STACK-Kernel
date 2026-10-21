@@ -1,7 +1,7 @@
 //! The closed vocabulary of verdicts. Every string here is a fixed label
 //! value; nothing a caller supplies ever becomes one.
 //!
-//! The outcome words follow the CNS contract in `/home/user/CNS/cns/gate.py`
+//! The outcome words follow the CNS contract in `cns/gate.py` in the CNS repository
 //! (`GateOutcome`: PASS, RETRY, TERMINAL_BREACH). This crate mirrors the
 //! vocabulary rather than depending on the Python package.
 

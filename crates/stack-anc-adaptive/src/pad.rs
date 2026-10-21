@@ -32,7 +32,7 @@ use crate::controller::{ControllerKind, ControllerStatus, Plan, TargetController
 use crate::outcome::{
     ControllerTrip, Disposition, GateOutcome, PadResult, Padded, ReleaseInfo, Trip,
 };
-use crate::slots::{Permit, Slots};
+use crate::slots::{Permit, Slots, Step};
 use crate::telemetry::{self, Event, OverrunKind};
 use crate::wait::{self, ClockFault};
 use std::any::Any;
@@ -74,7 +74,16 @@ impl AdaptivePad<NaiveRollingTarget, MonotonicClock> {
     /// completion, so its response time is its raw, secret-dependent work
     /// time. Never select it in a deployment profile; use
     /// [`AdaptivePad::epoch`].
+    ///
+    /// Refused unless `pad.allow_naive_controller` is set, so a deployment
+    /// cannot pick it by accident.
     pub fn naive(pad: PadConfig, naive: NaiveConfig) -> Result<Self, ConfigError> {
+        if !pad.allow_naive_controller {
+            return Err(ConfigError {
+                field: "allow_naive_controller",
+                reason: "the naive controller leaks the raw work time; set allow_naive_controller only to measure it",
+            });
+        }
         Self::with_parts(pad, NaiveRollingTarget::new(naive)?, MonotonicClock)
     }
 }
@@ -121,7 +130,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         let kind = controller.kind();
         telemetry::emit_status(&status);
         Ok(Self {
-            slots: Slots::new(config.max_concurrent),
+            slots: Slots::new(config.max_concurrent, status.cap, &config.scaling, now),
             budget: SpinBudget::new(config.spin_budget, now),
             controller: Mutex::new(controller),
             kind,
@@ -141,9 +150,17 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         self.kind
     }
 
-    /// Requests currently holding a concurrency slot.
+    /// Requests admitted and not yet returned. A finished request frees its
+    /// concurrency slot only when its fixed hold time (the controller cap)
+    /// is over, so this is not the number of busy slots.
     pub fn in_flight(&self) -> usize {
         self.slots.in_use()
+    }
+
+    /// Concurrency slots open right now: `max_concurrent` up to
+    /// `scaling.max_slots`, moved only by public arrival counts.
+    pub fn slots_open(&self) -> usize {
+        self.slots.open()
     }
 
     /// True after a clock failure, until [`AdaptivePad::reset`].
@@ -170,7 +187,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
     /// Operator reset after a halt: the pad accepts work again. Counted in
     /// `stack_anc_resets_total{scope="pad"}`; sets `stack_anc_halted` to 0.
     pub fn reset(&self) {
-        let _span = tracing::info_span!("tack.anc.adaptive_reset", controller = self.kind.label())
+        let _span = tracing::info_span!("stack.anc.adaptive_reset", controller = self.kind.label())
             .entered();
         let was = self.halted.swap(false, Ordering::AcqRel);
         telemetry::emit_reset(self.kind, "pad");
@@ -183,7 +200,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
     /// `stack_anc_resets_total{scope="controller"}`.
     pub fn reset_controller(&self) {
         let _span = tracing::info_span!(
-            "tack.anc.adaptive_controller_reset",
+            "stack.anc.adaptive_controller_reset",
             controller = self.kind.label()
         )
         .entered();
@@ -243,35 +260,73 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         self.controller.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn admit(&self, start: Instant, input_len: Option<usize>) -> Result<Admitted<'_>, Trip> {
+    /// `Ok(None)` means every slot is held but the spillway has room: wait
+    /// `spillway_wait` and call again with `after_spill`.
+    fn admit(
+        &self,
+        start: Instant,
+        input_len: Option<usize>,
+        after_spill: bool,
+    ) -> Result<Option<Admitted<'_>>, Trip> {
         if self.is_halted() {
             return Err(Trip::Halted);
         }
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire().ok_or(Trip::SlotsFull)?;
+        let permit = if after_spill {
+            self.slots.retry(start).ok_or(Trip::SlotsFull)?
+        } else {
+            match self.slots.enter(start) {
+                Step::In(p) => p,
+                Step::Spill => return Ok(None),
+                Step::Shed => return Err(Trip::SlotsFull),
+            }
+        };
         let charge = self.config.spin_charge();
         let (mode, reserved, fallback) = if self.budget.try_reserve(charge, start) {
             (self.config.mode, charge, false)
         } else {
             (WaitMode::Sleep, Duration::ZERO, true)
         };
-        Ok(Admitted {
+        Ok(Some(Admitted {
             _permit: permit,
             mode,
             reserved,
             fallback,
-        })
+        }))
+    }
+
+    /// Admit, waiting in the spillway first if need be. Returns the
+    /// admission, the instant the padded window starts from, and whether the
+    /// request waited in the spillway. On refusal, also says whether it had.
+    fn admit_blocking(
+        &self,
+        first: Instant,
+        input_len: Option<usize>,
+    ) -> Result<(Admitted<'_>, Instant, bool), (Trip, bool)> {
+        if let Some(a) = self
+            .admit(first, input_len, false)
+            .map_err(|t| (t, false))?
+        {
+            return Ok((a, first, false));
+        }
+        std::thread::sleep(self.slots.spill_wait());
+        let start = self.clock.now();
+        match self.admit(start, input_len, true) {
+            Ok(Some(a)) => Ok((a, start, true)),
+            Ok(None) => Err((Trip::SlotsFull, true)),
+            Err(t) => Err((t, true)),
+        }
     }
 
     fn run<T>(&self, input_len: Option<usize>, op: impl FnOnce() -> T) -> (PadResult<T>, Event) {
-        let start = self.clock.now();
-        let adm = match self.admit(start, input_len) {
+        let first = self.clock.now();
+        let (adm, start, spilled) = match self.admit_blocking(first, input_len) {
             Ok(a) => a,
-            Err(trip) => {
-                let observed = self.clock.now().saturating_duration_since(start);
-                return (Err(trip), Event::early(self.kind, trip, observed));
+            Err((trip, spilled)) => {
+                let observed = self.clock.now().saturating_duration_since(first);
+                return (Err(trip), Event::early(self.kind, trip, observed, spilled));
             }
         };
         let (snap, admit_changes) = self.lock().admit(start);
@@ -289,9 +344,10 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
             observed: Duration::ZERO,
             changes: admit_changes,
             status: None,
+            spilled,
         };
         let Some(work) = completion.checked_duration_since(start) else {
-            return self.clock_failure(start, ev);
+            return self.clock_failure(first, ev);
         };
         // In Hybrid mode the request needs `spin_tail` of spin after it
         // finishes, so it is planned and recorded as `work + spin_tail`.
@@ -318,10 +374,13 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
             .ok_or(ClockFault)
             .and_then(|target| wait::wait(&self.clock, target, adm.mode, self.config.spin_tail));
         if waited.is_err() {
-            return self.clock_failure(start, ev);
+            return self.clock_failure(first, ev);
         }
-        let observed = self.clock.now().saturating_duration_since(start);
-        ev.observed = observed;
+        // `observed` is the padded window (what `ReleaseInfo` reports); the
+        // metric adds any spillway wait, which the client also sees.
+        let released = self.clock.now();
+        let observed = released.saturating_duration_since(start);
+        ev.observed = released.saturating_duration_since(first);
         let release = |disposition| ReleaseInfo {
             target: snap.target,
             release: plan.release(),
@@ -387,6 +446,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
         input: Option<&[u8]>,
     ) {
         telemetry::emit(ev);
+        telemetry::emit_slots_open(ev.kind, self.slots.open());
         span.record("outcome", ev.outcome.as_str());
         span.record("trip", ev.trip.map_or("none", Trip::label));
         if let Ok(p) = result {
@@ -425,7 +485,7 @@ impl<K: TargetController, C: Clock> AdaptivePad<K, C> {
             }
             Some(Trip::OperationPanicked) => {
                 tracing::error!(
-                    "operation panicked inside the adaptive pad: released on schedule, quarantine the input"
+                    "operation panicked inside the adaptive pad: released on schedule, reject the request"
                 );
             }
             _ => {}
@@ -451,7 +511,7 @@ fn drop_quietly(payload: Box<dyn Any + Send>) {
 
 fn pad_span(kind: ControllerKind) -> tracing::Span {
     tracing::debug_span!(
-        "tack.anc.adaptive_pad",
+        "stack.anc.adaptive_pad",
         controller = kind.label(),
         outcome = Empty,
         trip = Empty,

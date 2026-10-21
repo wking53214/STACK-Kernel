@@ -266,7 +266,7 @@ fn rt05_frozen_clock_trips_within_small_multiple_of_ceiling() {
 
 /// Every pad writes the same series `stack_anc_halted{strategy="ceiling"}`.
 /// A reset of a healthy pad sets it to 0 while another pad is still
-/// halted, which silences the critical TackAncCeilingHalted alert.
+/// halted, which silences the critical StackAncCeilingHalted alert.
 #[test]
 fn rt06_reset_of_other_pad_does_not_clear_halted_signal() {
     let recorder = DebuggingRecorder::new();
@@ -458,7 +458,7 @@ fn spin_flood() -> FloodResult {
 }
 
 // ---------------------------------------------------------------------
-// rt09: TackAncCeilingSpinOverBudget alert semantics.
+// rt09: StackAncCeilingSpinOverBudget alert semantics.
 // ---------------------------------------------------------------------
 
 /// Claim on the alert: reserved spin per second "is bounded by
@@ -518,20 +518,22 @@ fn rt16_spin_cpu_bounded_by_rate_plus_burst_under_flood() {
 // rt10: secret-dependent overrun changes another client's shed verdict.
 // ---------------------------------------------------------------------
 
-/// Attack class "shedding decisions that depend on a secret". The shed
-/// check itself reads only the slot counter, but an overrun holds its slot
-/// until k * ceiling, so a second observer probing at 1.5 ceilings is shed
-/// or served depending on whether the victim's secret work overran.
+/// Attack class "shedding decisions that depend on a secret". A slot is held
+/// for one fixed time from admission (the hard ceiling), so a second
+/// observer probing at 1.5 ceilings gets the same verdict whether or not the
+/// victim's secret work overran.
 #[test]
 fn rt10_probe_shed_verdict_independent_of_victim_secret() {
     let ceiling = Duration::from_millis(4);
-    let pad = CeilingPad::new(CeilingConfig {
-        max_concurrent: 1,
-        ..cfg(ceiling, WaitMode::Sleep)
-    })
-    .unwrap();
     let mut verdicts = Vec::new();
     for victim_work in [Duration::ZERO, Duration::from_millis(5)] {
+        // A fresh pad per victim: a slot is held for a fixed time after
+        // admission, so a reused pad would still hold the last victim's slot.
+        let pad = CeilingPad::new(CeilingConfig {
+            max_concurrent: 1,
+            ..cfg(ceiling, WaitMode::Sleep)
+        })
+        .unwrap();
         let started = AtomicBool::new(false);
         let probe = std::thread::scope(|s| {
             let v = s.spawn(|| {
@@ -868,7 +870,90 @@ fn rt17_concurrent_hammer_keeps_invariants() {
         h.join().unwrap();
     }
     println!("rt17 max in flight {}", max_seen.load(Ordering::Relaxed));
-    assert!(max_seen.load(Ordering::Relaxed) <= 3);
+    // Slots free on a clock, so a request past its hold can overlap newer
+    // ones; the backstop (4 x max_concurrent) bounds the pile-up.
+    assert!(max_seen.load(Ordering::Relaxed) <= 12);
     assert_eq!(pad.in_flight(), 0);
     assert!(!pad.is_halted());
+}
+
+// ---------------------------------------------------------------------
+// Extra slots on backlog, and the spillway.
+// ---------------------------------------------------------------------
+
+fn scaling_pad() -> CeilingPad {
+    CeilingPad::new(CeilingConfig {
+        max_concurrent: 1,
+        retry_release_factor: 1,
+        scaling: stack_anc_ceiling::SlotScaling {
+            max_slots: 3,
+            step: 1,
+            // Longer than the test, so no slot opens mid-probe.
+            reaction_delay: Duration::from_secs(1),
+            cooldown_windows: 2,
+            spillway_size: 1,
+            spillway_wait: Duration::from_millis(8),
+        },
+        ..cfg(Duration::from_millis(4), WaitMode::Sleep)
+    })
+    .unwrap()
+}
+
+/// Attack class "a secret changes the number of open slots or the spillway
+/// verdict". With the hold at the hard ceiling (16 ms), a probe 2 ms in
+/// waits 8 ms in the spillway and is then shed or served by arrival times
+/// alone: the same whether or not the victim overran. SAFE.
+#[test]
+fn rt20_scaling_and_spillway_independent_of_victim_secret() {
+    let mut seen = Vec::new();
+    for victim_work in [Duration::ZERO, Duration::from_millis(5)] {
+        let pad = scaling_pad();
+        let started = AtomicBool::new(false);
+        let (probe, waited, open) = std::thread::scope(|s| {
+            let v = s.spawn(|| {
+                pad.pad(|| {
+                    started.store(true, Ordering::SeqCst);
+                    std::thread::sleep(victim_work);
+                })
+            });
+            while !started.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+            std::thread::sleep(Duration::from_millis(2));
+            let t = Instant::now();
+            let probe = pad.pad(|| ()).map(|_| ());
+            let waited = t.elapsed();
+            let open = pad.slots_open();
+            let _ = v.join().unwrap();
+            (probe, waited, open)
+        });
+        println!("rt20 victim {victim_work:?}: probe {probe:?} after {waited:?}, {open} open");
+        assert!(
+            waited >= Duration::from_millis(8) && waited < Duration::from_millis(15),
+            "spillway wait {waited:?}"
+        );
+        seen.push((probe, open));
+    }
+    assert_eq!(seen[0], seen[1], "scaling or spillway revealed the victim's work");
+}
+
+/// The async API waits in the spillway on the async timer and gets the same
+/// verdict as the blocking one.
+#[test]
+fn rt21_async_spillway_waits_and_sheds_by_arrival_times() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    rt.block_on(async {
+        let pad = scaling_pad();
+        let victim = pad.pad_async(|| async { tokio::time::sleep(Duration::from_millis(1)).await });
+        let probe = async {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            let t = Instant::now();
+            let r = pad.pad_async(|| async {}).await.map(|_| ());
+            (r, t.elapsed())
+        };
+        let (_v, (r, waited)) = tokio::join!(victim, probe);
+        println!("rt21 probe {r:?} after {waited:?}");
+        assert_eq!(r, Err(Trip::SlotsFull));
+        assert!(waited >= Duration::from_millis(8), "spillway wait {waited:?}");
+    });
 }

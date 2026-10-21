@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * ≡TACK KERNEL LAYER 4: Host Boundary Orchestration and SECCOMP Enforcement
+ * ≡STACK KERNEL LAYER 4: Host Boundary Orchestration and SECCOMP Enforcement
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ORCHESTRATION LAYER: Binding Execution to Governance
@@ -153,6 +153,8 @@ public:
  * NEW: Whitelist-based model. Explicitly allows ONLY these syscalls:
  *   - SYS_read (0): Read from file descriptors
  *   - SYS_write (1): Write to file descriptors
+ *   - SYS_exit (60): Terminate the calling thread. A sealed thread must be
+ *     able to exit; without this, glibc retries the denied call forever.
  *   - SYS_exit_group (231): Terminate execution
  *   - SYS_rt_sigaction (13): Register signal handlers (GOVERNOR_PREEMPT_SIG only)
  *   - SYS_clock_gettime (228): Query clock (for timing/metrics)
@@ -208,21 +210,19 @@ public:
             // [3] Load Syscall Number
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
 
-            // [4-10] Whitelist explicit allowed syscalls (jump-on-match to allow).
-            // SYS_exit (thread exit) must be allowed: without it a sealed thread
-            // cannot finish and retries the denied call forever.
+            // [4-10] Whitelist explicit allowed syscalls (jump-on-match to allow)
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_READ, 10, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_WRITE, 9, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT_GROUP, 8, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT, 7, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_CLOCK_GETTIME, 6, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_FUTEX, 5, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_CLOCK_GETTIME, 7, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_FUTEX, 6, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT, 5, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_RT_SIGACTION, 1, 0),
 
             // [11] Default deny (not in whitelist)
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
 
-            // [12-13] SYS_rt_sigaction special case (check for GOVERNOR_PREEMPT_SIG)
+            // [12] SYS_rt_sigaction special case (check for GOVERNOR_PREEMPT_SIG)
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(GOVERNOR_PREEMPT_SIG), 1, 0),
 

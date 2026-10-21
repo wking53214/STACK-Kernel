@@ -4,7 +4,7 @@ The brief's rolling-average target leaked (max |t| up to 24.7, leak line 4.5); t
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `tack-anc-adaptive`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-adaptive`, is a new design and is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 Max |t| is a test statistic, explained under the verification harness; above 4.5 counts as a detected leak. A pass means no detectable leak at that sample size, on one 4-vCPU virtual machine; it is never a proof. The fix's Sleep mode still failed a stricter test of distribution shape (KS) in every full-size run, while its Hybrid mode passed.
 
@@ -16,7 +16,7 @@ At the production leak budget the fix also spent most of its time at its fixed c
 
 The crate's own picture is a bus timetable. Strategy 1 prints one timetable and never changes it. Strategy 2 rewrites it from recent boarding times, and the danger is that the timetable becomes a record of who boarded.
 
-**The brief's design, kept so it can be measured.** `NaiveRollingTarget` sets the target to the mean, or the 99th percentile (p99), of the last 256 work times plus 10 us (microseconds). The target stays between a floor, the lowest allowed target, and a cap, the hard ceiling. It has three leaks, each shown in `tests/naive.rs`:
+**The brief's design, kept so it can be measured.** `NaiveRollingTarget` sets the target to the mean, or the 99th percentile (p99), of the last 256 work times plus 10 µs (microseconds). The target stays between a floor, the lowest allowed target, and a cap, the hard ceiling. It has three leaks, each shown in `tests/naive.rs`:
 
 1. **Late release.** A request slower than the target leaves when it finishes, so its reply time is its raw, secret-dependent work time.
 2. **Poisoning.** An attacker fills the window with fast requests, pulls the target below the slow path, then probes.
@@ -24,7 +24,7 @@ The crate's own picture is a bus timetable. Strategy 1 prints one timetable and 
 
 **The fix: an epoch-quantized target.** `EpochQuantizedTarget` follows predictive mitigation (Askarov, Zhang and Myers, CCS 2010). The server predicts a release time and changes the prediction only when a reply misses it. Its rules are short:
 
-- The target is always a public level: the floor times a power of two, never above the cap. The verify runs used 64, 128, 256, 512, 1,024 and 2,048 us.
+- The target is always a public level: the floor times a power of two, never above the cap. The verify runs used 64, 128, 256, 512, 1,024 and 2,048 µs.
 - A misprediction is work that runs past the target. The level doubles until it covers the work, and the reply leaves at that level, never at the raw time. This is an escalated release.
 - The level steps down by one only at an epoch boundary, a wall-clock tick fixed at construction. The epoch that ended must have had requests, no misprediction, and work the lower level would also have covered.
 - Work past the cap is a RETRY. The value is dropped and the reply leaves at the next whole multiple of the cap.
@@ -48,7 +48,7 @@ The descent from a public starting level, the warm-up, is not charged; only its 
 3. Take a snapshot of the target from the controller.
 4. Run the operation under `catch_unwind`, so a panic cannot escape the pad.
 5. Plan the release from the snapshot, then record the work time in the controller. Both run inside the padded wait.
-6. Wait until the admission time plus the planned release. Sleep mode sleeps; Hybrid mode sleeps, then busy-waits (spins) the last 250 us by default, for precision.
+6. Wait until the admission time plus the planned release. Sleep mode sleeps; Hybrid mode sleeps, then busy-waits (spins) the last 250 µs by default, for precision.
 7. Only then free the slot, emit metrics and logs, and return.
 
 **Trips and resolutions.** Each trip maps to the CNS GateOutcome vocabulary (PASS, RETRY, TERMINAL_BREACH) and to one state resolution. RETRY means the caller may resubmit; TERMINAL_BREACH means no correction repairs it.
@@ -58,42 +58,44 @@ The descent from a public starting level, the warm-up, is not charged; only its 
 | `SlotsFull` | RETRY | reject | Load, not the secret. Shed at admission, before any secret work. |
 | `InputTooLarge` | RETRY | reject | Length is public and checked first. The digest is not computed, so the sender cannot choose the logging cost. |
 | `Overrun`, work past the cap | RETRY | reject | The value is dropped. The reply leaves on the cap grid, and its multiple is charged to the budget. |
-| `OperationPanicked` | TERMINAL_BREACH | quarantine | Caught, released on schedule and counted. A halt would let one request stop the pad for everyone. |
+| `OperationPanicked` | TERMINAL_BREACH | reject | Caught, released on schedule and counted; nothing is stored or isolated. A halt would let one request stop the pad for everyone. |
 | `ClockFailure` | TERMINAL_BREACH | halt | Padding cannot be trusted without a monotonic clock. |
 | `Halted` | TERMINAL_BREACH | halt | Every request after a clock failure, until an operator calls `reset()`. |
 | `LeakBudgetSpent`, controller | RETRY | rollback | The target returns to the cap for the rest of the window. Waiting repairs it, and requests are still served. |
 | `LeakLifetimeSpent`, controller | TERMINAL_BREACH | rollback | The target stays at the cap until `reset_controller()`. Requests are still served. |
 
-An escalated release is not a trip: the value is returned and counted in `tack_anc_overrun_total`. The leak budget never halts the pad, because a flood that forces mispredictions could then force a shutdown.
+An escalated release is not a trip: the value is returned and counted in `stack_anc_overrun_total`. The leak budget never halts the pad, because a flood that forces mispredictions could then force a shutdown.
 
-**Telemetry.** Metric labels come only from closed sets: `strategy="adaptive"`, `controller`, and one of `outcome`, `reason`, `disposition` or `direction`. The only duration histogram, `tack_anc_response_seconds`, holds the post-padding time the client already sees. No metric carries the pre-padding work time.
+**Telemetry.** Metric labels come only from closed sets: `strategy="adaptive"`, `controller`, and one of `outcome`, `reason`, `disposition` or `direction`. The only duration histogram, `stack_anc_response_seconds`, holds the post-padding time the client already sees. No metric carries the pre-padding work time.
 
 | Metric | What it shows |
 |---|---|
-| `tack_anc_requests_total{outcome}` | One per request, sheds included |
-| `tack_anc_shed_total{reason}` | Refused at admission: `slots_full`, `input_too_large` or `halted` |
-| `tack_anc_overrun_total{disposition}` | `late` (naive), `escalated` (epoch) or `retry` (past the cap) |
-| `tack_anc_target_changes_total{direction}` | `increase`, `decrease` or `rollback` |
-| `tack_anc_leak_budget_bits`, `tack_anc_leak_lifetime_bits` | Bits charged in this window, and since the last reset |
-| `tack_anc_controller_frozen`, `tack_anc_controller_frozen_until_reset` | 1 while the target is held at the cap |
-| `tack_anc_spin_reserved_nanoseconds_total` | Spin reserved at admission; the spin actually done would reveal target minus work |
+| `stack_anc_requests_total{outcome}` | One per request, sheds included |
+| `stack_anc_shed_total{reason}` | Refused at admission: `slots_full`, `input_too_large` or `halted` |
+| `stack_anc_overrun_total{disposition}` | `late` (naive), `escalated` (epoch) or `retry` (past the cap) |
+| `stack_anc_target_changes_total{direction}` | `increase`, `decrease` or `rollback` |
+| `stack_anc_leak_budget_bits`, `stack_anc_leak_lifetime_bits` | Bits charged in this window, and since the last reset |
+| `stack_anc_controller_frozen`, `stack_anc_controller_frozen_until_reset` | 1 while the target is held at the cap |
+| `stack_anc_slots_open` | Slots open now (rises and falls with `SlotScaling`) |
+| `stack_anc_spilled_total` | Arrivals sent to the spillway; their wait is part of the observed time |
+| `stack_anc_spin_reserved_nanoseconds_total` | Spin reserved at admission; the spin actually done would reveal target minus work |
 
-Spans are `tack.anc.adaptive_pad` for each request, plus `tack.anc.adaptive_reset` and `tack.anc.adaptive_controller_reset`. Inputs are logged at debug level, after release, as their length and full SHA-256 hex. The change and budget metrics are derived from work times, so the metrics endpoint must stay private.
+Spans are `stack.anc.adaptive_pad` for each request, plus `stack.anc.adaptive_reset` and `stack.anc.adaptive_controller_reset`. Inputs are logged at debug level, after release, as their length and full SHA-256 hex. The change and budget metrics are derived from work times, so the metrics endpoint must stay private.
 
 Proposed alert rules follow. They use the crate's metric names but were not loaded into a Prometheus server here. The metric behind the lifetime alert is emitted but not yet asserted by a recorder test.
 
 ```yaml
-- alert: TackAncAdaptiveOverrun
-  expr: sum by (controller) (rate(tack_anc_overrun_total{strategy="adaptive"}[5m])) > 0
+- alert: StackAncAdaptiveOverrun
+  expr: sum by (controller) (rate(stack_anc_overrun_total{strategy="adaptive"}[5m])) > 0
   for: 5m
-- alert: TackAncLeakBudgetSpent
-  expr: increase(tack_anc_leak_budget_exhausted_total{strategy="adaptive"}[10m]) > 0
+- alert: StackAncLeakBudgetSpent
+  expr: increase(stack_anc_leak_budget_exhausted_total{strategy="adaptive"}[10m]) > 0
   for: 0m
-- alert: TackAncLeakLifetimeSpent
-  expr: tack_anc_controller_frozen_until_reset{strategy="adaptive"} == 1
+- alert: StackAncLeakLifetimeSpent
+  expr: stack_anc_controller_frozen_until_reset{strategy="adaptive"} == 1
   for: 0m
-- alert: TackAncHalted
-  expr: tack_anc_halted{strategy="adaptive"} == 1
+- alert: StackAncHalted
+  expr: stack_anc_halted{strategy="adaptive"} == 1
   for: 0m
 ```
 
@@ -109,15 +111,15 @@ Where the measurements contradict the brief:
 
 1. **Feedback that carries the delta instead of cancelling it.** The rolling mean changed about 189,000 times in 202,000 requests, a bound near 3.5 million bits.
 2. **No room on this host for both adapting and a small budget.** Under a 1,000,000-bit measurement budget, the epoch target made 734 and 855 changes per one-minute Sleep run, about 13,700 and 15,900 bits. The 128-bit production budget froze it within 0.55 to 0.95 s, leaving 82 and 98 percent of those runs' replies at the cap.
-3. **A target path that still followed the class mix, which the ANC analysis asked to avoid.** Level sequences differed in every run, and class A's mean reply moved 8.7 and 9.9 us between mixes (rolling mean: 20.2 and 14.0 us). The crate predicts this when the floor, 64 us here, is below the worst-case work under load.
+3. **A target path that still followed the class mix, which the ANC analysis asked to avoid.** Level sequences differed in every run, and class A's mean reply moved 8.7 and 9.9 µs between mixes (rolling mean: 20.2 and 14.0 µs). The crate predicts this when the floor, 64 µs here, is below the worst-case work under load.
 4. **A budget trip that changed class.** The ANC analysis mapped a spent budget to TERMINAL_BREACH, but the red team showed one slow request could then force an operator-only freeze. A window spend is now RETRY, and only a lifetime spend is terminal.
 
 | Design | Pros | Cons |
 |---|---|---|
-| Naive rolling target (the brief) | Lowest added median latency for class A: about 80 us (mean) and 108 us (p99) over the unprotected victim. One ring buffer, little code. | Leaks through late release, poisoning and target history. The mean form was detected in every run. Never deploy it, yet its constructor is still public (open finding). |
-| Epoch target, Sleep | No detectable leak on \|t\| in any run. Every visible change is counted and budgeted. No CPU while waiting: 53 to 54 us of thread CPU per request. | Adds about 180 to 184 us at the class A median. KS flagged a difference between the classes in all 3 full-size pinned runs. |
-| Epoch target, Hybrid, 250 us tail | Lowest max \|t\| (2.27 and 1.29), and KS did not flag it. | The target must cover the tail, so it sat at 512 us and added about 500 us at the median. About 219 us of CPU per request, 4 times Sleep. |
-| Epoch target at the production budget | Leak capped at 128 bits per window and 1,024 bits between operator resets. | On this host it froze within a second and held 82 to 98 percent of replies at the 2,048 us cap. It then behaves like strategy 1 with more moving parts. |
+| Naive rolling target (the brief) | Lowest added median latency for class A: about 80 µs (mean) and 108 µs (p99) over the unprotected victim. One ring buffer, little code. | Leaks through late release, poisoning and target history. The mean form was detected in every run. Never deploy it, yet its constructor is still public (open finding). |
+| Epoch target, Sleep | No detectable leak on \|t\| in any run. Every visible change is counted and budgeted. No CPU while waiting: 53 to 54 µs of thread CPU per request. | Adds about 180 to 184 µs at the class A median. KS flagged a difference between the classes in all 3 full-size pinned runs. |
+| Epoch target, Hybrid, 250 µs tail | Lowest max \|t\| (2.27 and 1.29), and KS did not flag it. | The target must cover the tail, so it sat at 512 µs and added about 500 µs at the median. About 219 µs of CPU per request, 4 times Sleep. |
+| Epoch target at the production budget | Leak capped at 128 bits per window and 1,024 bits between operator resets. | On this host it froze within a second and held 82 to 98 percent of replies at the 2,048 µs cap. It then behaves like strategy 1 with more moving parts. |
 
 ### Recommended Rust pattern
 
@@ -147,7 +149,7 @@ The pattern has three parts: a pure release plan, a controller update inside the
         }
 ```
 
-`snap.plan` is pure arithmetic, so the release schedule is testable without a clock. In Hybrid mode the pad plans `work + spin_tail`, so every released request sleeps, then spins. Without that rule, replies after a sleep ran about 0.9 us slower, and the classes differed at KS D 0.69 on the development host.
+`snap.plan` is pure arithmetic, so the release schedule is testable without a clock. In Hybrid mode the pad plans `work + spin_tail`, so every released request sleeps, then spins. Without that rule, replies after a sleep ran about 0.9 µs slower, and the classes differed at KS D 0.69 on the development host.
 
 The upward rule, from `src/controller/epoch.rs`. Every miss is charged, even when a concurrent request already raised the level:
 
@@ -222,7 +224,7 @@ The crate answers with four limits, all applied before any secret-dependent work
 - **Sleep by default.** A sleeping request blocks its thread and holds a slot, but uses no CPU.
 - **A concurrency cap.** A non-blocking semaphore, a counter of free slots, sheds requests at admission with RETRY. It never queues, because a queue would make admission time depend on position.
 - **A spin budget.** Hybrid spinning draws on a token bucket, a counter that refills at a fixed rate. Each request reserves a fixed charge that is never refunded, so the fallback to Sleep depends only on public load.
-- **The cap.** A slow flood cannot push the target past it. In verify, all 256 slow requests against the rolling target got RETRY, and the target stopped at the 2,048 us cap.
+- **The cap.** A slow flood cannot push the target past it. In verify, all 256 slow requests against the rolling target got RETRY, and the target stopped at the 2,048 µs cap.
 
 Admission, from `src/pad.rs`:
 
@@ -234,7 +236,7 @@ Admission, from `src/pad.rs`:
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire().ok_or(Trip::SlotsFull)?;
+        let permit = self.slots.try_acquire(start).ok_or(Trip::SlotsFull)?;
         let charge = self.config.spin_charge();
         let (mode, reserved, fallback) = if self.budget.try_reserve(charge, start) {
             (self.config.mode, charge, false)
@@ -255,7 +257,7 @@ Every limit lives in a config struct. Out-of-range values are rejected at constr
 | Limit | Default | Accepted range |
 |---|---|---|
 | `max_concurrent` (slots) | 64 | 1 to 65,536 |
-| `spin_tail` (Hybrid) | 250 us | 0 to 10 s, and below the cap |
+| `spin_tail` (Hybrid) | 250 µs | 0 to 10 s, and below the cap |
 | `spin_budget` | 250 ms of CPU per second, 50 ms burst | above 0, at most 64 s each |
 | `max_input_len` | 64 KiB | 0 to 64 MiB |
 | `cap` | none; the operator must choose | floor to 10 s |
@@ -291,7 +293,7 @@ Calibration comes first. The harness must flag the unpadded `leaky_validate` and
 
 | Layer | Where | Profile and n | Runs in `cargo test`? | Role |
 |---|---|---|---|---|
-| Smoke test | `tests/leak.rs` | Debug, 2,000 per class, victim amplified to about 40 and 164 us | Yes | Calibration at that n, rolling mean flagged, epoch Hybrid passes. Not evidence. |
+| Smoke test | `tests/leak.rs` | Debug, 2,000 per class, victim amplified to about 40 and 164 µs | Yes | Calibration at that n, rolling mean flagged, epoch Hybrid passes. Not evidence. |
 | Controller rules | `tests/epoch.rs`, `tests/naive.rs` | Synthetic clock times | Yes | Doubling, decreases, both budgets, freeze and thaw, and identical trajectories when the floor covers both classes. A property test with 64 cases keeps the target on the ladder. |
 | Metrics | `tests/telemetry.rs` | `DebuggingRecorder` with `metrics::with_local_recorder` | Yes | 15 of the 20 metrics are asserted to fire, with closed-set labels. The 5 added by the fixes, for the lifetime budget and panics, are not yet. |
 | Red team | `tests/redteam.rs` | 17 attack tests; one property test with 2,000 cases | Yes | 3 tests for open findings fail. |
@@ -300,7 +302,7 @@ Calibration comes first. The harness must flag the unpadded `leaky_validate` and
 **CI today, and the gap.** `cargo test --all-targets` runs the smoke test but only compiles the evidence run. The example prints JSON and exits 0 even when it finds a leak, and the pinned runs took 454 and 473 s. CI therefore needs a separate release job, for example nightly, that gates on the JSON:
 
 ```text
-cargo build --release -p tack-anc-adaptive --example verify
+cargo build --release -p stack-anc-adaptive --example verify
 ./target/release/examples/verify > verify.json
 jq -e '.calibration.passed
   and ([.runs[] | select(.name | startswith("epoch_")) | .detect.max_abs_t < 4.5] | all)
@@ -325,7 +327,7 @@ Each max |t| and CPU cell lists run 1 / run 2. Classes were drawn at random, so 
 | Naive rolling p99 | 100,322 A, 99,678 B | 3.01 / 3.88 | No, 0 of 2 (marginal) | not flooded |
 | Naive p99, fast-flood poisoning | 10,017 A, 9,983 B | 9.47 / 11.09 | Yes, 2 of 2 | not flooded |
 | Epoch, Sleep | 100,322 A, 99,678 B | 3.68 / 2.06 | No by \|t\|; KS flagged 2 of 2 | 0.272 / 0.280 cores (Sleep flood) |
-| Epoch, Hybrid, 250 us tail | 100,322 A, 99,678 B | 2.27 / 1.29 | No, 0 of 2 | 0.258 / 0.248 cores (Hybrid flood, 100 ms per second spin budget) |
+| Epoch, Hybrid, 250 µs tail | 100,322 A, 99,678 B | 2.27 / 1.29 | No, 0 of 2 | 0.258 / 0.248 cores (Hybrid flood, 100 ms per second spin budget) |
 | Epoch, same poisoning attack | 10,017 A, 9,983 B | 1.38 / 0.94 | No, 0 of 2 | not flooded |
 | Epoch, Sleep, production budget | 19,980 A, 20,020 B | 0.99 / 1.24 | No, 0 of 2 | not flooded |
 
@@ -335,19 +337,19 @@ KS flagged epoch Sleep in all 3 full-size pinned runs, with D of 0.0148, 0.0150 
 
 KS also flagged the constant-time control once (run 2, p 7e-6), so this line has false alarms here. But the Sleep flag repeated in every run, and the control's did not.
 
-One untested candidate cause: in Sleep mode the sleep lasts target minus work, so class B sleeps roughly 5 to 9 us less. If wake-up delay depends on sleep length, that is a timing side channel under kernel convention 6.
+One untested candidate cause: in Sleep mode the sleep lasts target minus work, so class B sleeps roughly 5 to 9 µs less. If wake-up delay depends on sleep length, that is a timing side channel under kernel convention 6.
 
-Uncropped, the smallest mean shift the test could flag was 13.4 to 13.9 us (Sleep) and 20.0 to 20.4 us (Hybrid). The secret's own median gap, 5.5 to 8.9 us, is smaller, so the cropped tests carry the sensitivity. They found the unprotected gap at |t| 1,551 and 1,129.
+Uncropped, the smallest mean shift the test could flag was 13.4 to 13.9 µs (Sleep) and 20.0 to 20.4 µs (Hybrid). The secret's own median gap, 5.5 to 8.9 µs, is smaller, so the cropped tests carry the sensitivity. They found the unprotected gap at |t| 1,551 and 1,129.
 
-At the production budget the controller froze after 6,102 and 2,069 requests, warm-up included (0.95 and 0.55 s). It thawed at the next 60 s window boundary, then froze again. Its mean target was 1,711 and 2,020 us, against 148 and 163 us for the same pad under the measurement budget.
+At the production budget the controller froze after 6,102 and 2,069 requests, warm-up included (0.95 and 0.55 s). It thawed at the next 60 s window boundary, then froze again. Its mean target was 1,711 and 2,020 µs, against 148 and 163 µs for the same pad under the measurement budget.
 
-**Test suite status.** `cargo clippy -p tack-anc-adaptive --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, 61 tests pass and 3 fail across 8 targets. The passes are unit 14, epoch 14, leak 1, naive 6, pad 7, red team 14 of 17 and telemetry 5.
+**Test suite status.** `cargo clippy -p stack-anc-adaptive --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, 61 tests pass and 3 fail across 8 targets. The passes are unit 14, epoch 14, leak 1, naive 6, pad 7, red team 14 of 17 and telemetry 5.
 
 The 3 failures are the red team's open findings, kept as failing tests, so the brief's command fails. Its final summary line, re-run for this section:
 
 ```text
 test result: FAILED. 14 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
-error: test failed, to rerun pass `-p tack-anc-adaptive --test redteam`
+error: test failed, to rerun pass `-p stack-anc-adaptive --test redteam`
 ```
 
 Cargo stops at the first failing target, so `tests/telemetry.rs` ran only in the `--no-fail-fast` pass. The red team wrote 17 tests against the first build: 11 broke it and 6 held, and the fixes closed 8 of the 11.
@@ -357,11 +359,12 @@ Cargo stops at the first failing target, so `tests/telemetry.rs` ran only in the
 - **No proof.** A pass is no detectable leak at that n on one virtual machine. The tests rule out shifts they could see, not all shifts.
 - **Not zero leakage.** The budget meters the leak and does not remove it. By default the controller allows up to 1,024 bits between operator resets. A frozen controller still leaks its overruns and misses, and is charged for them.
 - **Sleep mode's distribution.** KS separated the two classes under epoch Sleep in every full-size pinned run, for a reason not yet tested. Prefer Hybrid where that matters. A flood drains the spin budget and forces Sleep: about 1,200 of 5,000 served requests spun in the pinned Hybrid flood.
-- **Slot occupancy (open finding).** A slow request holds its slot until its later release. A third party probing admission can then see `SlotsFull` and learn that a victim was slow.
+- **Extra slots on backlog and a spillway (opt-in).** Set `scaling.max_slots` above `max_concurrent` and the pad opens `step` more slots after any window of `scaling.reaction_delay` in which an arrival found every open slot held, then closes `step` after `scaling.cooldown_windows` quiet windows in a row, never outside `max_concurrent ..= max_slots`. Set `scaling.spillway_size` above zero and that many arrivals that find every slot held wait exactly `scaling.spillway_wait`, then try once more. Both use only arrival times, never work times: the slots-taken test reads the held times (arrival plus a constant), and a shed caused by the backstop is deliberately not counted as backlog because it depends on when requests returned. A full spillway sheds at once. Both are off by default. Red-team tests ``attack_scaling_and_spillway_independent_of_victim_secret` and `scaling_opens_under_flood_and_closes_when_quiet`` and the slot unit tests show the open-slot count, the spillway wait and the verdict are the same whichever way a victim's secret work went. `slots_open()` reports the current count. Open item: no metric yet exports the open-slot count.
+- **Slot occupancy (fixed in this version).** Every admitted request holds its slot for one fixed time, the controller cap, counted from admission, whatever its work time. A third party probing admission cannot learn that a victim was slow (`attack_shed_decision_reveals_victim_overrun` now passes). The hold is the cap at construction, so it does not follow later cap changes. The cost is capacity: throughput is at most `max_concurrent / cap` per second. A backstop of `4 x max_concurrent` requests inside the pad bounds requests stuck past the hold. The cap is a placeholder speed limit until measured work times set it.
 - **Overrun multiples.** The blocking API cannot stop work at the cap, so an overrun's release still tells `ceil(work / cap)`. It is charged, but the multiple is not capped; a pre-emptible API is the real fix.
 - **Reply content.** A RETRY reply differs from a value. Every trip is counted, but an overrun RETRY is influenced by the secret like an escalation.
 - **Panic output.** A caught panic is released on schedule, but the panic hook prints at the moment of the panic, inside the wait. With `panic = "abort"` there is nothing to catch.
-- **Availability (open finding).** One request per epoch with work near the cap holds every request at the cap. Shedding does not give honest clients a fair share.
-- **A reachable naive controller.** `AdaptivePad::naive` carries a "never select it in a deployment profile" warning, but nothing enforces it (open finding).
+- **Availability (partly addressed, opt-in).** One request per epoch with work near the cap holds every request at the cap. Set `EpochConfig::tolerated_slow_permille` above zero (for example 10, one percent) and slow requests that stay at or below that share of the epoch's traffic (the larger of the requests so far and last epoch's) are *rare*: each is released at its own covering level and charged to the leak budget, but it does not raise the shared level and does not block a step down. An attacker then needs more than that share of the honest volume, not one request per epoch, to hold the level up. Small counts are never rare, so low-volume services keep the strict behavior. The default stays 0 (strict) because the published leak measurements were taken under the strict rule. **Limit:** every rare slow request still spends leak budget, because its reply timing tells its sender how slow it was. With the default budget (128 bits per 60 s) one slow request per second exhausts the budget within a few epochs, the controller freezes at the cap, and the gain in a 300 s simulation was only about 5 percent of requests served below the cap (15,005 of 300,000, 5 freezes). To get the benefit, the budget must be sized for the slow-request rate you accept, which is a decision about how much leakage to allow. Tests: `attack_one_slow_request_per_epoch_pins_cap_when_strict`, `attack_one_slow_request_per_epoch_cannot_pin_cap_with_tolerance`, `attack_slow_share_above_the_tolerance_still_pins_cap`, `attack_slow_request_at_epoch_start_does_not_raise_the_level`, `honest_shift_still_raises_the_level`.
+- **A reachable naive controller.** `AdaptivePad::naive` is now refused unless `PadConfig::allow_naive_controller` is set, so a deployment cannot pick it by accident. It is still public, because tests and the verify example measure it. Its late release is still the raw work time, by design.
 - **One machine.** The numbers come from one KVM guest pinned to one CPU and shared with other agents. Each production host and CI runner needs its own calibrated runs.
 - **The threat model.** The bound assumes the attacker sees only reply contents and times. Attackers with code on the same physical core, who can watch caches, are out of scope, as is anyone who can read the metrics endpoint.

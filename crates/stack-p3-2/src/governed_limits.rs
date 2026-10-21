@@ -155,14 +155,18 @@ pub struct GovernedLimits<S: LimitSource> {
     state: Mutex<(HashMap<String, Entry>, LimitStats)>,
 }
 
-/// A governed value is usable only if it is a positive whole number.
+/// A governed value is usable only if it is a positive finite number. A fractional value is rounded
+/// DOWN: the governance side tightens by a factor (0.9 of 512 MiB is 483,183,820.8 bytes), and the
+/// first trace replays showed the kernel ignoring every tightened memory cap because this function
+/// refused the fraction. Flooring can only make a limit stricter, never looser, so it keeps the
+/// ceiling rule intact. Values that floor to zero are still refused.
 fn parse_limit(v: &serde_json::Value) -> Option<u64> {
     if let Some(u) = v.as_u64() {
         return if u > 0 { Some(u) } else { None };
     }
     let f = v.as_f64()?;
-    if f.is_finite() && f > 0.0 && f.fract() == 0.0 && f < 1.8446744073709552e19 {
-        Some(f as u64)
+    if f.is_finite() && f >= 1.0 && f < 1.8446744073709552e19 {
+        Some(f.floor() as u64)
     } else {
         None
     }
@@ -285,8 +289,17 @@ mod tests {
     }
 
     #[test]
+    fn a_fractional_value_is_floored_never_raised() {
+        let g = GovernedLimits::new(Scripted::new(vec![Ok(Some(j("483183820.8")))]), Duration::from_secs(60));
+        assert_eq!(g.effective("a", LimitKind::MemoryCapacityBytes, 536870912), 483183820);
+        let g = GovernedLimits::new(Scripted::new(vec![Ok(Some(j("0.9")))]), Duration::from_secs(60));
+        assert_eq!(g.effective("a", LimitKind::TokensCapacity, 1000), 1000); // floors to zero: refused
+        assert_eq!(g.stats().invalid_values, 1);
+    }
+
+    #[test]
     fn junk_values_never_loosen_and_keep_the_last_good_value() {
-        for bad in ["0", "-5", "1.5", "\"900\"", "null", "true", "[900]"] {
+        for bad in ["0", "-5", "0.5", "\"900\"", "null", "true", "[900]"] {
             let g = GovernedLimits::new(Scripted::new(vec![Ok(Some(j("700"))), Ok(Some(j(bad)))]), Duration::ZERO);
             assert_eq!(g.effective("a", LimitKind::TokensCapacity, 1000), 700);
             assert_eq!(g.effective("a", LimitKind::TokensCapacity, 1000), 700, "bad value {bad}");

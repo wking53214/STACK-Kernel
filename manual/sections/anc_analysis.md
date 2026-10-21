@@ -2,7 +2,7 @@
 
 ANC cannot make the timing delta zero; the testable goal is no detectable difference at 100,000 samples per class (Welch |t| at most 4.5).
 
-*New design: analysis only. No ANC code exists in the TACK repositories today. The tests it defines run in the tack-anc-harness crate, compiled and tested on Rust 1.94.*
+*New design: analysis only. No ANC code exists in the STACK repositories today. The tests it defines run in the stack-anc-harness crate, compiled and tested on Rust 1.94.*
 
 ### The problem ANC is meant to solve
 
@@ -107,7 +107,7 @@ shift flagged    at n = 100,000 per class, equal spread: about 0.020 standard de
 
 The harness maps each verdict onto the CNS outcomes. A leak is TERMINAL_BREACH, and the resolution is reject: the build under test is not promoted. Too few samples or no computable statistic is RETRY, so an unclear run never passes.
 
-From `tack-anc-harness/src/lib.rs`:
+From `stack-anc-harness/src/lib.rs`:
 
 ```rust
 /// The TVLA leak threshold on |t|. Above it, the two classes are treated
@@ -115,7 +115,7 @@ From `tack-anc-harness/src/lib.rs`:
 pub const T_THRESHOLD: f64 = 4.5;
 ```
 
-From `tack-anc-harness/src/report.rs`:
+From `stack-anc-harness/src/report.rs`:
 
 ```rust
     pub const fn gate_outcome(&self) -> GateOutcome {
@@ -127,7 +127,7 @@ From `tack-anc-harness/src/report.rs`:
     }
 ```
 
-**Proof is available only for Strategy 3.** Formal tools can check constant-time code without running it. ct-verif (Almeida et al., USENIX Security 2016) checks LLVM IR, the compiler's intermediate form, through a product program that runs two copies together.
+**A formal proof is possible in principle only for Strategy 3, and none was done for this manual.** Formal tools can check constant-time code without running it. ct-verif (Almeida et al., USENIX Security 2016) checks LLVM IR, the compiler's intermediate form, through a product program that runs two copies together.
 
 binsec/rel checks machine code by relational symbolic execution. Symbolic execution runs a program on stand-ins for its inputs instead of real values, and relational means two copies at once. Its README calls it bounded verification and bug-finding, first published at IEEE S&P 2020.
 
@@ -138,7 +138,7 @@ A pad-up strategy has no such proof, because its guarantee depends on clocks and
 A test that cannot see a known leak proves nothing, so the harness was first run on known cases. These are in-process timings of the 32-byte compare, not network timings. Each run used 200,000 samples: 99,885 in one class and 100,115 in the other.
 
 ```text
-cargo run --release -p tack-anc-harness --example calibrate 200000 50
+cargo run --release -p stack-anc-harness --example calibrate 200000 50
 ```
 
 | Case | Timer | Largest \|t\| | Verdict |
@@ -150,7 +150,7 @@ cargo run --release -p tack-anc-harness --example calibrate 200000 50
 | Constant-time control, each input built just before timing | Instant (ns) | 221.0 | False leak |
 | A/A, 50 seeds | Instant (ns) | 2.86 at most | 0 of 50 flagged |
 
-Instant is Rust's monotonic clock; rdtsc is the CPU cycle counter. A/A means both classes run the same thing, so any leak verdict is a false positive. The machine was a 4-CPU Intel Xeon at 2.80 GHz.
+Instant is Rust's monotonic clock; rdtsc is the CPU cycle counter. A/A means both classes run the same thing, so any leak verdict is a false positive. The machine was a 4-CPU Intel Xeon VM at 2.80 GHz. This is not the 2.10 GHz VM used for the strategy runs. Each strategy repeated the calibration inside its own runs on the 2.10 GHz host, and those results appear in its section.
 
 The early-exit leak is about 27 ns at the median (48 against 21 ns). That is below the 100 ns LAN figure above, which slows a remote attack but does not remove the leak.
 
@@ -173,7 +173,7 @@ Zero false positives in 50 A/A runs only shows that the false positive rate is n
 
 | Measure | Definition | Pass line |
 |---|---|---|
-| Calibration | The harness must flag the unpadded early-exit victim and pass the constant-time control at the same n. | If it cannot see the known leak, the run proves nothing. Met on the test machine above. |
+| Calibration | The harness must flag the unpadded early-exit victim and pass the constant-time control at the same n. | If it cannot see the known leak, the run proves nothing. Met on the 2.80 GHz calibration VM above, and again inside each strategy's own runs on the 2.10 GHz host. |
 | Detectability | Largest \|t\| over uncropped, cropped and second-order Welch t per class pair, with KS D and its p value beside it. | \|t\| at most 4.5 at 100,000 per class: samples = 200,000 in the harness, which counts both classes. A KS p below 0.001 is reviewed, not an automatic fail, because at large n KS flags differences too small to exploit. |
 | Smallest detectable shift | delta_min in nanoseconds from the formula above, using the per-class variances the harness reports. | Reported, never omitted. |
 | Leakage bound | Bits under the counting model, from the controller's counters. | At or under the configured budget; not applicable to a fixed target. |
@@ -202,11 +202,11 @@ Two timing notes follow. A shed reply is fast, but its speed reflects load, whic
 |---|---|---|---|
 | Admission full: slots or CPU budget spent | RETRY | reject | Decided on public load before secret work; nothing changed, so a later resubmit can succeed. |
 | Input over the size cap or badly framed | RETRY | reject | Size and framing are public and checked before secret work; a corrected input can pass. |
-| Work overran the hard ceiling | RETRY | reject | A deadline timer, not the worker, sends the reply at the ceiling, and the late verdict is discarded. The reply text still reveals the overrun, and slow secret paths may overrun more often, so the overrun rate is counted. |
-| Adaptive leakage budget spent | TERMINAL_BREACH for the controller; requests continue | rollback | The target returns to its configured public maximum and stops adapting; that last change is one more counted step. Halting would let a flood force a shutdown. |
+| Work overran the hard ceiling | RETRY | reject | The analysis asks a deadline timer, not the worker, to send the reply at the ceiling and discard the late verdict. Strategy 1's blocking API cannot stop the worker, so it releases the RETRY on a later public window (64 ceilings by default) instead. The reply text still reveals the overrun, and slow secret paths may overrun more often, so the overrun rate is counted. |
+| Adaptive leakage budget spent | Window budget spent: RETRY. Lifetime budget spent: TERMINAL_BREACH. In both cases requests continue. (Strategy 2 split this after the red team showed that one slow request could otherwise force a freeze only an operator can clear.) | rollback | The target returns to its configured public maximum and stops adapting; that last change is one more counted step. Halting would let a flood force a shutdown. |
 | Monotonic clock unavailable | TERMINAL_BREACH | halt | No padding guarantee holds without a clock, and no correction to the input repairs that. |
 
-Quarantine is not used. Isolating a sender belongs to admission control, not to timing.
+No ANC pad quarantines. Isolating a sender belongs to admission control, not to timing.
 
 ### What exists today
 

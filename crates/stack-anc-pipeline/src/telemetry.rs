@@ -43,6 +43,11 @@ pub mod names {
     /// Counter, labels `strategy`, `validator`. Well-formed tokens that did
     /// not match.
     pub const TOKEN_MISMATCH_TOTAL: &str = "stack_anc_token_mismatch_total";
+    /// Counter, labels `strategy`, `validator`. Requests that reached the
+    /// validator (matches and mismatches). Sheds are excluded, so this is the
+    /// safe denominator for a guessing-rate alert: cheap malformed requests
+    /// cannot dilute it.
+    pub const VALIDATED_TOTAL: &str = "stack_anc_validated_total";
     /// Gauge, labels `strategy`, `validator`. Set to 1 when a gate is built
     /// with a leaky validator (only possible with
     /// `allow_leaky_validators`). Never set for `constant_time`.
@@ -79,6 +84,10 @@ pub(crate) fn emit(ev: &Event) {
             "outcome" => o
         )
         .record(observed.as_secs_f64());
+    }
+    if matches!(ev.trip, None | Some(Trip::Mismatch)) {
+        metrics::counter!(names::VALIDATED_TOTAL, "strategy" => STRATEGY, "validator" => v)
+            .increment(1);
     }
     match ev.trip {
         Some(Trip::Mismatch) => {

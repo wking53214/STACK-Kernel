@@ -33,21 +33,21 @@
 //! raw samples are available for percentiles).
 //!
 //! Environment variables (all optional; out-of-range values are an error):
-//! * `TACK_VERIFY_N_PER_CLASS`: samples per class, default 100000, bounds
+//! * `STACK_VERIFY_N_PER_CLASS`: samples per class, default 100000, bounds
 //!   10000 ..= 5000000.
-//! * `TACK_VERIFY_CEILING_US`: ceiling for the padded runs, default 300,
+//! * `STACK_VERIFY_CEILING_US`: ceiling for the padded runs, default 300,
 //!   bounds 20 ..= 100000.
-//! * `TACK_VERIFY_TAIL_US`: blocking Hybrid spin tail, default 150, bounds
+//! * `STACK_VERIFY_TAIL_US`: blocking Hybrid spin tail, default 150, bounds
 //!   0 ..= 100000.
-//! * `TACK_VERIFY_PRECISION_N`: requests per mode in `precision`, default
+//! * `STACK_VERIFY_PRECISION_N`: requests per mode in `precision`, default
 //!   2000 blocking (async uses a quarter), bounds 100 ..= 1000000.
-//! * `TACK_VERIFY_FLOOD_SECS`: wall seconds per flood config, default 3,
+//! * `STACK_VERIFY_FLOOD_SECS`: wall seconds per flood config, default 3,
 //!   bounds 1 ..= 60.
-//! * `TACK_VERIFY_FLOOD_CEILING_US`: ceiling in the flood, default 1000,
+//! * `STACK_VERIFY_FLOOD_CEILING_US`: ceiling in the flood, default 1000,
 //!   bounds 20 ..= 100000.
-//! * `TACK_VERIFY_FLOOD_CAP`: `max_concurrent` in the flood, default
+//! * `STACK_VERIFY_FLOOD_CAP`: `max_concurrent` in the flood, default
 //!   max(1, CPU count / 2), bounds 1 ..= 4096.
-//! * `TACK_VERIFY_SEED`: class schedule seed, default 0x7ac4ce11. Not a key.
+//! * `STACK_VERIFY_SEED`: class schedule seed, default 0x7ac4ce11. Not a key.
 //!
 //! With the defaults the whole run takes about 4 minutes on 4 CPUs.
 
@@ -559,21 +559,21 @@ fn flood(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n_per_class = to_usize(env_u64(
-        "TACK_VERIFY_N_PER_CLASS",
+        "STACK_VERIFY_N_PER_CLASS",
         100_000,
         10_000,
         5_000_000,
     )?)?;
-    let ceiling = Duration::from_micros(env_u64("TACK_VERIFY_CEILING_US", 300, 20, 100_000)?);
-    let tail = Duration::from_micros(env_u64("TACK_VERIFY_TAIL_US", 150, 0, 100_000)?);
-    let prec_n = to_usize(env_u64("TACK_VERIFY_PRECISION_N", 2_000, 100, 1_000_000)?)?;
-    let flood_secs = env_u64("TACK_VERIFY_FLOOD_SECS", 3, 1, 60)?;
+    let ceiling = Duration::from_micros(env_u64("STACK_VERIFY_CEILING_US", 300, 20, 100_000)?);
+    let tail = Duration::from_micros(env_u64("STACK_VERIFY_TAIL_US", 150, 0, 100_000)?);
+    let prec_n = to_usize(env_u64("STACK_VERIFY_PRECISION_N", 2_000, 100, 1_000_000)?)?;
+    let flood_secs = env_u64("STACK_VERIFY_FLOOD_SECS", 3, 1, 60)?;
     let flood_ceiling =
-        Duration::from_micros(env_u64("TACK_VERIFY_FLOOD_CEILING_US", 1_000, 20, 100_000)?);
+        Duration::from_micros(env_u64("STACK_VERIFY_FLOOD_CEILING_US", 1_000, 20, 100_000)?);
     let cpus = env::cpu_count().unwrap_or(1);
     let default_cap = u64::try_from((cpus / 2).max(1)).unwrap_or(1);
-    let flood_cap = to_usize(env_u64("TACK_VERIFY_FLOOD_CAP", default_cap, 1, 4_096)?)?;
-    let seed = env_u64("TACK_VERIFY_SEED", 0x7ac4_ce11, 0, u64::MAX)?;
+    let flood_cap = to_usize(env_u64("STACK_VERIFY_FLOOD_CAP", default_cap, 1, 4_096)?)?;
+    let seed = env_u64("STACK_VERIFY_SEED", 0x7ac4_ce11, 0, u64::MAX)?;
     let n_total = n_per_class * 2;
     let started = Instant::now();
     let env_before = env::snapshot();

@@ -1,7 +1,7 @@
 use stack_ffi::{host_initialize_and_seal, host_set_capabilities, read_ticks};
 
 fn main() {
-    println!("≡TACK C++/Rust Integration Test");
+    println!("≡STACK C++/Rust Integration Test");
     
     // Initialize the host
     if let Err(e) = host_initialize_and_seal() {

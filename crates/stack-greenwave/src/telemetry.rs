@@ -1,6 +1,6 @@
 //! Metrics and span names.
 //!
-//! Every metric name starts with `tack_greenwave_`. Every label value comes
+//! Every metric name starts with `stack_greenwave_`. Every label value comes
 //! from a closed enum in this crate ([`GateOutcome`], [`crate::TripReason`],
 //! [`Op`], [`crate::Resolution`], [`ConfigError::as_str`]), never from request data, because
 //! a label built from caller data lets the caller create unbounded time
@@ -42,62 +42,62 @@ use crate::error::{ConfigError, Op, Trip};
 use crate::outcome::GateOutcome;
 
 /// Counter, label `outcome`: one per `admit` call.
-pub const ADMISSIONS_TOTAL: &str = "tack_greenwave_admissions_total";
+pub const ADMISSIONS_TOTAL: &str = "stack_greenwave_admissions_total";
 /// Counter, labels `op`, `reason`, `outcome`, `resolution`: one per trip.
-pub const TRIPS_TOTAL: &str = "tack_greenwave_trips_total";
+pub const TRIPS_TOTAL: &str = "stack_greenwave_trips_total";
 /// Counter, label `outcome`: one per `poll` call.
-pub const POLLS_TOTAL: &str = "tack_greenwave_polls_total";
+pub const POLLS_TOTAL: &str = "stack_greenwave_polls_total";
 /// Counter, no labels: one per request dispatched.
-pub const DISPATCHED_TOTAL: &str = "tack_greenwave_dispatched_total";
+pub const DISPATCHED_TOTAL: &str = "stack_greenwave_dispatched_total";
 /// Counter, label `outcome`: one per `stage_check` call.
-pub const STAGE_CHECKS_TOTAL: &str = "tack_greenwave_stage_checks_total";
+pub const STAGE_CHECKS_TOTAL: &str = "stack_greenwave_stage_checks_total";
 /// Counter, no labels: stage checks that passed after the stage's phase had
 /// already ended (the wave was broken for that request).
-pub const STAGE_LATE_TOTAL: &str = "tack_greenwave_stage_late_total";
+pub const STAGE_LATE_TOTAL: &str = "stack_greenwave_stage_late_total";
 /// Counter, label `outcome`: one per `complete` call.
-pub const RELEASES_TOTAL: &str = "tack_greenwave_releases_total";
+pub const RELEASES_TOTAL: &str = "stack_greenwave_releases_total";
 /// Counter, no labels: phases that passed with no poll. A missed phase means
 /// the driver fell behind and the no-starvation bound is not guaranteed.
-pub const PHASES_MISSED_TOTAL: &str = "tack_greenwave_phases_missed_total";
+pub const PHASES_MISSED_TOTAL: &str = "stack_greenwave_phases_missed_total";
 /// Counter, label `reason`: configurations refused at build time.
-pub const CONFIG_REJECTED_TOTAL: &str = "tack_greenwave_config_rejected_total";
+pub const CONFIG_REJECTED_TOTAL: &str = "stack_greenwave_config_rejected_total";
 /// Counter, no labels: operator resets that cleared a halt or found nothing
 /// to clear. A reset that finds an unobserved clock regression trips instead
 /// and is counted in [`TRIPS_TOTAL`] with `op="reset"`.
-pub const RESETS_TOTAL: &str = "tack_greenwave_resets_total";
+pub const RESETS_TOTAL: &str = "stack_greenwave_resets_total";
 /// Counter, no labels: live tickets expired because their lane reached its
 /// live-ticket cap. An expired ticket fails `stage_check` and `complete` with
 /// `ticket_not_live`.
-pub const TICKETS_EXPIRED_TOTAL: &str = "tack_greenwave_tickets_expired_total";
+pub const TICKETS_EXPIRED_TOTAL: &str = "stack_greenwave_tickets_expired_total";
 /// Histogram, no labels: seconds from admission to dispatch, on the injected
 /// clock.
-pub const QUEUE_WAIT_SECONDS: &str = "tack_greenwave_queue_wait_seconds";
+pub const QUEUE_WAIT_SECONDS: &str = "stack_greenwave_queue_wait_seconds";
 /// Gauge, no labels: requests waiting across all lanes of every scheduler in
 /// the process.
-pub const QUEUE_DEPTH: &str = "tack_greenwave_queue_depth";
+pub const QUEUE_DEPTH: &str = "stack_greenwave_queue_depth";
 /// Gauge, no labels: number of schedulers in the process that are halted.
 /// Raised by one on a halt, lowered by one when a halted scheduler is reset
-/// or dropped. Alert on `max(tack_greenwave_halted) >= 1`.
-pub const HALTED: &str = "tack_greenwave_halted";
+/// or dropped. Alert on `max(stack_greenwave_halted) >= 1`.
+pub const HALTED: &str = "stack_greenwave_halted";
 
-/// Span names, `tack.greenwave.<operation>`.
+/// Span names, `stack.greenwave.<operation>`.
 pub mod spans {
     /// Building a scheduler from configuration.
-    pub const BUILD: &str = "tack.greenwave.build";
+    pub const BUILD: &str = "stack.greenwave.build";
     /// One `admit` call.
-    pub const ADMIT: &str = "tack.greenwave.admit";
+    pub const ADMIT: &str = "stack.greenwave.admit";
     /// One `poll` call.
-    pub const POLL: &str = "tack.greenwave.poll";
+    pub const POLL: &str = "stack.greenwave.poll";
     /// One `stage_check` call.
-    pub const STAGE_CHECK: &str = "tack.greenwave.stage_check";
+    pub const STAGE_CHECK: &str = "stack.greenwave.stage_check";
     /// One `complete` call.
-    pub const COMPLETE: &str = "tack.greenwave.complete";
+    pub const COMPLETE: &str = "stack.greenwave.complete";
     /// One operator `reset`.
-    pub const RESET: &str = "tack.greenwave.reset";
+    pub const RESET: &str = "stack.greenwave.reset";
     /// The tokio driver's dispatch loop.
-    pub const DRIVE: &str = "tack.greenwave.drive";
+    pub const DRIVE: &str = "stack.greenwave.drive";
     /// The tokio driver holding a result until its release time.
-    pub const RELEASE_WAIT: &str = "tack.greenwave.release_wait";
+    pub const RELEASE_WAIT: &str = "stack.greenwave.release_wait";
 }
 
 /// Register descriptions and units with the installed recorder. Optional:

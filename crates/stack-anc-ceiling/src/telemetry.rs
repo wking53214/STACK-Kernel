@@ -21,20 +21,38 @@
 //!
 //! # Alerts (Prometheus rule expressions)
 //!
-//! Every series is shared by all ceiling pads in a process (the only label
-//! that identifies the source is `strategy="ceiling"`), so thresholds that
-//! depend on configuration use the sum over those pads.
+//! Every series is shared by all ceiling pads in a process, so thresholds
+//! that depend on configuration use the sum over those pads. The only label
+//! that identifies the source is `strategy`: `"ceiling"` for the standard
+//! lane and plain pads, `"ceiling_fast"` for the fast gate of a
+//! [`crate::LanedPad`]. Alerts that should cover both use
+//! `strategy=~"ceiling|ceiling_fast"`; the examples below show the standard
+//! value.
 //!
-//! * `TackAncCeilingHalted` (critical):
+//! * `StackAncCeilingFastOverrun` (critical):
+//!   `increase(stack_anc_overrun_total{strategy="ceiling_fast"}[5m]) > 0`.
+//!   Something on the fast gate is not a fixed-cost operation. Move it to
+//!   the standard lane.
+//! * `stack_anc_slots_open{strategy}` is a gauge of slots open now. Sitting
+//!   at the configured `max_slots` while `stack_anc_shed_total{reason="slots_full"}`
+//!   rises means scaling has no room left. Sitting at `max_concurrent`
+//!   while sheds rise means scaling is off or too slow.
+//! * `stack_anc_spilled_total{strategy}` counts arrivals that went to the
+//!   spillway. A rising rate means the gate is busy enough to need the
+//!   waiting area. Spilled arrivals that are then shed also appear in
+//!   `stack_anc_shed_total{reason="slots_full"}`, and their wait is part of
+//!   the observed time in `stack_anc_response_seconds`.
+//!
+//! * `StackAncCeilingHalted` (critical):
 //!   `max(stack_anc_halted{strategy="ceiling"}) > 0`. The gauge counts
 //!   halted pads: +1 on the transition to halted, -1 on the reset of a
 //!   halted pad. A reset of a pad that is not halted does not touch it, so
 //!   one pad's reset cannot clear another pad's halt. A halted pad that is
 //!   dropped without a reset keeps the count raised until the process
 //!   restarts.
-//! * `TackAncCeilingTerminal` (critical):
+//! * `StackAncCeilingTerminal` (critical):
 //!   `increase(stack_anc_requests_total{strategy="ceiling",outcome="terminal_breach"}[5m]) > 0`.
-//! * `TackAncCeilingOverrun` (warning):
+//! * `StackAncCeilingOverrun` (warning):
 //!   `increase(stack_anc_overrun_total{strategy="ceiling"}[15m]) > 0`.
 //!   Meaning: some work ran past the ceiling. If the work time depends on a
 //!   secret, each overrun can leak up to `log2(hard_ceiling_buckets + 1)`
@@ -44,7 +62,7 @@
 //!   one more distinguishable RETRY time. Overruns are also visible to
 //!   third parties, because an overrunning request holds its slot longer
 //!   and so changes who else is shed. Raise the ceiling.
-//! * `TackAncCeilingSpinOverBudget` (warning), `for: 10m`:
+//! * `StackAncCeilingSpinOverBudget` (warning), `for: 10m`:
 //!   `rate(stack_anc_spin_reserved_nanoseconds_total{strategy="ceiling"}[5m]) / 1e9 > T`
 //!   with `T` from [`spin_over_budget_threshold`] for a 5 minute window
 //!   (`cpu_per_second + burst / 300s`, summed over pads). A token bucket
@@ -52,7 +70,7 @@
 //!   threshold of `cpu_per_second` alone would fire on a correctly
 //!   configured pad at saturation. Above `T` the budget is not doing its
 //!   job (a bug, or pads missing from the sum).
-//! * `TackAncCeilingCancelled` (info):
+//! * `StackAncCeilingCancelled` (info):
 //!   `rate(stack_anc_requests_total{strategy="ceiling",outcome="cancelled"}[5m]) > 0`
 //!   sustained may be a connect-and-abort flood.
 
@@ -61,8 +79,14 @@ use crate::outcome::{GateOutcome, Trip};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-/// Value of the `strategy` label on every metric this crate emits.
+/// Value of the `strategy` label on every metric the standard lane (and any
+/// plain [`crate::CeilingPad`]) emits.
 pub const STRATEGY: &str = "ceiling";
+/// Value of the `strategy` label on every metric the fast lane of a
+/// [`crate::LanedPad`] emits. A separate value keeps the fast lane's series
+/// apart from the standard lane's, so an alert on one cannot be diluted or
+/// hidden by the other. Sum over both with `strategy=~"ceiling|ceiling_fast"`.
+pub const STRATEGY_FAST: &str = "ceiling_fast";
 
 /// Metric names (component `anc`).
 pub mod names {
@@ -96,6 +120,15 @@ pub mod names {
     /// Histogram, labels `strategy`, `outcome`. Observed release offset
     /// from admission, seconds, post-padding only.
     pub const RESPONSE_SECONDS: &str = "stack_anc_response_seconds";
+    /// Gauge, label `strategy`. Concurrency slots open right now, summed
+    /// over the pads of this strategy in the process. Moves between
+    /// `max_concurrent` and `scaling.max_slots` on public arrival counts
+    /// only. A pad dropped without a reset keeps its last count raised until
+    /// the process restarts.
+    pub const SLOTS_OPEN: &str = "stack_anc_slots_open";
+    /// Counter, label `strategy`. Requests that waited in the spillway
+    /// (whether they were then served or shed). Public load only.
+    pub const SPILLED_TOTAL: &str = "stack_anc_spilled_total";
 }
 
 /// What happened to one request, gathered so that telemetry is emitted in
@@ -112,11 +145,14 @@ pub(crate) struct Event {
     pub observed: Duration,
     /// This request moved the pad from running to halted.
     pub newly_halted: bool,
+    /// This request waited in the spillway first.
+    pub spilled: bool,
 }
 
 impl Event {
-    pub(crate) fn early(trip: Trip, observed: Duration) -> Self {
+    pub(crate) fn early(trip: Trip, observed: Duration, spilled: bool) -> Self {
         Self {
+            spilled,
             outcome: trip.gate_outcome(),
             trip: Some(trip),
             overrun_released: None,
@@ -128,16 +164,16 @@ impl Event {
     }
 }
 
-pub(crate) fn emit(ev: &Event) {
+pub(crate) fn emit(strategy: &'static str, ev: &Event) {
     metrics::counter!(
         names::REQUESTS_TOTAL,
-        "strategy" => STRATEGY,
+        "strategy" => strategy,
         "outcome" => ev.outcome.label()
     )
     .increment(1);
     metrics::histogram!(
         names::RESPONSE_SECONDS,
-        "strategy" => STRATEGY,
+        "strategy" => strategy,
         "outcome" => ev.outcome.label()
     )
     .record(ev.observed.as_secs_f64());
@@ -145,13 +181,13 @@ pub(crate) fn emit(ev: &Event) {
         Some(
             t @ (Trip::SlotsFull | Trip::InputTooLarge | Trip::Halted | Trip::TimerUnavailable),
         ) => {
-            metrics::counter!(names::SHED_TOTAL, "strategy" => STRATEGY, "reason" => t.label())
+            metrics::counter!(names::SHED_TOTAL, "strategy" => strategy, "reason" => t.label())
                 .increment(1);
         }
         Some(Trip::ClockFailure) => {
-            metrics::counter!(names::CLOCK_FAILURES_TOTAL, "strategy" => STRATEGY).increment(1);
+            metrics::counter!(names::CLOCK_FAILURES_TOTAL, "strategy" => strategy).increment(1);
             if ev.newly_halted {
-                metrics::gauge!(names::HALTED, "strategy" => STRATEGY).increment(1.0);
+                metrics::gauge!(names::HALTED, "strategy" => strategy).increment(1.0);
             }
         }
         Some(Trip::Overrun) | None => {}
@@ -160,7 +196,7 @@ pub(crate) fn emit(ev: &Event) {
         let disposition = if released { "released" } else { "retry" };
         metrics::counter!(
             names::OVERRUN_TOTAL,
-            "strategy" => STRATEGY,
+            "strategy" => strategy,
             "disposition" => disposition
         )
         .increment(1);
@@ -168,43 +204,55 @@ pub(crate) fn emit(ev: &Event) {
     if let Some(mode) = ev.fallback_from {
         metrics::counter!(
             names::SPIN_FALLBACK_TOTAL,
-            "strategy" => STRATEGY,
+            "strategy" => strategy,
             "mode" => mode.label()
         )
         .increment(1);
     }
-    emit_reserved(ev.reserved_spin);
+    emit_reserved(strategy, ev.reserved_spin);
+    if ev.spilled {
+        metrics::counter!(names::SPILLED_TOTAL, "strategy" => strategy).increment(1);
+    }
 }
 
-fn emit_reserved(reserved: Duration) {
+fn emit_reserved(strategy: &'static str, reserved: Duration) {
     if !reserved.is_zero() {
         let ns = u64::try_from(reserved.as_nanos()).unwrap_or(u64::MAX);
-        metrics::counter!(names::SPIN_RESERVED_NANOSECONDS_TOTAL, "strategy" => STRATEGY)
+        metrics::counter!(names::SPIN_RESERVED_NANOSECONDS_TOTAL, "strategy" => strategy)
             .increment(ns);
     }
 }
 
 /// An admitted async request was dropped before release.
-pub(crate) fn emit_cancelled(reserved: Duration) {
+pub(crate) fn emit_cancelled(strategy: &'static str, reserved: Duration) {
     metrics::counter!(
         names::REQUESTS_TOTAL,
-        "strategy" => STRATEGY,
+        "strategy" => strategy,
         "outcome" => "cancelled"
     )
     .increment(1);
-    emit_reserved(reserved);
+    emit_reserved(strategy, reserved);
     tracing::debug!("ceiling pad request cancelled before release");
 }
 
 /// Operator reset. The halted count drops only when this pad was halted.
-pub(crate) fn emit_reset(was_halted: bool) {
-    metrics::counter!(names::RESETS_TOTAL, "strategy" => STRATEGY).increment(1);
+pub(crate) fn emit_reset(strategy: &'static str, was_halted: bool) {
+    metrics::counter!(names::RESETS_TOTAL, "strategy" => strategy).increment(1);
     if was_halted {
-        metrics::gauge!(names::HALTED, "strategy" => STRATEGY).decrement(1.0);
+        metrics::gauge!(names::HALTED, "strategy" => strategy).decrement(1.0);
     }
 }
 
-/// Threshold for the `TackAncCeilingSpinOverBudget` alert, in cores (spin
+/// Move this pad's share of the open-slot gauge from `from` to `to`.
+pub(crate) fn emit_slots_open(strategy: &'static str, from: usize, to: usize) {
+    if to > from {
+        metrics::gauge!(names::SLOTS_OPEN, "strategy" => strategy).increment((to - from) as f64);
+    } else if from > to {
+        metrics::gauge!(names::SLOTS_OPEN, "strategy" => strategy).decrement((from - to) as f64);
+    }
+}
+
+/// Threshold for the `StackAncCeilingSpinOverBudget` alert, in cores (spin
 /// seconds per wall second) averaged over `window`: the most a correctly
 /// working budget allows, `(cpu_per_second * window + burst) / window`.
 /// `None` for [`SpinBudgetConfig::Unlimited`] or a zero window. For several

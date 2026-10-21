@@ -1,6 +1,6 @@
 //! Metrics and log helpers.
 //!
-//! Every metric name starts with `tack_bumpers_`. Every label value comes
+//! Every metric name starts with `stack_bumpers_`. Every label value comes
 //! from a closed enum in this crate ([`crate::GateOutcome`],
 //! [`crate::TripReason`], [`crate::CorrectionKind`]), never from request
 //! data, because a label built from caller text lets the caller create
@@ -20,15 +20,15 @@ use crate::error::TripReason;
 use crate::outcome::GateOutcome;
 
 /// Counter, label `outcome`: one per `Bumper::normalize` call.
-pub const REQUESTS_TOTAL: &str = "tack_bumpers_requests_total";
+pub const REQUESTS_TOTAL: &str = "stack_bumpers_requests_total";
 /// Counter, labels `reason` and `outcome`: one per trip in a refused request.
-pub const TRIPS_TOTAL: &str = "tack_bumpers_trips_total";
+pub const TRIPS_TOTAL: &str = "stack_bumpers_trips_total";
 /// Counter, label `kind`: one per correction in a request that passed.
-pub const CORRECTIONS_TOTAL: &str = "tack_bumpers_corrections_total";
+pub const CORRECTIONS_TOTAL: &str = "stack_bumpers_corrections_total";
 /// Histogram, no labels: corrections applied per request that passed.
-pub const CORRECTIONS_PER_REQUEST: &str = "tack_bumpers_corrections_per_request";
+pub const CORRECTIONS_PER_REQUEST: &str = "stack_bumpers_corrections_per_request";
 /// Histogram, label `outcome`: wall time of `Bumper::normalize` in seconds.
-pub const NORMALIZE_DURATION_SECONDS: &str = "tack_bumpers_normalize_duration_seconds";
+pub const NORMALIZE_DURATION_SECONDS: &str = "stack_bumpers_normalize_duration_seconds";
 
 /// Register descriptions and units with the installed recorder. Optional:
 /// the metrics work without it, but exporters show the help text.
@@ -125,9 +125,9 @@ mod tests {
     #[test]
     fn names_follow_convention() {
         for n in [REQUESTS_TOTAL, TRIPS_TOTAL, CORRECTIONS_TOTAL] {
-            assert!(n.starts_with("tack_bumpers_") && n.ends_with("_total"));
+            assert!(n.starts_with("stack_bumpers_") && n.ends_with("_total"));
         }
         assert!(NORMALIZE_DURATION_SECONDS.ends_with("_seconds"));
-        assert!(CORRECTIONS_PER_REQUEST.starts_with("tack_bumpers_"));
+        assert!(CORRECTIONS_PER_REQUEST.starts_with("stack_bumpers_"));
     }
 }

@@ -163,7 +163,7 @@ fn labels_never_carry_request_data() {
     allowed.extend(CorrectionKind::LABELS);
     assert!(!r.is_empty());
     for (name, labels, _) in &r {
-        assert!(name.starts_with("tack_bumpers_"), "{name}");
+        assert!(name.starts_with("stack_bumpers_"), "{name}");
         for (k, v) in labels {
             assert!(["outcome", "reason", "kind"].contains(&k.as_str()), "label key {k}");
             assert!(allowed.contains(&v.as_str()), "label value {v:?} on {name}");

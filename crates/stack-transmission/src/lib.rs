@@ -1,9 +1,9 @@
-//! # tack-transmission: the Tractor Transmission
+//! # stack-transmission: the Tractor Transmission
 //!
 //! **Status: new design.** This crate is a reference implementation written
-//! for the TACK Governance Kernel manual. Of the kernel's seven components
+//! for the STACK Governance Kernel manual. Of the kernel's seven components
 //! only the Sentinel Hash-Chain exists today (in `sentinel_os`). The Tractor
-//! Transmission does not exist anywhere in the TACK repositories yet; this
+//! Transmission does not exist anywhere in the STACK repositories yet; this
 //! crate is its first implementation.
 //!
 //! ## The metaphor
@@ -53,7 +53,7 @@
 //!   racing controllers do not silently lose updates and a replayed old
 //!   shift is not numbered as the newest gear.
 //!
-//! In CNS terms (`/home/user/CNS/cns/gate.py`) `engage()` and `shift()` are
+//! In CNS terms (`cns/gate.py` in the CNS repository) `engage()` and `shift()` are
 //! ALPHA-position gates: preconditions checked before any work runs.
 //!
 //! ### What this guarantees, and what it does not

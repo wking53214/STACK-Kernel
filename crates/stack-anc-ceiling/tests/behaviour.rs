@@ -217,6 +217,8 @@ fn semaphore_sheds_beyond_cap_before_any_work() {
         assert!(h2.join().unwrap().unwrap().value);
     });
     assert_eq!(pad.in_flight(), 0);
+    // Slots stay held for the hard ceiling (4 x 20 ms) after admission.
+    std::thread::sleep(Duration::from_millis(85));
     assert!(pad.pad(|| ()).is_ok());
 }
 

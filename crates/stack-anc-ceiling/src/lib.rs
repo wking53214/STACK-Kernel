@@ -2,7 +2,7 @@
 //! deterministic ceiling padding.
 //!
 //! Status: new design. This is a reference implementation, compiled and
-//! tested in this workspace; it is not deployed anywhere. Of the seven TACK
+//! tested in this workspace; it is not deployed anywhere. Of the seven STACK
 //! components only the Sentinel Hash-Chain (in `sentinel_os`) exists today.
 //!
 //! # The metaphor
@@ -155,11 +155,13 @@ pub mod telemetry;
 pub mod wait;
 
 mod budget;
+mod lanes;
 mod pad;
 mod slots;
 
 pub use clock::{Clock, MonotonicClock};
-pub use config::{CeilingConfig, ConfigError, SpinBudgetConfig, WaitMode};
+pub use config::{CeilingConfig, ConfigError, SlotScaling, SpinBudgetConfig, WaitMode};
 pub use outcome::{GateOutcome, PadResult, Padded, ReleaseInfo, Resolution, Trip};
+pub use lanes::{FastLane, LanedPad};
 pub use pad::CeilingPad;
 pub use wait::{bucket_offset, release_bucket};

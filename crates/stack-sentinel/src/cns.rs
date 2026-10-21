@@ -1,6 +1,6 @@
 //! The CNS subject digest, reproduced from `cns.gate.subject_digest`.
 //!
-//! A `governance_decision` row written after TACK Layer 5 carries
+//! A `governance_decision` row written after STACK Layer 5 carries
 //! `subject_digest`: the CNS canonical digest of the content the decision
 //! judged, its stored `input_data`. The witness recomputes it from the
 //! content and a mismatch is `TRANSPLANTED`.

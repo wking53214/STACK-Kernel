@@ -1,6 +1,6 @@
-//! # tack-bumpers: Elastic Bumpers for the TACK governance kernel
+//! # stack-bumpers: Elastic Bumpers for the STACK governance kernel
 //!
-//! **Status: new design.** Of the seven TACK kernel components, only the
+//! **Status: new design.** Of the seven STACK kernel components, only the
 //! Sentinel Hash-Chain exists today (in `sentinel_os`). Elastic Bumpers is
 //! one of the six new designs. This crate is its reference implementation;
 //! it is not yet wired into any of the Python repositories.
@@ -114,7 +114,7 @@
 //! how a broken client hides behind the bumper for months. Counting makes
 //! drift a measured quantity: per request (the budget turns too much drift
 //! into RETRY so the caller must fix its inputs) and over time (the
-//! `tack_bumpers_corrections_total` counter shows which kinds of drift are
+//! `stack_bumpers_corrections_total` counter shows which kinds of drift are
 //! rising). `sanitize_context` produces notes that production never reads;
 //! here every correction is returned to the caller and counted in metrics.
 //!
@@ -132,14 +132,14 @@
 //!
 //! Metrics (via the `metrics` facade, labels from closed enums only):
 //!
-//! * `tack_bumpers_requests_total{outcome}` counter, one per call.
-//! * `tack_bumpers_trips_total{reason,outcome}` counter, one per trip.
-//! * `tack_bumpers_corrections_total{kind}` counter, one per applied
+//! * `stack_bumpers_requests_total{outcome}` counter, one per call.
+//! * `stack_bumpers_trips_total{reason,outcome}` counter, one per trip.
+//! * `stack_bumpers_corrections_total{kind}` counter, one per applied
 //!   correction (passing requests only; a refused request applies nothing).
-//! * `tack_bumpers_corrections_per_request` histogram, passing requests.
-//! * `tack_bumpers_normalize_duration_seconds{outcome}` histogram.
+//! * `stack_bumpers_corrections_per_request` histogram, passing requests.
+//! * `stack_bumpers_normalize_duration_seconds{outcome}` histogram.
 //!
-//! Spans: `tack.bumpers.normalize` and `tack.bumpers.build`. Trip events
+//! Spans: `stack.bumpers.normalize` and `stack.bumpers.build`. Trip events
 //! are at DEBUG and carry the spec name, reason and outcome, and for caller
 //! text only its byte length and full SHA-256 hex digest (`input_len`,
 //! `input_sha256`). Text over `max_input_bytes` is logged by length only,

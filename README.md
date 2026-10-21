@@ -1,8 +1,10 @@
-# ≡TACK Kernel
+# ≡STACK Kernel
 
-Reference implementation of the ≡TACK (STACK) governance kernel, written in Rust and C++ with comprehensive red-team validation. Each component was built, attacked by a separate red-team agent, hardened, measured and documented. The complete manual is in `manual/`.
+Reference implementation of the ≡STACK governance kernel, written in Rust and C++ with comprehensive red-team validation. Each component was built, attacked by a separate red-team agent, hardened, measured and documented. The complete manual is in `manual/`.
 
 These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](https://github.com/wking53214/CNS), Apache-2.0). Several source comments reference that contract.
+
+`stack-sentinel` reproduces CNS's subject digest (`cns.gate.subject_digest`) in Rust, and it is held to CNS's own answer key: `crates/stack-sentinel/tests/fixtures/cns-digest-vectors.json` is a copy of CNS's `contracts/digest-vectors.json` (contents and the digest CNS gives each, chosen to catch near-misses), and `cargo test -p stack-sentinel --test cns_vectors` recomputes every one. CNS checks this copy against its own, so a stale one is reported there.
 
 ## What is here
 
@@ -33,7 +35,7 @@ C++ headers (kernel layers 1-6) in `cpp/include/`:
 
 `manual/sections/` holds the manual's sections as markdown. `manual/measurements/`
 holds the raw timing runs the ANC sections quote. `manual/review/` holds the
-final reviewer's findings, all of which were applied to the manual.
+final reviewer's findings. Not all of them are applied to the manual yet.
 
 ## Build and test
 
@@ -45,15 +47,32 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets --no-fail-fast
 ```
 
+The ANC red-team tests are timing-sensitive. On a loaded machine a run can fail one or two of them, for example `attack_one_slow_request_per_epoch_pins_cap`. Rerun before treating a failure as a regression. The Summary section lists the open ANC limits.
+
 Timing measurements need release builds on a quiet machine:
 
 ```
-cargo run --release -p tack-anc-ceiling --example verify
+cargo run --release -p stack-anc-ceiling --example verify
 ```
+
+The Rust Sentinel verifier can also be checked against the real Python one. The
+cross-check runs both programs as separate processes on the same 211 recorded
+cases and fails on any difference that is not listed in the test, or when a
+listed difference stops happening. It needs a `sentinel_os` checkout and a
+Python with its dependencies, so it is ignored by default:
+
+```
+SENTINEL_OS_DIR=/path/to/sentinel_os PYTHON=/path/to/venv/bin/python \
+    cargo test -p stack-sentinel --test crosscheck -- --ignored
+```
+
+It currently reports one understood difference (an anchor that seals zero rows:
+Python says `VERIFIED`, Rust says `TRUNCATED`). The header of
+`crates/stack-sentinel/tests/crosscheck.rs` explains the rest.
 
 ## Design Analogy: The Flywheel
 
-≡TACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
+≡STACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
 
 ### The River and Its Banks
 
@@ -61,7 +80,7 @@ Imagine a river system where banks are not static walls, but adaptive barriers. 
 
 Neither the water nor the banks are static. They are in constant conversation.
 
-### Applied to ≡TACK
+### Applied to ≡STACK
 
 1. **Payload executes** within the six-layer containment boundary
 2. **Boundary enforces**: deadline fires, quota exhausted, capability revoked, memory exceeded

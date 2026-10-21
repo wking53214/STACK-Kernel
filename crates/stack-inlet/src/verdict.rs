@@ -1,7 +1,7 @@
 //! The typed verdict the inlet returns, in the CNS gate vocabulary.
 //!
 //! The enums here mirror `cns.gate` in the CNS repository
-//! (`/home/user/CNS/cns/gate.py`): [`GatePosition`] is `ALPHA` or `OMEGA`,
+//! (`cns/gate.py` in the CNS repository): [`GatePosition`] is `ALPHA` or `OMEGA`,
 //! and [`GateOutcome`] is `PASS`, `RETRY` or `TERMINAL_BREACH`, with the same
 //! string values. They are re-declared here, not imported, because CNS is a
 //! Python package; the string values are what must agree across languages.
@@ -10,7 +10,7 @@ use core::fmt;
 
 /// Name this gate reports itself under, for a caller building a CNS
 /// `GateResult` from a [`Verdict`].
-pub const GATE_NAME: &str = "tack_inlet";
+pub const GATE_NAME: &str = "stack_inlet";
 
 /// Which end of a decision a gate belongs to (CNS `GatePosition`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,7 +61,7 @@ impl GateOutcome {
 /// [`Resolution::Quarantine`]. It holds no state of its own, so there is
 /// nothing to roll back, and it never halts: if a single hostile input could
 /// stop the inlet, the inlet would itself be a denial-of-service lever. The
-/// other two variants exist so every TACK component shares one vocabulary.
+/// other two variants exist so every STACK component shares one vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {
     /// Nothing changed; the input is refused.

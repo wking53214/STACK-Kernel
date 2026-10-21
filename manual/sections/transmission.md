@@ -12,7 +12,7 @@ A governed service has operating modes: the policy version in force, the current
 
 The goal is that a mode changes only while no request is running. Every request then reads exactly one mode from start to finish.
 
-This is a new design. No TACK repository contains it today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The `tack-transmission` crate is its first implementation.
+This is a new design. No STACK repository contains it today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The `stack-transmission` crate is its first implementation.
 
 One name clash needs flagging. In sentinel_os, `queue_schema.py` calls its Redis job queue "the transmission" (`TransmissionQueue`). That queue moves jobs to workers and does not gate mode changes, and no code connects it to this crate.
 
@@ -41,7 +41,7 @@ A controller calls `shift(new_config, timeout)`, which runs five steps:
 
 If step 4 does not finish before the timeout, the shift rolls back. The clutch comes up, the old gear stays, and the unused configuration comes back inside `ShiftRefused` for resubmission. A gear is never half-shifted.
 
-The caller never picks the epoch, so epochs cannot be reused or skipped. A shift at epoch `u64::MAX` is refused by `checked_add` instead of wrapping to 0. In CNS terms (`/home/user/CNS/cns/gate.py`), `engage()` and `shift()` are ALPHA-position gates: preconditions checked before any work starts.
+The caller never picks the epoch, so epochs cannot be reused or skipped. A shift at epoch `u64::MAX` is refused by `checked_add` instead of wrapping to 0. In CNS terms (`cns/gate.py` in the CNS repository), `engage()` and `shift()` are ALPHA-position gates: preconditions checked before any work starts.
 
 **Caps.** Every queue and wait has a ceiling in `TransmissionConfig` (src/config.rs). A zero cap, a zero wait or a wait above 24 hours fails construction, and no bad value is replaced by a default. The last two rows are fixed constants in the same file.
 
@@ -204,13 +204,13 @@ Every refusal is a typed `Trip` that names the operation, the reason, the CNS ou
 | `drain_timeout`: in-flight work did not reach zero in time | RETRY | Rollback | The old gear and epoch stay, and parked workers proceed on them. A cooldown of twice the clutch time follows. |
 | `epoch_exhausted`: engaged epoch is `u64::MAX` | TERMINAL_BREACH | Reject | No new epoch can be numbered without reuse. `engage()` keeps working on the current gear. |
 | `halted`: operator halt, recovered poison or broken invariant | TERMINAL_BREACH | Halt | Resubmitting cannot fix it; only `operator_reset()` can. Guards already issued run to completion. |
-| `halted` during a cooldown, drain or clutch wait | TERMINAL_BREACH | Halt; a pending shift is also rolled back | A halted component must not change mode. This holds even if the operator resets before the waiter wakes. |
+| `halted` during a cooldown, drain or clutch wait | TERMINAL_BREACH | Halt (any pending shift is abandoned and the old gear stays engaged) | A halted component must not change mode. This holds even if the operator resets before the waiter wakes. |
 | Lock poisoned by a panic under the lock | TERMINAL_BREACH on that call and every later one | Halt, cause `poisoned` | `UnwindRepair` already restored the state. Halting stops admission on state nobody has checked. |
 | Worker panics while holding a guard | No verdict; only that request fails | None needed | The RAII drop lowers the count during the unwind and wakes a waiting shifter. |
 | In-flight count would go below zero | Later calls get TERMINAL_BREACH | Halt, cause `invariant` | The drain guarantee can no longer be trusted. Unreachable through the public API. |
 | Invalid `TransmissionConfig` | Construction error | Reject: nothing is built | A zero cap or out-of-range wait is never replaced by a default. |
 
-**What can still panic.** The crate's own code never panics, and `shift()` contains a panic from dropping the replaced gear. Two panics from outside the crate can still reach a caller.
+**What can still panic.** The crate's own code never panics, and `shift()` catches and counts a panic from dropping the replaced gear. Two panics from outside the crate can still reach a caller.
 
 The first comes from a metrics or tracing backend that panics under the lock. The state is repaired during the unwind, and the next call halts.
 
@@ -224,29 +224,29 @@ The gear configuration may hold key material, so it is never logged, printed or 
 
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
-| `tack_transmission_engage_total` | Counter | `outcome` (pass, retry, terminal_breach) | One per `engage()` call |
-| `tack_transmission_shift_total` | Counter | `outcome` | One per `shift()` or `shift_from()` call |
-| `tack_transmission_trips_total` | Counter | `operation`, `reason` (10 values), `outcome`, `resolution` | One per refused call |
-| `tack_transmission_engage_wait_seconds` | Histogram | `outcome` | Wall time of one `engage()`, including any clutch wait |
-| `tack_transmission_shift_drain_seconds` | Histogram | `outcome` | How long the clutch was pressed, from press to swap or rollback |
-| `tack_transmission_in_flight` | Gauge | none | Drive guards out now |
-| `tack_transmission_waiting_engagers` | Gauge | none | Callers parked on the clutch |
-| `tack_transmission_clutch_pressed` | Gauge | none | 1 while a shift holds the clutch, else 0 |
-| `tack_transmission_gear_epoch` | Gauge | none | Engaged epoch; exact only up to 2^53 |
-| `tack_transmission_halted` | Gauge | none | 1 while halted, else 0 |
-| `tack_transmission_halts_total` | Counter | `cause` (operator, poisoned, invariant) | Moves into the halted state; a repeat halt is not counted |
-| `tack_transmission_operator_resets_total` | Counter | none | Resets that cleared a halt |
-| `tack_transmission_guard_panics_total` | Counter | none | Guards dropped during a panic; the count was still lowered |
-| `tack_transmission_lock_poison_recoveries_total` | Counter | none | Times the state lock was found poisoned and recovered |
-| `tack_transmission_gear_drop_panics_total` | Counter | none | Panics from a replaced gear's `G::drop`, contained inside `shift()` |
+| `stack_transmission_engage_total` | Counter | `outcome` (pass, retry, terminal_breach) | One per `engage()` call |
+| `stack_transmission_shift_total` | Counter | `outcome` | One per `shift()` or `shift_from()` call |
+| `stack_transmission_trips_total` | Counter | `operation`, `reason` (10 values), `outcome`, `resolution` | One per refused call |
+| `stack_transmission_engage_wait_seconds` | Histogram | `outcome` | Wall time of one `engage()`, including any clutch wait |
+| `stack_transmission_shift_drain_seconds` | Histogram | `outcome` | How long the clutch was pressed, from press to swap or rollback |
+| `stack_transmission_in_flight` | Gauge | none | Drive guards out now |
+| `stack_transmission_waiting_engagers` | Gauge | none | Callers parked on the clutch |
+| `stack_transmission_clutch_pressed` | Gauge | none | 1 while a shift holds the clutch, else 0 |
+| `stack_transmission_gear_epoch` | Gauge | none | Engaged epoch; exact only up to 2^53 |
+| `stack_transmission_halted` | Gauge | none | 1 while halted, else 0 |
+| `stack_transmission_halts_total` | Counter | `cause` (operator, poisoned, invariant) | Moves into the halted state; a repeat halt is not counted |
+| `stack_transmission_operator_resets_total` | Counter | none | Resets that cleared a halt |
+| `stack_transmission_guard_panics_total` | Counter | none | Guards dropped during a panic; the count was still lowered |
+| `stack_transmission_lock_poison_recoveries_total` | Counter | none | Times the state lock was found poisoned and recovered |
+| `stack_transmission_gear_drop_panics_total` | Counter | none | Panics from a replaced gear's `G::drop`, contained inside `shift()` |
 
 Gauges are written while the state lock is held, so two racing threads cannot leave a stale value behind. `Transmission::new` only registers the gauges, by adding zero. So building a second instance never clears another instance's halt signal.
 
 **Spans.** A span is a timed, named stretch of work that tracing tools draw as one bar.
 
-- `tack.transmission.engage` at DEBUG, because it is on the hot path. Fields: `timeout_ms`, `epoch`, `outcome`, `reason`.
-- `tack.transmission.shift` at INFO. Fields: `timeout_ms`, `from_epoch`, `to_epoch`, `clutch_held_ms`, `cooldown_wait_ms`, `outcome`, `reason`.
-- `tack.transmission.operator_halt` and `tack.transmission.operator_reset` at INFO.
+- `stack.transmission.engage` at DEBUG, because it is on the hot path. Fields: `timeout_ms`, `epoch`, `outcome`, `reason`.
+- `stack.transmission.shift` at INFO. Fields: `timeout_ms`, `from_epoch`, `to_epoch`, `clutch_held_ms`, `cooldown_wait_ms`, `outcome`, `reason`.
+- `stack.transmission.operator_halt` and `stack.transmission.operator_reset` at INFO.
 
 Log events carry only epochs, causes and reasons. ERROR marks each halt and each contained gear-drop panic. WARN marks a rollback, a guard released during a panic and an operator reset; INFO marks "gear shifted"; DEBUG marks the other refusals.
 
@@ -254,54 +254,54 @@ Log events carry only epochs, causes and reasons. ERROR marks each halt and each
 
 ```yaml
 groups:
-  - name: tack-transmission
+  - name: stack-transmission
     rules:
-      - alert: TackTransmissionHalted
-        expr: max(tack_transmission_halted) == 1
+      - alert: StackTransmissionHalted
+        expr: max(stack_transmission_halted) == 1
         for: 1m
         labels: { severity: critical }
         annotations:
           summary: "Transmission halted; all engage and shift calls are refused until operator_reset."
-      - alert: TackTransmissionLockPoisoned
-        expr: increase(tack_transmission_lock_poison_recoveries_total[1h]) > 0
+      - alert: StackTransmissionLockPoisoned
+        expr: increase(stack_transmission_lock_poison_recoveries_total[1h]) > 0
         labels: { severity: critical }
         annotations:
           summary: "A thread panicked while holding the transmission state lock. This points at a bug."
-      - alert: TackTransmissionClutchStuck
-        expr: max(tack_transmission_clutch_pressed) == 1
+      - alert: StackTransmissionClutchStuck
+        expr: max(stack_transmission_clutch_pressed) == 1
         for: 2m
         labels: { severity: critical }
         annotations:
           summary: "Clutch pressed longer than any allowed shift timeout; admission is paused."
-      - alert: TackTransmissionShiftRolledBack
-        expr: increase(tack_transmission_trips_total{operation="shift",reason="drain_timeout"}[15m]) > 0
+      - alert: StackTransmissionShiftRolledBack
+        expr: increase(stack_transmission_trips_total{operation="shift",reason="drain_timeout"}[15m]) > 0
         labels: { severity: warning }
         annotations:
           summary: "A mode change timed out draining and was rolled back; the old gear is still engaged."
-      - alert: TackTransmissionEngageRetryRatio
-        expr: sum(rate(tack_transmission_engage_total{outcome="retry"}[5m])) / clamp_min(sum(rate(tack_transmission_engage_total[5m])), 1e-9) > 0.05
+      - alert: StackTransmissionEngageRetryRatio
+        expr: sum(rate(stack_transmission_engage_total{outcome="retry"}[5m])) / clamp_min(sum(rate(stack_transmission_engage_total[5m])), 1e-9) > 0.05
         for: 10m
         labels: { severity: warning }
         annotations:
           summary: "More than 5% of engage calls are being told to retry (clutch waits or capacity)."
-      - alert: TackTransmissionInFlightSaturated
-        expr: increase(tack_transmission_trips_total{operation="engage",reason="in_flight_capacity"}[5m]) > 0
+      - alert: StackTransmissionInFlightSaturated
+        expr: increase(stack_transmission_trips_total{operation="engage",reason="in_flight_capacity"}[5m]) > 0
         labels: { severity: warning }
         annotations:
           summary: "max_in_flight reached; work is being refused."
-      - alert: TackTransmissionGuardPanics
-        expr: increase(tack_transmission_guard_panics_total[10m]) > 0
+      - alert: StackTransmissionGuardPanics
+        expr: increase(stack_transmission_guard_panics_total[10m]) > 0
         labels: { severity: warning }
         annotations:
           summary: "A worker panicked while holding a drive guard. The count was released, but the worker failed."
-      - alert: TackTransmissionGearDropPanics
-        expr: increase(tack_transmission_gear_drop_panics_total[1h]) > 0
+      - alert: StackTransmissionGearDropPanics
+        expr: increase(stack_transmission_gear_drop_panics_total[1h]) > 0
         labels: { severity: warning }
         annotations:
           summary: "A replaced configuration panicked in Drop during a shift. The shift completed; the configuration type has a bug."
 ```
 
-**Timing side channels.** ANC, the kernel's Active Timing Cancellation, pads responses so their timing reveals nothing. This component leaves three channels for ANC to cover, and does not close them itself.
+**Timing side channels.** ANC, the kernel's Active Timing Cancellation, pads responses so that their timing reveals less. It cannot bring the leak to zero, as the ANC analysis explains. This component leaves three channels for ANC to cover, and does not close them itself.
 
 - **The clutch window is visible.** While a shift drains, `engage()` blocks. A timer can therefore tell that a mode change, such as a key rotation, is under way. Padding must cover `max_engage_wait`, or treat a RETRY as a response to pad.
 - **Refusals are fast.** They reveal load and halt state to a timer, though not secrets.
@@ -348,7 +348,7 @@ A property test checks single-threaded operation sequences against a simple mode
 
 A stress test runs 8 workers with 1,500 successful engages each, plus 2 racing shifters. A rerun printed "stress: 48739 operations, 36268 engage retries, 420 shifts".
 
-`cargo clippy -p tack-transmission --all-targets -- -D warnings` finished with no warnings. The final run of `cargo test -p tack-transmission --all-targets` passed 45 tests in five binaries: unit, model, redteam, telemetry and threads, in that order.
+`cargo clippy -p stack-transmission --all-targets -- -D warnings` finished with no warnings. The final run of `cargo test -p stack-transmission --all-targets` passed 45 tests in five binaries: unit, model, redteam, telemetry and threads, in that order.
 
 ```text
 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s

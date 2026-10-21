@@ -196,7 +196,7 @@ fn every_metric_fires_with_closed_labels() {
         ),
     ]);
     for (kind, name, labels, _) in &snap {
-        assert!(name.starts_with("tack_greenwave_"), "{name}");
+        assert!(name.starts_with("stack_greenwave_"), "{name}");
         if *kind == MetricKind::Counter {
             assert!(name.ends_with("_total"), "{name}");
         }

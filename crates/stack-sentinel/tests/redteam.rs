@@ -1,4 +1,4 @@
-//! Red-team attacks on tack-sentinel, written by an independent tester.
+//! Red-team attacks on stack-sentinel, written by an independent tester.
 //!
 //! Every test asserts the SAFE behaviour. A test that fails marks a weakness
 //! that still exists; its failure message names the attack and what the
@@ -92,7 +92,7 @@ fn rehash(row: &mut Object) {
     row.insert("current_hash".into(), Value::Str(h));
 }
 
-const CHILD_ENV: &str = "TACK_SENTINEL_REDTEAM_CHILD";
+const CHILD_ENV: &str = "STACK_SENTINEL_REDTEAM_CHILD";
 
 /// Run `work` in a fresh copy of this test binary. Returns `None` inside the
 /// child (after `work` ran) and `Some((success, stdout, stderr))` in the parent.
@@ -241,7 +241,7 @@ fn redteam_unknown_key_on_first_row_masks_later_tampering() {
         "row 8 was edited (hash mismatch) but the report says RETRY: {}",
         summary(&r)
     );
-    assert!(breach_trips > 0, "TackSentinelTamperEvidence would not fire");
+    assert!(breach_trips > 0, "StackSentinelTamperEvidence would not fire");
 }
 
 /// Report::gate_outcome looks only at the first finding. A TERMINAL anchor
@@ -522,7 +522,7 @@ fn redteam_oversized_anchor_is_hashed_before_the_cap() {
 fn redteam_cli_non_utf8_argument_does_not_panic() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tack-sentinel-verify"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_stack-sentinel-verify"))
         .arg("--export")
         .arg(OsStr::from_bytes(b"export-\xff.json"))
         .args(["--anchor", "a", "--trusted-fingerprints", "0000000000000000"])
@@ -871,7 +871,7 @@ impl tracing::Subscriber for Collect {
 }
 
 /// No tracing span or event carries raw input, every span is named
-/// tack.sentinel.*, and every sha256 field is a full 64-hex digest.
+/// stack.sentinel.*, and every sha256 field is a full 64-hex digest.
 #[test]
 fn redteam_spans_carry_no_raw_input_and_no_short_hash() {
     let Some((ok, out, err)) = in_child("redteam_spans_carry_no_raw_input_and_no_short_hash", || {
@@ -890,7 +890,7 @@ fn redteam_spans_carry_no_raw_input_and_no_short_hash() {
         let g = log.lock().unwrap();
         assert!(!g.spans.is_empty(), "no spans captured");
         for name in g.spans.values() {
-            assert!(name.starts_with("tack.sentinel."), "span {name}");
+            assert!(name.starts_with("stack.sentinel."), "span {name}");
         }
         for (owner, field, value) in &g.fields {
             assert!(!value.contains(MARK), "{owner}.{field} carries raw input: {value}");

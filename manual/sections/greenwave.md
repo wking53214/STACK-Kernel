@@ -1,6 +1,6 @@
 ## 5. Traffic Cop and Green Wave Routing
 
-A request that finds its lane empty is dispatched within one epoch (8 ms by default) plus poll latency, whatever other lanes do.
+A request that finds its lane empty is dispatched within one epoch (8 ms by default) plus poll latency, whatever other lanes do, as long as the driver misses no phases.
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
@@ -39,7 +39,7 @@ Terms used below:
 - **ALPHA and OMEGA.** The two ends of the CNS gate. ALPHA checks before work starts; OMEGA judges a produced result.
 - **Fail closed.** Unknown or malformed input is refused, never passed.
 
-This is a new design. Only the Sentinel Hash-Chain exists today, in sentinel_os. The scheduler is a standalone Rust crate, `tack-greenwave`, and no Python repository calls it yet.
+This is a new design. Only the Sentinel Hash-Chain exists today, in sentinel_os. The scheduler is a standalone Rust crate, `stack-greenwave`, and no Python repository calls it yet.
 
 ### Mechanism
 
@@ -101,7 +101,7 @@ This spreads a lane's turns out instead of bunching them. Weights {5, 1, 1} give
         let budget = self.max_dispatch.saturating_sub(self.dispatched_in_phase).min(limit) as usize;
 ```
 
-Missed phases are not made up later. Making one up would move a lane's work into another lane's phase, which is the coupling this design removes. They are counted in `tack_greenwave_phases_missed_total` instead.
+Missed phases are not made up later. Making one up would move a lane's work into another lane's phase, which is the coupling this design removes. They are counted in `stack_greenwave_phases_missed_total` instead.
 
 **The fairness bound.** Lane L of weight w owns w phase starts in every window one epoch long. Each of those phases dispatches up to M requests from L's queue and none from any other queue. A request with k requests ahead of it therefore waits at most ceil((floor(k / M) + 1) / w) epochs, plus poll latency.
 
@@ -212,7 +212,7 @@ Before each poll the driver reserves room in its output channel, and the poll ta
 | Missed phases are lost, not made up | Lanes never borrow each other's phases | A late driver costs that lane its turn |
 | Live tickets expire at a per-lane cap | Memory stays bounded per lane | Work slower than the cap allows has its completion refused |
 
-**The Python that exists.** A search of the five TACK repositories found no Python scheduler like this. Two nearby pieces live in sentinel_os/sentinel_os, read on 2026-10-01. `rate_limiter_v2.py` is a Redis token bucket per validated API key that answers HTTP 429 with a Retry-After header.
+**The Python that exists.** A search of the five STACK repositories found no Python scheduler like this. Two nearby pieces live in sentinel_os/sentinel_os, read on 2026-10-01. `rate_limiter_v2.py` is a Redis token bucket per validated API key that answers HTTP 429 with a Retry-After header.
 
 That limiter caps how fast each caller sends, but it gives no caller a guaranteed turn. Its docstring says it fails open when Redis is unavailable, the opposite of this crate's fail-closed rule. `queue_schema.py` keeps pending jobs in one Redis list per queue, so one caller's backlog can sit ahead of everyone else's.
 
@@ -240,10 +240,10 @@ Every operation returns a typed `Trip` or a success value. Library code contains
 | `clock_regressed` (any operation, including reset) | TERMINAL_BREACH | halt | Every bound assumes time never goes backwards. Queues and live tickets are kept for the operator. |
 | `halted` (any operation while halted) | TERMINAL_BREACH | halt | Nothing the caller changes repairs it. Only an operator `reset` does. |
 | `driver_stopped` (driver loop): the runtime is shutting down | TERMINAL_BREACH | reject | The loop could not run. Nothing was taken out of a queue. |
-| `ConfigError`, 16 variants (build) | TERMINAL_BREACH | halt | The scheduler is never built. Includes `phase_too_short_for_driver` below 1 ms. |
-| Not a trip: a stage runs after its due phase ended | PASS, with `late = true` | none | Quantization absorbs lateness up to the epoch boundary. Counted in `tack_greenwave_stage_late_total`. |
-| Not a trip: phases pass with no poll | PASS on the next poll | none | Lost phases are not made up. Counted in `tack_greenwave_phases_missed_total`. |
-| Not a trip: a lane dispatches past its live-ticket cap | PASS | none; that lane's oldest ticket expires | Memory stays bounded per lane. Counted in `tack_greenwave_tickets_expired_total`. |
+| `ConfigError`, 16 variants (build) | TERMINAL_BREACH | reject | The scheduler is never built. Includes `phase_too_short_for_driver` below 1 ms. |
+| Not a trip: a stage runs after its due phase ended | PASS, with `late = true` | none | Quantization absorbs lateness up to the epoch boundary. Counted in `stack_greenwave_stage_late_total`. |
+| Not a trip: phases pass with no poll | PASS on the next poll | none | Lost phases are not made up. Counted in `stack_greenwave_phases_missed_total`. |
+| Not a trip: a lane dispatches past its live-ticket cap | PASS | none; that lane's oldest ticket expires | Memory stays bounded per lane. Counted in `stack_greenwave_tickets_expired_total`. |
 | Not a trip: the output channel is full or closed | none | none; the loop waits, or stops before dequeuing | Backpressure. No dispatched request is dropped. |
 
 The halt comes from one function that every operation calls first (src/cop.rs):
@@ -281,35 +281,35 @@ Metrics use the `metrics` facade, and every label value comes from a closed enum
 
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
-| `tack_greenwave_admissions_total` | counter | `outcome` (pass, retry, terminal_breach) | One per `admit` call. |
-| `tack_greenwave_trips_total` | counter | `op` (admit, poll, stage_check, complete, reset), `reason` (11 values), `outcome` (retry, terminal_breach), `resolution` (reject, halt) | One per refusal, except two uncounted driver-side `overflow` cases (next phase start, tokio `Instant`). |
-| `tack_greenwave_polls_total` | counter | `outcome` (pass, terminal_breach) | One per poll. |
-| `tack_greenwave_dispatched_total` | counter | none | Requests dispatched. |
-| `tack_greenwave_stage_checks_total` | counter | `outcome` (pass, retry, terminal_breach) | One per `stage_check` call. |
-| `tack_greenwave_stage_late_total` | counter | none | Stage checks that passed after the due phase had ended. |
-| `tack_greenwave_releases_total` | counter | `outcome` (pass, terminal_breach) | One per `complete` call. |
-| `tack_greenwave_phases_missed_total` | counter | none | Phases that passed with no poll, including those before the first poll. |
-| `tack_greenwave_config_rejected_total` | counter | `reason` (16 `ConfigError` values) | Configurations refused at build time. |
-| `tack_greenwave_resets_total` | counter | none | Resets that cleared a halt or found nothing. One that finds a regression is a trip. |
-| `tack_greenwave_tickets_expired_total` | counter | none | Live tickets expired at their lane's cap. |
-| `tack_greenwave_queue_wait_seconds` | histogram | none | Admission to dispatch, one sample per dispatched request. |
-| `tack_greenwave_queue_depth` | gauge | none | Requests waiting across every scheduler in the process. |
-| `tack_greenwave_halted` | gauge | none | Number of halted schedulers in the process. |
+| `stack_greenwave_admissions_total` | counter | `outcome` (pass, retry, terminal_breach) | One per `admit` call. |
+| `stack_greenwave_trips_total` | counter | `op` (admit, poll, stage_check, complete, reset), `reason` (11 values), `outcome` (retry, terminal_breach), `resolution` (reject, halt) | One per refusal, except two uncounted driver-side `overflow` cases (next phase start, tokio `Instant`). |
+| `stack_greenwave_polls_total` | counter | `outcome` (pass, terminal_breach) | One per poll. |
+| `stack_greenwave_dispatched_total` | counter | none | Requests dispatched. |
+| `stack_greenwave_stage_checks_total` | counter | `outcome` (pass, retry, terminal_breach) | One per `stage_check` call. |
+| `stack_greenwave_stage_late_total` | counter | none | Stage checks that passed after the due phase had ended. |
+| `stack_greenwave_releases_total` | counter | `outcome` (pass, terminal_breach) | One per `complete` call. |
+| `stack_greenwave_phases_missed_total` | counter | none | Phases that passed with no poll, including those before the first poll. |
+| `stack_greenwave_config_rejected_total` | counter | `reason` (16 `ConfigError` values) | Configurations refused at build time. |
+| `stack_greenwave_resets_total` | counter | none | Resets that cleared a halt or found nothing. One that finds a regression is a trip. |
+| `stack_greenwave_tickets_expired_total` | counter | none | Live tickets expired at their lane's cap. |
+| `stack_greenwave_queue_wait_seconds` | histogram | none | Admission to dispatch, one sample per dispatched request. |
+| `stack_greenwave_queue_depth` | gauge | none | Requests waiting across every scheduler in the process. |
+| `stack_greenwave_halted` | gauge | none | Number of halted schedulers in the process. |
 
 The two gauges are shared by every scheduler in a process, with no instance label. They only move by increments and decrements, so a new scheduler cannot clear another's halt.
 
-tests/telemetry.rs asserts that 13 of the 14 metrics fire, using `DebuggingRecorder` with `metrics::with_local_recorder`. No crate test covers `tack_greenwave_tickets_expired_total`; a scratch program for this manual saw it reach 1. tests/driver_metrics.rs uses a global recorder, because the driver polls on its own thread.
+tests/telemetry.rs asserts that 13 of the 14 metrics fire, using `DebuggingRecorder` with `metrics::with_local_recorder`. No crate test covers `stack_greenwave_tickets_expired_total`; a scratch program for this manual saw it reach 1. tests/driver_metrics.rs uses a global recorder, because the driver polls on its own thread.
 
-Spans, named `tack.greenwave.<operation>`:
+Spans, named `stack.greenwave.<operation>`:
 
-- `tack.greenwave.build` (INFO; fields `lanes`, `phases`, `stages`). Wraps `TrafficCop::new`.
-- `tack.greenwave.admit` (DEBUG; field `lane`). Core and driver admission.
-- `tack.greenwave.poll` (DEBUG). WARN events inside report missed phases and expired tickets.
-- `tack.greenwave.stage_check` (TRACE; fields `seq`, `stage`).
-- `tack.greenwave.complete` (TRACE; field `seq`). The completion time is not a field.
-- `tack.greenwave.reset` (INFO; field `was_halted`).
-- `tack.greenwave.drive` (INFO; field `max_phases`). The driver's poll loop.
-- `tack.greenwave.release_wait` (TRACE; field `seq`). The driver holding a result until release.
+- `stack.greenwave.build` (INFO; fields `lanes`, `phases`, `stages`). Wraps `TrafficCop::new`.
+- `stack.greenwave.admit` (DEBUG; field `lane`). Core and driver admission.
+- `stack.greenwave.poll` (DEBUG). WARN events inside report missed phases and expired tickets.
+- `stack.greenwave.stage_check` (TRACE; fields `seq`, `stage`).
+- `stack.greenwave.complete` (TRACE; field `seq`). The completion time is not a field.
+- `stack.greenwave.reset` (INFO; field `was_halted`).
+- `stack.greenwave.drive` (INFO; field `max_phases`). The driver's poll loop.
+- `stack.greenwave.release_wait` (TRACE; field `seq`). The driver holding a result until release.
 
 A clock regression logs one ERROR event with the previous and observed clock readings.
 
@@ -325,43 +325,43 @@ A clock regression logs one ERROR event with the previous and observed clock rea
 
 ```yaml
 groups:
-  - name: tack-greenwave
+  - name: stack-greenwave
     rules:
-      - alert: TackGreenwaveHalted
-        expr: max(tack_greenwave_halted) >= 1
+      - alert: StackGreenwaveHalted
+        expr: max(stack_greenwave_halted) >= 1
         labels: {severity: critical}
         annotations: {summary: "A clock went backwards; the scheduler refuses all work until an operator reset."}
-      - alert: TackGreenwaveConfigRejected
-        expr: increase(tack_greenwave_config_rejected_total[15m]) > 0
+      - alert: StackGreenwaveConfigRejected
+        expr: increase(stack_greenwave_config_rejected_total[15m]) > 0
         labels: {severity: critical}
         annotations: {summary: "A configuration failed validation; that instance never started."}
-      - alert: TackGreenwavePhasesMissed
-        expr: sum(rate(tack_greenwave_phases_missed_total[5m])) > 0
+      - alert: StackGreenwavePhasesMissed
+        expr: sum(rate(stack_greenwave_phases_missed_total[5m])) > 0
         for: 5m
         labels: {severity: warning}
         annotations: {summary: "Lanes are losing turns; the one-epoch bound is void. Check CPU saturation."}
-      - alert: TackGreenwaveQueueFullSustained
-        expr: sum(rate(tack_greenwave_trips_total{reason="queue_full"}[5m])) > 0
+      - alert: StackGreenwaveQueueFullSustained
+        expr: sum(rate(stack_greenwave_trips_total{reason="queue_full"}[5m])) > 0
         for: 15m
         labels: {severity: warning}
         annotations: {summary: "A lane sheds load continuously. Check weights and queue caps."}
-      - alert: TackGreenwaveTerminalBreaches
-        expr: sum(rate(tack_greenwave_trips_total{outcome="terminal_breach",reason!~"halted|clock_regressed"}[5m])) > 0
+      - alert: StackGreenwaveTerminalBreaches
+        expr: sum(rate(stack_greenwave_trips_total{outcome="terminal_breach",reason!~"halted|clock_regressed"}[5m])) > 0
         for: 5m
         labels: {severity: warning}
         annotations: {summary: "Unknown lanes or stages, foreign or replayed tickets: a routing fault or forged input."}
-      - alert: TackGreenwaveTicketsExpiring
-        expr: sum(rate(tack_greenwave_tickets_expired_total[5m])) > 0
+      - alert: StackGreenwaveTicketsExpiring
+        expr: sum(rate(stack_greenwave_tickets_expired_total[5m])) > 0
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "Work outlives its lane's live-ticket cap; those completions are refused."}
-      - alert: TackGreenwaveWaveBroken
-        expr: sum(rate(tack_greenwave_stage_late_total[5m])) / clamp_min(sum(rate(tack_greenwave_stage_checks_total{outcome="pass"}[5m])), 1e-9) > 0.01
+      - alert: StackGreenwaveWaveBroken
+        expr: sum(rate(stack_greenwave_stage_late_total[5m])) / clamp_min(sum(rate(stack_greenwave_stage_checks_total{outcome="pass"}[5m])), 1e-9) > 0.01
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "Over 1% of stage runs are behind the wave."}
-      - alert: TackGreenwaveQueueWaitOverEpoch
-        expr: histogram_quantile(0.99, sum by (le) (rate(tack_greenwave_queue_wait_seconds_bucket[5m]))) > 0.008
+      - alert: StackGreenwaveQueueWaitOverEpoch
+        expr: histogram_quantile(0.99, sum by (le) (rate(stack_greenwave_queue_wait_seconds_bucket[5m]))) > 0.008
         for: 10m
         labels: {severity: warning}
         annotations: {summary: "p99 queue wait over the 8 ms default epoch. Needs histogram buckets."}
@@ -401,7 +401,7 @@ Three test edits were made during the fixes:
 
 Known limitations that remain:
 
-- **Full CPU load costs phases.** The red-team binary failed 3 of 14 full runs for this manual. Two failures were `rt_driver_default_config_misses_no_phases`, at 10.5 and 12.9 ms against an 8 ms limit; the third was not identified. That test passed all 4 isolated runs.
+- **Full CPU load costs phases.** In a first series of 14 full runs for this manual, the red-team binary failed 3 times. Two failures were `rt_driver_default_config_misses_no_phases`, at 10.5 and 12.9 ms against an 8 ms limit; the third was not identified. That test passed all 4 isolated runs. A second series of 10 full runs, reported at the end of this section, had 3 failing runs: 2 in the red-team binary and 1 in driver_metrics.
 - **No fix without privileges.** Per the fix agent, the flood test holds all 4 vCPUs and the kernel wakes the driver up to about 4 ms late. Raising the driver thread's priority would need `unsafe` system calls, which the crate rules forbid. Missed phases are counted, and the bound holds only when none are lost.
 - **One unexplained failure.** tests/driver_metrics.rs failed once in 16 runs, after 1.18 s, with its message not captured. Load is the assumed cause.
 - **Blind metric reading.** Two red-team driver tests read `phases_missed_total` through a thread-local recorder that cannot see the driver thread, so it reads 0.
@@ -409,7 +409,7 @@ Known limitations that remain:
 - **Process scope.** Issuer numbers are unique per process, and each clock anchors its own epoch boundaries.
 - **Stale comment.** The `HALTED` doc comment in src/telemetry.rs says dropping a halted scheduler lowers the gauge. The `Drop` impl in src/cop.rs deliberately does not; the comment needs fixing.
 
-`cargo clippy -p tack-greenwave --all-targets -- -D warnings` finishes with no warnings. Across 10 runs of `cargo test -p tack-greenwave --all-targets` for this manual, 7 passed all 47 tests. Three failed one test each, twice in the red-team binary and once in driver_metrics.
+`cargo clippy -p stack-greenwave --all-targets -- -D warnings` finishes with no warnings. Across 10 runs of `cargo test -p stack-greenwave --all-targets` for this manual, 7 passed all 47 tests. Three failed one test each, twice in the red-team binary and once in driver_metrics.
 
 Failing runs stop at the failing binary, as in `test result: FAILED. 24 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.52s`. The final run passed; its lines are unit, driver, driver_metrics, redteam, scheduling, starvation_prop and telemetry:
 

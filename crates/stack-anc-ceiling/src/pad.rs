@@ -28,11 +28,11 @@ use crate::budget::SpinBudget;
 use crate::clock::{Clock, MonotonicClock};
 use crate::config::{CeilingConfig, ConfigError, WaitMode, ASYNC_TIMER_SLACK};
 use crate::outcome::{GateOutcome, PadResult, Padded, ReleaseInfo, Trip};
-use crate::slots::{Permit, Slots};
+use crate::slots::{Permit, Slots, Step};
 use crate::telemetry::{self, Event};
 use crate::wait::{self, bucket_offset, release_bucket, ClockFault};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tracing::field::Empty;
 use tracing::Instrument;
@@ -49,6 +49,10 @@ pub struct CeilingPad<C: Clock = MonotonicClock> {
     slots: Slots,
     budget: SpinBudget,
     halted: AtomicBool,
+    /// Value of the `strategy` label on this pad's metrics.
+    strategy: &'static str,
+    /// Open slots as last added to the `stack_anc_slots_open` gauge.
+    reported_open: AtomicUsize,
 }
 
 struct Admitted<'a> {
@@ -56,6 +60,10 @@ struct Admitted<'a> {
     mode: WaitMode,
     reserved: Duration,
     fallback_from: Option<WaitMode>,
+    /// The request waited in the spillway before it was admitted.
+    spilled: bool,
+    /// When the request first arrived; before any spillway wait.
+    arrived: Instant,
 }
 
 /// Outcome of planning and waiting: the bucket, and whether it was within
@@ -67,6 +75,15 @@ impl CeilingPad<MonotonicClock> {
     /// violated.
     pub fn new(config: CeilingConfig) -> Result<Self, ConfigError> {
         Self::with_clock(config, MonotonicClock)
+    }
+
+    /// As [`CeilingPad::new`], with its metrics under another `strategy`
+    /// label (the fast lane uses [`crate::telemetry::STRATEGY_FAST`]).
+    pub(crate) fn with_strategy(
+        config: CeilingConfig,
+        strategy: &'static str,
+    ) -> Result<Self, ConfigError> {
+        Self::build(config, MonotonicClock, strategy)
     }
 
     /// Check, from inside the runtime that will call the async API, that it
@@ -101,6 +118,7 @@ fn timer_available() -> bool {
 /// Counts an admitted async request whose future is dropped before
 /// release (a client disconnect). Disarmed just before `conclude`.
 struct CancelGuard {
+    strategy: &'static str,
     reserved: Duration,
     armed: bool,
 }
@@ -108,7 +126,7 @@ struct CancelGuard {
 impl Drop for CancelGuard {
     fn drop(&mut self) {
         if self.armed {
-            telemetry::emit_cancelled(self.reserved);
+            telemetry::emit_cancelled(self.strategy, self.reserved);
         }
     }
 }
@@ -117,12 +135,23 @@ impl<C: Clock> CeilingPad<C> {
     /// A pad on a caller-supplied clock (tests use this to inject a
     /// failing clock).
     pub fn with_clock(config: CeilingConfig, clock: C) -> Result<Self, ConfigError> {
+        Self::build(config, clock, telemetry::STRATEGY)
+    }
+
+    fn build(config: CeilingConfig, clock: C, strategy: &'static str) -> Result<Self, ConfigError> {
         config.validate()?;
         let now = clock.now();
+        let hold = config.hard_ceiling().ok_or(ConfigError {
+            field: "hard_ceiling_buckets",
+            reason: "ceiling times buckets overflows",
+        })?;
+        telemetry::emit_slots_open(strategy, 0, config.max_concurrent);
         Ok(Self {
-            slots: Slots::new(config.max_concurrent),
+            slots: Slots::new(config.max_concurrent, hold, &config.scaling, now),
             budget: SpinBudget::new(config.spin_budget, now),
             halted: AtomicBool::new(false),
+            strategy,
+            reported_open: AtomicUsize::new(config.max_concurrent),
             config,
             clock,
         })
@@ -133,9 +162,17 @@ impl<C: Clock> CeilingPad<C> {
         &self.config
     }
 
-    /// Requests currently holding a concurrency slot.
+    /// Requests admitted and not yet returned. A finished request frees its
+    /// concurrency slot only when its fixed hold time (the hard ceiling) is
+    /// over, so this is not the number of busy slots.
     pub fn in_flight(&self) -> usize {
         self.slots.in_use()
+    }
+
+    /// Concurrency slots open right now: `max_concurrent` up to
+    /// `scaling.max_slots`, moved only by public arrival counts.
+    pub fn slots_open(&self) -> usize {
+        self.slots.open()
     }
 
     /// True after a clock failure, until [`CeilingPad::reset`].
@@ -155,9 +192,9 @@ impl<C: Clock> CeilingPad<C> {
     /// halted leaves it alone). Call it only after the clock problem is
     /// understood.
     pub fn reset(&self) {
-        let _span = tracing::info_span!("tack.anc.ceiling_reset").entered();
+        let _span = tracing::info_span!("stack.anc.ceiling_reset").entered();
         let was = self.halted.swap(false, Ordering::AcqRel);
-        telemetry::emit_reset(was);
+        telemetry::emit_reset(self.strategy, was);
         tracing::warn!(was_halted = was, "ceiling pad reset by operator");
     }
 
@@ -243,19 +280,31 @@ impl<C: Clock> CeilingPad<C> {
     }
 
     /// Step 2 of the module docs. `start` is already taken.
+    ///
+    /// `Ok(None)` means every slot is held but the spillway has room: wait
+    /// `spillway_wait` and call again with `after_spill`.
     fn admit(
         &self,
         start: Instant,
         input_len: Option<usize>,
         async_api: bool,
-    ) -> Result<Admitted<'_>, Trip> {
+        after_spill: bool,
+    ) -> Result<Option<Admitted<'_>>, Trip> {
         if self.is_halted() {
             return Err(Trip::Halted);
         }
         if input_len.is_some_and(|n| n > self.config.max_input_len) {
             return Err(Trip::InputTooLarge);
         }
-        let permit = self.slots.try_acquire().ok_or(Trip::SlotsFull)?;
+        let permit = if after_spill {
+            self.slots.retry(start).ok_or(Trip::SlotsFull)?
+        } else {
+            match self.slots.enter(start) {
+                Step::In(p) => p,
+                Step::Spill => return Ok(None),
+                Step::Shed => return Err(Trip::SlotsFull),
+            }
+        };
         let charge = if async_api {
             self.config.async_spin_charge()
         } else {
@@ -266,12 +315,68 @@ impl<C: Clock> CeilingPad<C> {
         } else {
             (WaitMode::Sleep, Duration::ZERO, Some(self.config.mode))
         };
-        Ok(Admitted {
+        Ok(Some(Admitted {
             _permit: permit,
             mode,
             reserved,
             fallback_from,
-        })
+            spilled: false,
+            arrived: start,
+        }))
+    }
+
+    /// Admit, waiting in the spillway first if need be. Returns the
+    /// admission and the instant the padded window starts from. On refusal,
+    /// also says whether the request had waited in the spillway.
+    fn admit_blocking(
+        &self,
+        first: Instant,
+        input_len: Option<usize>,
+    ) -> Result<(Admitted<'_>, Instant), (Trip, bool)> {
+        if let Some(a) = self
+            .admit(first, input_len, false, false)
+            .map_err(|t| (t, false))?
+        {
+            return Ok((a, first));
+        }
+        std::thread::sleep(self.slots.spill_wait());
+        let start = self.clock.now();
+        self.after_spill(first, start, self.admit(start, input_len, false, true))
+    }
+
+    /// As [`CeilingPad::admit_blocking`], waiting on the async timer.
+    async fn admit_async(
+        &self,
+        first: Instant,
+        input_len: Option<usize>,
+    ) -> Result<(Admitted<'_>, Instant), (Trip, bool)> {
+        if let Some(a) = self
+            .admit(first, input_len, true, false)
+            .map_err(|t| (t, false))?
+        {
+            return Ok((a, first));
+        }
+        tokio::time::sleep(self.slots.spill_wait()).await;
+        let start = self.clock.now();
+        self.after_spill(first, start, self.admit(start, input_len, true, true))
+    }
+
+    /// Mark the outcome of the second try as coming after a spillway wait.
+    fn after_spill<'a>(
+        &self,
+        first: Instant,
+        start: Instant,
+        second: Result<Option<Admitted<'a>>, Trip>,
+    ) -> Result<(Admitted<'a>, Instant), (Trip, bool)> {
+        match second {
+            Ok(Some(mut a)) => {
+                a.spilled = true;
+                a.arrived = first;
+                Ok((a, start))
+            }
+            Ok(None) => Err((Trip::SlotsFull, true)),
+            Err(t) => Err((t, true)),
+        }
     }
 
     /// Step 4: the release target, its bucket, and whether it is within
@@ -288,8 +393,12 @@ impl<C: Clock> CeilingPad<C> {
         Ok((target, k, k <= u64::from(self.config.hard_ceiling_buckets)))
     }
 
-    fn early(&self, start: Instant, trip: Trip) -> Event {
-        Event::early(trip, self.clock.now().saturating_duration_since(start))
+    fn early(&self, start: Instant, trip: Trip, spilled: bool) -> Event {
+        Event::early(
+            trip,
+            self.clock.now().saturating_duration_since(start),
+            spilled,
+        )
     }
 
     fn run_blocking<T>(
@@ -297,10 +406,10 @@ impl<C: Clock> CeilingPad<C> {
         input_len: Option<usize>,
         op: impl FnOnce() -> T,
     ) -> (PadResult<T>, Event) {
-        let start = self.clock.now();
-        let adm = match self.admit(start, input_len, false) {
+        let first = self.clock.now();
+        let (adm, start) = match self.admit_blocking(first, input_len) {
             Ok(a) => a,
-            Err(trip) => return (Err(trip), self.early(start, trip)),
+            Err((trip, spilled)) => return (Err(trip), self.early(first, trip, spilled)),
         };
         let value = op();
         let completion = self.clock.now();
@@ -382,13 +491,14 @@ impl<C: Clock> CeilingPad<C> {
         let start = self.clock.now();
         if !timer_available() {
             let trip = Trip::TimerUnavailable;
-            return (Err(trip), self.early(start, trip));
+            return (Err(trip), self.early(start, trip, false));
         }
-        let adm = match self.admit(start, input_len, true) {
+        let (adm, start) = match self.admit_async(start, input_len).await {
             Ok(a) => a,
-            Err(trip) => return (Err(trip), self.early(start, trip)),
+            Err((trip, spilled)) => return (Err(trip), self.early(start, trip, spilled)),
         };
         let mut guard = CancelGuard {
+            strategy: self.strategy,
             reserved: adm.reserved,
             armed: true,
         };
@@ -440,15 +550,19 @@ impl<C: Clock> CeilingPad<C> {
         value: Option<T>,
         waited: Waited,
     ) -> (PadResult<T>, Event) {
-        let observed = self.clock.now().saturating_duration_since(start);
+        let released = self.clock.now();
+        // `observed` is the padded window (what `ReleaseInfo` reports); the
+        // metric adds any spillway wait, which the client also sees.
+        let observed = released.saturating_duration_since(start);
         let mut ev = Event {
             outcome: GateOutcome::Pass,
             trip: None,
             overrun_released: None,
             fallback_from: adm.fallback_from,
             reserved_spin: adm.reserved,
-            observed,
+            observed: released.saturating_duration_since(adm.arrived),
             newly_halted: false,
+            spilled: adm.spilled,
         };
         let result = match (waited, value) {
             (Ok((k, true)), Some(value)) => {
@@ -483,6 +597,14 @@ impl<C: Clock> CeilingPad<C> {
         (result, ev)
     }
 
+    /// Move the open-slot gauge to the current count. Runs after release;
+    /// the count is public (a function of arrival times).
+    fn report_open(&self) {
+        let now = self.slots.open();
+        let before = self.reported_open.swap(now, Ordering::AcqRel);
+        telemetry::emit_slots_open(self.strategy, before, now);
+    }
+
     fn after_release<T>(
         &self,
         span: &tracing::Span,
@@ -490,7 +612,8 @@ impl<C: Clock> CeilingPad<C> {
         ev: &Event,
         input: Option<&[u8]>,
     ) {
-        telemetry::emit(ev);
+        telemetry::emit(self.strategy, ev);
+        self.report_open();
         span.record("outcome", ev.outcome.as_str());
         span.record("trip", ev.trip.map_or("none", Trip::label));
         if let Ok(p) = result {
@@ -520,7 +643,7 @@ fn pad_span(async_api: bool) -> tracing::Span {
     // `tracing` span names must be literals, hence two calls.
     if async_api {
         tracing::debug_span!(
-            "tack.anc.ceiling_pad_async",
+            "stack.anc.ceiling_pad_async",
             outcome = Empty,
             trip = Empty,
             buckets = Empty,
@@ -528,7 +651,7 @@ fn pad_span(async_api: bool) -> tracing::Span {
         )
     } else {
         tracing::debug_span!(
-            "tack.anc.ceiling_pad",
+            "stack.anc.ceiling_pad",
             outcome = Empty,
             trip = Empty,
             buckets = Empty,

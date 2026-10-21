@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * ≡TACK KERNEL LAYER 3: Rate Limiting, Debt Tracking, and Execution Deadlines
+ * ≡STACK KERNEL LAYER 3: Rate Limiting, Debt Tracking, and Execution Deadlines
  *
  * ───────────────────────────────────────────────────────────────────────────
  * LAYER 3 OVERVIEW

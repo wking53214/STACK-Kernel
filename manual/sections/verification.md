@@ -1,6 +1,6 @@
 ## Verification pipeline
 
-A build ships only if all 16 timing verdicts stay at or below |t| 4.5, at 100,000 samples per class, on the first attempt.
+A build ships only if all 16 timing verdicts stay at or below |t| 4.5, at 100,000 samples per class, on the first attempt: 11 strategy verdicts (3 for Strategy 1, 4 for Strategy 2, 4 for Strategy 3) and 5 constant-time control runs.
 
 *New design: the job below has not run on GitHub Actions. Its gate expressions were run against the recorded verify output, and its test commands were re-run for this section.*
 
@@ -10,10 +10,10 @@ The job has two parts. `unit` runs on every pull request, on a GitHub-hosted mac
 
 `timing` runs nightly and on release tags, on a self-hosted runner: a machine the team owns, which GitHub sends jobs to. It calibrates the harness, runs the three strategies' release-mode `examples/verify` programs pinned to one core, and gates on their JSON output.
 
-Timing runs apart from `unit` for two reasons. It measures for about 13 minutes: 232 s for Strategy 1, 453 to 511 s for Strategy 2, 9 s for Strategy 3. It also needs a quiet machine, and a shared hosted runner is noisier than even the VM used for this manual.
+Timing runs apart from `unit` for two reasons. It measures for about 12 minutes: 232 s for Strategy 1, 453 to 511 s for Strategy 2, 9 s for Strategy 3. It also needs a quiet machine, and a shared hosted runner is noisier than even the VM used for this manual.
 
 ```yaml
-name: tack-kernel-verify
+name: stack-kernel-verify
 
 on:
   pull_request:
@@ -32,10 +32,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [tack-inlet, tack-trident, tack-bumpers, tack-minotaur,
-                tack-greenwave, tack-transmission, tack-sentinel,
-                tack-anc-harness, tack-anc-ceiling, tack-anc-adaptive,
-                tack-anc-pipeline]
+        crate: [stack-inlet, stack-trident, stack-bumpers, stack-minotaur,
+                stack-greenwave, stack-transmission, stack-sentinel,
+                stack-anc-harness, stack-anc-ceiling, stack-anc-adaptive,
+                stack-anc-pipeline]
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install 1.94 --profile minimal --component clippy
@@ -44,8 +44,8 @@ jobs:
 
   timing:
     if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, linux, x64, tack-timing]
-    concurrency: {group: tack-timing, cancel-in-progress: false}
+    runs-on: [self-hosted, linux, x64, stack-timing]
+    concurrency: {group: stack-timing, cancel-in-progress: false}
     timeout-minutes: 60
     env:
       CPU: "3"
@@ -64,10 +64,10 @@ jobs:
         run: |
           rustup toolchain install 1.94 --profile minimal
           mkdir -p bin out
-          cargo +1.94 build --release -p tack-anc-harness --example calibrate
+          cargo +1.94 build --release -p stack-anc-harness --example calibrate
           cp target/release/examples/calibrate bin/
           for c in ceiling adaptive pipeline; do
-            cargo +1.94 build --release -p tack-anc-$c --example verify
+            cargo +1.94 build --release -p stack-anc-$c --example verify
             cp target/release/examples/verify bin/verify-$c
           done
       - name: Calibrate the harness on this host
@@ -155,8 +155,8 @@ The `cargo test` smoke tests use smaller samples, debug builds and, for Strategy
 | Run | Samples | Smallest mean shift the uncropped test could flag |
 |---|---|---|
 | Harness calibration | 200,000 per run across both classes; 1,000 A/A runs (50 recorded so far) | Not applicable |
-| Strategy 1 verify | 100,000 per class target, drawn at random (100,084 A and 99,916 B) | 1.9 to 4.7 us, padded |
-| Strategy 2 verify | 100,000 per class; 10,000 probes per class for poisoning; about 20,000 per class at the production budget | 13.4 to 20.4 us, epoch target |
+| Strategy 1 verify | 100,000 per class target, drawn at random (100,084 A and 99,916 B) | 1.9 to 4.7 µs, padded |
+| Strategy 2 verify | 100,000 per class; 10,000 probes per class for poisoning; about 20,000 per class at the production budget | 13.4 to 20.4 µs, epoch target |
 | Strategy 3 verify | Exactly 100,000 per class | 8.3 to 17.0 ns, through the gate |
 | `cargo test` smoke tests | 20,000 per class (Strategies 1 and 3), 2,000 per class (Strategy 2) | Not evidence |
 
@@ -185,18 +185,18 @@ Runner and calibration failures are RETRY, because the instrument failed, not th
 The `unit` job fails today on three crates. The red teams' open findings stay as failing tests, never skipped, so a fix or an owner decision is what turns them green. The final summary lines of `cargo test -p <crate> --all-targets`, re-run for this section:
 
 ```text
-$ cargo test -p tack-anc-ceiling --all-targets
+$ cargo test -p stack-anc-ceiling --all-targets
 test result: FAILED. 16 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.64s
-error: test failed, to rerun pass `-p tack-anc-ceiling --test redteam`
-$ cargo test -p tack-anc-adaptive --all-targets
+error: test failed, to rerun pass `-p stack-anc-ceiling --test redteam`
+$ cargo test -p stack-anc-adaptive --all-targets
 test result: FAILED. 14 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
-error: test failed, to rerun pass `-p tack-anc-adaptive --test redteam`
-$ cargo test -p tack-anc-pipeline --all-targets
+error: test failed, to rerun pass `-p stack-anc-adaptive --test redteam`
+$ cargo test -p stack-anc-pipeline --all-targets
 test result: FAILED. 11 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.11s
-error: test failed, to rerun pass `-p tack-anc-pipeline --test redteam`
+error: test failed, to rerun pass `-p stack-anc-pipeline --test redteam`
 ```
 
-The other eight crates passed every test in this re-run, and clippy with warnings denied exited 0 for all eleven. Two timing-sensitive suites are flaky on a loaded host. They are Strategy 1's rt04 and Green Wave's driver tests, which failed 3 of 10 earlier full runs.
+The other eight crates passed every test in this re-run, and clippy with warnings denied exited 0 for all eleven. Two timing-sensitive suites are flaky on a loaded host: Strategy 1's rt04, which failed 3 of 12 full runs, and Green Wave's driver tests, which failed in 3 of 10.
 
 ### What a pass does and does not establish
 

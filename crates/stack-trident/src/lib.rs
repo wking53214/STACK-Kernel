@@ -1,9 +1,9 @@
 //! # stack-trident: the Inter-Agent Trident
 //!
-//! **Status: new design.** Of the seven TACK kernel components, only the
+//! **Status: new design.** Of the seven STACK kernel components, only the
 //! Sentinel Hash-Chain exists today (in `sentinel_os`). This crate is a
 //! reference implementation of a component that does not yet exist in any
-//! TACK repository. It borrows one check from `sentinel_os` (TRANSPLANTED)
+//! STACK repository. It borrows one check from `sentinel_os` (TRANSPLANTED)
 //! and the gate vocabulary from CNS; nothing else here is running anywhere.
 //!
 //! ## The metaphor
@@ -145,7 +145,7 @@
 //! ## Telemetry
 //!
 //! Metric names are in [`telemetry`]. Labels come only from closed enums.
-//! The verify span, `tack.trident.verify`, records the input length and the
+//! The verify span, `stack.trident.verify`, records the input length and the
 //! full SHA-256 hex digest of the input (the raw bytes on the wire path,
 //! the canonical MAC input on the in-process path), never the input
 //! itself. An input over the size cap is logged by length only, because
@@ -154,7 +154,7 @@
 //! ## Open questions
 //!
 //! 1. **Interop with CNS `subject_digest`.** `cns.gate.subject_digest` in
-//!    `/home/user/CNS/cns/gate.py` does not hash JSON. It hashes a
+//!    `cns/gate.py` in the CNS repository does not hash JSON. It hashes a
 //!    type-tagged, length-prefixed rendering, and it accepts floats. A
 //!    Python producer that fills `subject_digest` with the CNS function
 //!    will fail prong 2 on every envelope. Either the envelope specifies

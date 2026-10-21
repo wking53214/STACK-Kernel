@@ -5,13 +5,13 @@ mod common;
 
 use common::{counter, find, gauge, ms, us, BackwardsOnce, Snap};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-use std::sync::Barrier;
-use std::time::{Duration, Instant};
 use stack_anc_adaptive::telemetry::{names, sha256_hex};
 use stack_anc_adaptive::{
     AdaptivePad, EpochConfig, EpochQuantizedTarget, LeakBudgetConfig, NaiveConfig, PadConfig,
     SpinBudgetConfig, Trip, WaitMode, WindowStatistic,
 };
+use std::sync::Barrier;
+use std::time::{Duration, Instant};
 
 const E: (&str, &str) = ("controller", "epoch");
 const N: (&str, &str) = ("controller", "naive");
@@ -37,6 +37,8 @@ fn epoch_pad_metrics_fire() {
                 },
                 max_concurrent: 1,
                 max_input_len: 8,
+                allow_naive_controller: false,
+                scaling: stack_anc_adaptive::SlotScaling::default(),
             },
             EpochConfig {
                 initial_level: 0,
@@ -46,8 +48,11 @@ fn epoch_pad_metrics_fire() {
         .unwrap();
         // 1: on time, spin granted (the burst covers one tail).
         pad.pad(|| ()).unwrap();
+        // A slot is held for the cap (4 ms) after admission; let it free.
+        std::thread::sleep(ms(5));
         // 2: escalated 1 ms -> 2 ms; the budget is empty, so it sleeps.
         pad.pad(|| std::thread::sleep(us(1_300))).unwrap();
+        std::thread::sleep(ms(5));
         // 3: past the 4 ms cap: RETRY, overrun retry, 1 ms -> ... -> cap.
         assert_eq!(
             pad.pad(|| std::thread::sleep(ms(5))).unwrap_err(),
@@ -58,6 +63,7 @@ fn epoch_pad_metrics_fire() {
             pad.pad_input(&[0u8; 9], |_| ()).unwrap_err(),
             Trip::InputTooLarge
         );
+        std::thread::sleep(ms(5));
         // 5: slots full, shed (another thread holds the only slot; its own
         // metrics go to no recorder).
         let entered = Barrier::new(2);
@@ -219,7 +225,10 @@ fn leak_budget_exhaustion_metrics_fire() {
 fn naive_pad_metrics_fire() {
     let snap = record(|| {
         let pad = AdaptivePad::naive(
-            PadConfig::default(),
+            PadConfig {
+                allow_naive_controller: true,
+                ..PadConfig::default()
+            },
             NaiveConfig {
                 statistic: WindowStatistic::Mean,
                 window: 4,
@@ -328,4 +337,44 @@ fn assert_no_free_form_labels(snap: &Snap) {
             assert!(ok, "label {}={} on {}", l.key(), l.value(), key.name());
         }
     }
+}
+
+#[test]
+fn slots_open_gauge_and_spilled_counter() {
+    use stack_anc_adaptive::SlotScaling;
+    let snap = record(|| {
+        // Cap 4 ms, so a slot is held 4 ms. One slot, one spillway place
+        // that waits 2 ms.
+        let pad = AdaptivePad::epoch(
+            PadConfig {
+                mode: WaitMode::Sleep,
+                spin_tail: us(100),
+                spin_budget: SpinBudgetConfig::Unlimited,
+                max_concurrent: 1,
+                max_input_len: 8,
+                allow_naive_controller: false,
+                scaling: SlotScaling {
+                    max_slots: 2,
+                    reaction_delay: ms(5),
+                    spillway_size: 1,
+                    spillway_wait: ms(2),
+                    ..SlotScaling::default()
+                },
+            },
+            EpochConfig {
+                initial_level: 0,
+                ..EpochConfig::new(ms(1), ms(4))
+            },
+        )
+        .unwrap();
+        pad.pad(|| ()).unwrap();
+        // The slot is held: spill, wait 2 ms, retry once, shed.
+        assert_eq!(pad.pad(|| ()).unwrap_err(), Trip::SlotsFull);
+    });
+    assert_eq!(counter(&snap, names::SPILLED_TOTAL, &[S, E]), 1);
+    assert_eq!(
+        counter(&snap, names::SHED_TOTAL, &[S, E, ("reason", "slots_full")]),
+        1
+    );
+    assert_eq!(gauge(&snap, names::SLOTS_OPEN, &[S, E]), Some(1.0));
 }

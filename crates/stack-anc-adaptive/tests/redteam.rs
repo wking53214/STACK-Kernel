@@ -536,51 +536,167 @@ fn attack_leak_budget_renews_every_window() {
 // Attack 10. One slow request per epoch pins everyone at the cap.
 // ---------------------------------------------------------------------------
 
-/// A decrease needs the whole epoch's largest work time to fit the lower
-/// level. One attacker request per epoch with work near the cap therefore
-/// holds every honest request at the cap forever, at a cost of one request
-/// per second against any honest volume. SAFE: with 1 slow request per 1000
-/// fast ones, the target leaves the cap within 30 epochs.
-#[test]
-fn attack_one_slow_request_per_epoch_pins_cap() {
+/// Thirty one-second epochs of 1000 requests, `slow_per_epoch` of them
+/// slow (1.5 ms against a 1.6 ms cap), the first one right after the epoch
+/// boundary. Returns the controller afterwards.
+fn slow_trickle(tolerated: u16, slow_per_epoch: u64) -> EpochQuantizedTarget {
     let o = Instant::now();
     let cfg = EpochConfig {
         leak_budget: LeakBudgetConfig {
             bits: 1.0e6,
             window: Duration::from_secs(3_600),
         },
+        tolerated_slow_permille: tolerated,
         ..EpochConfig::new(us(100), us(1_600))
     };
     let mut c = EpochQuantizedTarget::new(cfg, o).unwrap();
     for sec in 0..30u64 {
         for k in 0..1_000u64 {
-            let work = if k == 500 { us(1_500) } else { us(50) };
+            let work = if k < slow_per_epoch { us(1_500) } else { us(50) };
             step(&mut c, o + ms(sec * 1_000) + us(k * 900), work);
         }
     }
+    c
+}
+
+/// A decrease needs the whole epoch's largest work time to fit the lower
+/// level. One attacker request per epoch with work near the cap therefore
+/// holds every honest request at the cap forever, at a cost of one request
+/// per second against any honest volume. That is the strict default and it
+/// is kept: with `tolerated_slow_permille` at zero the weakness is
+/// documented, not hidden. This asserts it is still there so a change to the
+/// default cannot go unnoticed.
+#[test]
+fn attack_one_slow_request_per_epoch_pins_cap_when_strict() {
+    let c = slow_trickle(0, 1);
+    assert_eq!(c.target(), c.config().cap, "the strict default no longer pins");
+}
+
+/// SAFE with the tolerance on: with 1 slow request per 1000 fast ones and
+/// 1 percent of traffic tolerated, the target leaves the cap, and the slow
+/// requests are charged to the leak budget instead of raising the level.
+#[test]
+fn attack_one_slow_request_per_epoch_cannot_pin_cap_with_tolerance() {
+    let c = slow_trickle(10, 1);
     println!(
-        "after 30 epochs with 1 slow per 1000 fast: target {:?} (floor {:?}, cap {:?})",
+        "after 30 epochs with 1 slow per 1000 fast: target {:?} (floor {:?}, cap {:?}), \
+         window changes {}",
         c.target(),
-        cfg.floor,
-        cfg.cap
+        c.config().floor,
+        c.config().cap,
+        c.status().window_changes
     );
     assert!(
-        c.target() < cfg.cap,
+        c.target() < c.config().cap,
         "0.1 percent attacker traffic holds 100 percent of requests at the cap"
     );
+    assert!(
+        c.status().window_changes >= 29,
+        "rare slow requests must still be charged to the leak budget"
+    );
+}
+
+/// The tolerance is a share of the traffic, not a count: an attacker who
+/// sends more than 1 percent slow requests still holds the level up. Its
+/// cost grows with the honest volume.
+#[test]
+fn attack_slow_share_above_the_tolerance_still_pins_cap() {
+    let c = slow_trickle(10, 30);
+    assert_eq!(c.target(), c.config().cap, "3 percent slow traffic should pin");
+}
+
+/// One slow request first thing in the epoch is judged against the last
+/// epoch's volume, not against the two or three requests that finished
+/// before it, so it cannot raise the shared level.
+#[test]
+fn attack_slow_request_at_epoch_start_does_not_raise_the_level() {
+    let o = Instant::now();
+    let cfg = EpochConfig {
+        leak_budget: LeakBudgetConfig {
+            bits: 1.0e6,
+            window: Duration::from_secs(3_600),
+        },
+        tolerated_slow_permille: 10,
+        initial_level: 1,
+        ..EpochConfig::new(us(100), us(1_600))
+    };
+    let mut c = EpochQuantizedTarget::new(cfg, o).unwrap();
+    // A full epoch of fast traffic, then a slow request at the start of the
+    // next one.
+    for k in 0..1_000u64 {
+        step(&mut c, o + us(k * 900), us(50));
+    }
+    let level_before = c.level();
+    let t = o + ms(1_000);
+    step(&mut c, t, us(1_500));
+    assert!(c.level() <= level_before, "level rose to {}", c.level());
+}
+
+/// A genuine shift (every request slow) is not rare and still raises the
+/// level at once.
+#[test]
+fn honest_shift_still_raises_the_level() {
+    let o = Instant::now();
+    let cfg = EpochConfig {
+        leak_budget: LeakBudgetConfig {
+            bits: 1.0e6,
+            window: Duration::from_secs(3_600),
+        },
+        tolerated_slow_permille: 10,
+        initial_level: 0,
+        ..EpochConfig::new(us(100), us(1_600))
+    };
+    let mut c = EpochQuantizedTarget::new(cfg, o).unwrap();
+    for k in 0..200u64 {
+        step(&mut c, o + us(k * 900), us(50));
+    }
+    for k in 200..260u64 {
+        step(&mut c, o + us(k * 900), us(700));
+    }
+    assert!(c.target() >= us(700), "level stayed at {:?}", c.target());
+}
+
+/// Bounds of the new setting.
+#[test]
+fn held_tolerated_slow_permille_bounds() {
+    for ok in [0u16, 10, 500] {
+        let cfg = EpochConfig { tolerated_slow_permille: ok, ..EpochConfig::new(us(100), us(1_600)) };
+        assert!(cfg.validate().is_ok(), "{ok}");
+    }
+    for bad in [501u16, u16::MAX] {
+        let cfg = EpochConfig { tolerated_slow_permille: bad, ..EpochConfig::new(us(100), us(1_600)) };
+        assert_eq!(cfg.validate().unwrap_err().field, "tolerated_slow_permille");
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Attack 11. Naive late release: the raw work time is the response time.
 // ---------------------------------------------------------------------------
 
-/// The naive controller is reachable through the public constructor
-/// `AdaptivePad::naive` with no opt-in, and its late release puts the raw,
-/// secret-dependent work time on the wire. This is a documented leak kept for
-/// measurement, so this test asserts the leak is present: each late release
-/// equals its own raw work time. A safe controller would fail this assertion.
+/// The naive controller used to be reachable through the public constructor
+/// `AdaptivePad::naive` with no opt-in. SAFE: building one is refused unless
+/// `allow_naive_controller` is set, and the refusal names that field.
 #[test]
-fn attack_naive_late_release_is_raw_work_time() {
+fn attack_naive_constructor_requires_opt_in() {
+    let refused = AdaptivePad::naive(PadConfig::default(), NaiveConfig::new(us(300)));
+    match refused {
+        Err(e) => assert_eq!(e.field, "allow_naive_controller", "{e}"),
+        Ok(_) => panic!("the naive controller was built with no opt-in"),
+    }
+    let opted_in = PadConfig {
+        allow_naive_controller: true,
+        ..PadConfig::default()
+    };
+    assert!(AdaptivePad::naive(opted_in, NaiveConfig::new(us(300))).is_ok());
+}
+
+/// Documents a leak kept for measurement: a late naive release is the raw,
+/// secret-dependent work time. The naive controller is not safe and is not
+/// meant to be, so this asserts the leak is still there. If it ever stops
+/// failing the "safe" reading, the leak measurements in the verify example
+/// no longer measure the design the brief proposed.
+#[test]
+fn naive_late_release_is_raw_work_time_by_design() {
     let s = Snapshot {
         target: us(100),
         cap: us(1_000),
@@ -726,7 +842,7 @@ fn held_metric_labels_are_closed_set() {
                 }
             });
         }
-        let naive = AdaptivePad::naive(PadConfig::default(), NaiveConfig::new(us(300))).unwrap();
+        let naive = AdaptivePad::naive(PadConfig { allow_naive_controller: true, ..PadConfig::default() }, NaiveConfig::new(us(300))).unwrap();
         for _ in 0..5 {
             let _ = naive.pad_input(b"x\ny=z", |_| ());
         }
@@ -898,9 +1014,135 @@ fn held_concurrent_state_stays_consistent() {
         }
     });
     assert_eq!(pad.in_flight(), 0);
-    assert!(max_seen.load(Ordering::Relaxed) <= 4);
+    // Slots free on a clock, so a request that outlives its hold can overlap
+    // newer ones; the backstop (4 x max_concurrent) bounds the pile-up.
+    assert!(max_seen.load(Ordering::Relaxed) <= 16);
     let st = pad.status();
     assert_eq!(st.requests_total, admitted.load(Ordering::Relaxed) as u64);
     assert!(st.leak_bits.is_finite());
     assert!((st.leak_bits - epoch_bound_bits(st.window_changes, st.window_requests)).abs() < 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Extra slots on backlog, and the spillway.
+// ---------------------------------------------------------------------------
+
+fn scaling_pad() -> AdaptivePad<EpochQuantizedTarget> {
+    AdaptivePad::epoch(
+        PadConfig {
+            max_concurrent: 1,
+            scaling: stack_anc_adaptive::SlotScaling {
+                max_slots: 3,
+                step: 1,
+                // Longer than the test, so no slot opens mid-probe.
+                reaction_delay: Duration::from_secs(1),
+                cooldown_windows: 2,
+                spillway_size: 1,
+                spillway_wait: ms(10),
+            },
+            ..PadConfig::default()
+        },
+        EpochConfig::new(ms(20), ms(20)),
+    )
+    .unwrap()
+}
+
+/// Attack class "a secret changes the number of open slots or the spillway
+/// verdict". The slot count and the spillway use only arrival times, so a
+/// probe sees the same verdict, the same wait and the same open-slot count
+/// whether the victim's secret work was short or long. SAFE.
+#[test]
+fn attack_scaling_and_spillway_independent_of_victim_secret() {
+    let mut seen = Vec::new();
+    for victim_work in [ms(1), ms(30)] {
+        let pad = scaling_pad();
+        let started = AtomicBool::new(false);
+        let (probe, waited, open) = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _ = pad.pad(|| {
+                    started.store(true, Ordering::SeqCst);
+                    std::thread::sleep(victim_work);
+                });
+            });
+            while !started.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+            std::thread::sleep(ms(2));
+            // Finds the one open slot held, waits in the spillway, tries
+            // again 10 ms later and finds it still held (hold 20 ms).
+            let t = Instant::now();
+            let probe = pad.pad(|| ()).map(|_| ()).map_err(|t| t.label());
+            let waited = t.elapsed();
+            (probe, waited, pad.slots_open())
+        });
+        println!("victim {victim_work:?}: probe {probe:?} after {waited:?}, {open} slots open");
+        assert!(waited >= ms(10) && waited < ms(18), "spillway wait {waited:?}");
+        seen.push((probe, open));
+    }
+    assert_eq!(seen[0], seen[1], "scaling or spillway revealed the victim's work");
+}
+
+/// A flood opens slots up to the maximum and quiet closes them again.
+#[test]
+fn scaling_opens_under_flood_and_closes_when_quiet() {
+    let pad = Arc::new(
+        AdaptivePad::epoch(
+            PadConfig {
+                max_concurrent: 1,
+                scaling: stack_anc_adaptive::SlotScaling {
+                    max_slots: 4,
+                    step: 1,
+                    reaction_delay: ms(5),
+                    cooldown_windows: 2,
+                    ..Default::default()
+                },
+                ..PadConfig::default()
+            },
+            EpochConfig::new(ms(2), ms(4)),
+        )
+        .unwrap(),
+    );
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            let pad = pad.clone();
+            let stop = &stop;
+            s.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = pad.pad(|| ());
+                    std::thread::sleep(us(200));
+                }
+            });
+        }
+        std::thread::sleep(ms(120));
+        stop.store(true, Ordering::Relaxed);
+    });
+    let peak = pad.slots_open();
+    println!("slots open after the flood: {peak}");
+    assert!(peak > 1 && peak <= 4, "peak {peak}");
+    std::thread::sleep(ms(200));
+    let _ = pad.pad(|| ());
+    assert_eq!(pad.slots_open(), 1, "slots stayed open after the flood");
+}
+
+/// Config bounds for the new settings.
+#[test]
+fn held_scaling_config_bounds() {
+    use stack_anc_adaptive::SlotScaling;
+    let with = |sc: SlotScaling| PadConfig { max_concurrent: 4, scaling: sc, ..PadConfig::default() };
+    let ok = SlotScaling { max_slots: 8, ..SlotScaling::default() };
+    assert!(with(ok).validate().is_ok());
+    for bad in [
+        SlotScaling { max_slots: 3, ..ok },
+        SlotScaling { max_slots: usize::MAX, ..ok },
+        SlotScaling { step: 0, ..ok },
+        SlotScaling { reaction_delay: Duration::ZERO, ..ok },
+        SlotScaling { reaction_delay: Duration::MAX, ..ok },
+        SlotScaling { cooldown_windows: 0, ..ok },
+        SlotScaling { spillway_size: 2, spillway_wait: Duration::ZERO, ..ok },
+        SlotScaling { spillway_size: 2, spillway_wait: Duration::from_secs(60), ..ok },
+        SlotScaling { spillway_size: usize::MAX, spillway_wait: ms(1), ..ok },
+    ] {
+        assert!(with(bad).validate().is_err(), "{bad:?}");
+    }
 }

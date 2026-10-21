@@ -1,4 +1,4 @@
-# Elegant Defect-Fixing Completion: ≡TACK Kernel
+# Elegant Defect-Fixing Completion: ≡STACK Kernel
 
 **Author**: William N. King  
 **Date**: 2026-10-02  
@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-All six layers of the ≡TACK Kernel have completed beautification, rewriting, and defect-fixing phases. The kernel now enforces governance through a hybrid preemption model (P3.2) with comprehensive trap logging for the Sentinel flywheel analysis system.
+All six layers of the ≡STACK Kernel have completed beautification, rewriting, and defect-fixing phases. The kernel now enforces governance through a hybrid preemption model (P3.2) with comprehensive trap logging for the Sentinel flywheel analysis system.
 
 **Metrics**:
 - 6 layers designed, implemented, hardened
@@ -219,7 +219,7 @@ All six layers of the ≡TACK Kernel have completed beautification, rewriting, a
 
 ✅ **CNS Integration Contract Verified**
 
-≡TACK kernel components are SystemAdapters in LibraryComposer:
+≡STACK kernel components are SystemAdapters in LibraryComposer:
 
 - **Layer 1 (HardwareClock)**: ALPHA - measurement foundation
 - **Layer 2 (Preemption)**: OMEGA - deadline enforcement outcome
@@ -229,7 +229,7 @@ All six layers of the ≡TACK Kernel have completed beautification, rewriting, a
 - **Layer 6 (Isolation)**: ALPHA - memory boundary isolation
 - **P3.2 (Hard Preemption)**: Hybrid model with schema-backed Sentinel integration
 
-**SSOT Rule Enforced**: CNS is always single source of truth. ≡TACK conforms to CNS, never reverse.
+**SSOT Rule Enforced**: CNS is always single source of truth. ≡STACK conforms to CNS, never reverse.
 
 ---
 
@@ -270,12 +270,12 @@ bba99f3 Layer 1 - HardwareClock - Fail on unknown architecture
 ## What's Next
 
 1. **Sentinel Integration**: Implement Sentinel analysis engine to consume trap logs and propose boundary reorganizations
-2. **Operational Deployment**: Stage ≡TACK in production Minotaur environment with Sentinel monitoring
+2. **Operational Deployment**: Stage ≡STACK in production Minotaur environment with Sentinel monitoring
 3. **Cross-Project Validation**: Apply Elegant.md methodology to other kernel codebases (GALLM, observe-perceive, etc.)
 
 ---
 
-**Status**: ≡TACK Kernel defect-fixing phase COMPLETE. Kernel hardened and ready for production deployment.
+**Status**: ≡STACK Kernel defect-fixing phase COMPLETE. Kernel hardened and ready for production deployment.
 
 **Authorization**: William N. King, Principal Architect  
 **Validation**: Red-team audit (comprehensive), ghost_tools serum (mutation testing), CNS SSOT verification

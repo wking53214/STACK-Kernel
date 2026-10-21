@@ -8,9 +8,9 @@ The Inlet Winnowing Filter refuses malformed UTF-8 and 4,307 banned characters b
 
 A combine harvester has a winnowing fan at its grain inlet. The fan blows the light chaff away before anything reaches the threshing drum, so the drum only ever sees grain.
 
-The inlet is that fan for the TACK kernel. It sits at the kernel boundary and refuses bad text before any other component reads it. In CNS terms it is an ALPHA gate: a check that runs before any work starts.
+The inlet is that fan for the STACK kernel. It sits at the kernel boundary and refuses bad text before any other component reads it. In CNS terms it is an ALPHA gate: a check that runs before any work starts.
 
-It is a new design. No TACK repository had an inlet filter before the `tack-inlet` crate, and no Python version exists. Of the seven components, only the Sentinel Hash-Chain in sentinel_os exists today.
+It is a new design. No STACK repository had an inlet filter before the `stack-inlet` crate, and no Python version exists. Of the seven components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 The goal has two parts. First, nothing malformed or disguised crosses the boundary. Second, the check itself cannot be turned into a weapon.
 
@@ -32,7 +32,7 @@ The filter works in three stages: a length check, one pass of an automaton over 
 ```rust
     #[must_use]
     pub fn winnow(&self, input: &[u8]) -> Verdict {
-        let span = tracing::info_span!("tack.inlet.winnow", len = input.len());
+        let span = tracing::info_span!("stack.inlet.winnow", len = input.len());
         let _entered = span.enter();
         let started = Instant::now();
         let v = if input.len() > self.config.max_len {
@@ -156,7 +156,7 @@ Every trip returns a typed `Verdict`. Library code has no `unwrap`, `expect` or 
 
 The inlet uses only two of the four kernel resolutions. It holds no state, so there is nothing to roll back, and halting would let one hostile request stop the inlet for everyone.
 
-Quarantine here means the verdict marks the input for review and `tack_inlet_quarantined_total` rises. The inlet knows no sender, so isolating the sender is the caller's job.
+Quarantine here means the verdict marks the input for review and `stack_inlet_quarantined_total` rises. The inlet knows no sender, so isolating the sender is the caller's job.
 
 | Trip | Outcome | State resolution | Why |
 |---|---|---|---|
@@ -226,13 +226,13 @@ Every label comes from a closed list. A label is a tag on a metric, and each new
 
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
-| `tack_inlet_verdicts_total` | counter | `outcome`, `reason` | One per verdict. `reason` is the first violation's reason, or `none` on a pass. A passing precheck emits nothing. |
-| `tack_inlet_violations_total` | counter | none | Adds each verdict's violation count: 0 on a pass, 1 for a cap refusal. |
-| `tack_inlet_reason_seen_total` | counter | `reason` | Once per verdict for each distinct reason present, even one that was not first. |
-| `tack_inlet_quarantined_total` | counter | none | One per TERMINAL_BREACH verdict, whose resolution is always quarantine. |
-| `tack_inlet_streams_abandoned_total` | counter | `outcome` | Streams dropped without `finish`, by the outcome so far. A non-pass abandoned stream also counts in every other metric. |
-| `tack_inlet_input_bytes` | histogram | none | Input length per verdict. An oversize refusal records the cap plus one, never the declared length. |
-| `tack_inlet_scan_duration_seconds` | histogram | `outcome` | Wall time from the start of the operation to the verdict, SHA-256 included. |
+| `stack_inlet_verdicts_total` | counter | `outcome`, `reason` | One per verdict. `reason` is the first violation's reason, or `none` on a pass. A passing precheck emits nothing. |
+| `stack_inlet_violations_total` | counter | none | Adds each verdict's violation count: 0 on a pass, 1 for a cap refusal. |
+| `stack_inlet_reason_seen_total` | counter | `reason` | Once per verdict for each distinct reason present, even one that was not first. |
+| `stack_inlet_quarantined_total` | counter | none | One per TERMINAL_BREACH verdict, whose resolution is always quarantine. |
+| `stack_inlet_streams_abandoned_total` | counter | `outcome` | Streams dropped without `finish`, by the outcome so far. A non-pass abandoned stream also counts in every other metric. |
+| `stack_inlet_input_bytes` | histogram | none | Input length per verdict. An oversize refusal records the cap plus one, never the declared length. |
+| `stack_inlet_scan_duration_seconds` | histogram | `outcome` | Wall time from the start of the operation to the verdict, SHA-256 included. |
 
 The `outcome` label takes `pass`, `retry` or `terminal_breach`. The `reason` label takes the 14 reason names or `none`. Every verdict passes through this one function (src/telemetry.rs):
 
@@ -253,11 +253,11 @@ The test file tests/telemetry.rs asserts that these metrics fire, using `Debuggi
 
 Spans are named, timed regions of work in the `tracing` log. All three are at info level:
 
-- `tack.inlet.winnow`, field `len`: wraps one `Inlet::winnow` call.
-- `tack.inlet.precheck`, field `declared_len`: wraps one `Inlet::precheck` call. The declared length appears here and nowhere else.
-- `tack.inlet.stream`, field `chunks`: created by `Inlet::scanner` and entered only at `finish` or drop, never per chunk.
+- `stack.inlet.winnow`, field `len`: wraps one `Inlet::winnow` call.
+- `stack.inlet.precheck`, field `declared_len`: wraps one `Inlet::precheck` call. The declared length appears here and nowhere else.
+- `stack.inlet.stream`, field `chunks`: created by `Inlet::scanner` and entered only at `finish` or drop, never per chunk.
 
-Log events, target `tack_inlet::telemetry`:
+Log events, target `stack_inlet::telemetry`:
 
 - DEBUG `inlet admitted input`: outcome, len, input_hmac.
 - WARN `inlet refused input`: outcome, reason, resolution, first_offset, count, len, scanned, abandoned, input_hmac.
@@ -278,41 +278,41 @@ Alert rules are Prometheus expressions evaluated over these metrics on a schedul
 
 ```yaml
 groups:
-  - name: tack-inlet
+  - name: stack-inlet
     rules:
-      - alert: TackInletTerminalBreach
-        expr: increase(tack_inlet_quarantined_total[5m]) > 0
+      - alert: StackInletTerminalBreach
+        expr: increase(stack_inlet_quarantined_total[5m]) > 0
         labels:
           severity: warning
         annotations:
           summary: An overlong form or bidi override reached the inlet. Find the WARN line by input_hmac.
-      - alert: TackInletRetryFlood
-        expr: sum(rate(tack_inlet_verdicts_total{outcome="retry"}[5m])) > 10
+      - alert: StackInletRetryFlood
+        expr: sum(rate(stack_inlet_verdicts_total{outcome="retry"}[5m])) > 10
         labels:
           severity: warning
         annotations:
           summary: More than 10 repairable refusals a second, from a broken encoder or a probe.
-      - alert: TackInletAbandonedRefusals
-        expr: increase(tack_inlet_streams_abandoned_total{outcome!="pass"}[5m]) > 0
+      - alert: StackInletAbandonedRefusals
+        expr: increase(stack_inlet_streams_abandoned_total{outcome!="pass"}[5m]) > 0
         labels:
           severity: warning
         annotations:
           summary: Streams were dropped with a refusal pending, such as a probe that hung up.
-      - alert: TackInletChunkLimit
-        expr: increase(tack_inlet_verdicts_total{reason="chunk_limit"}[5m]) > 0
+      - alert: StackInletChunkLimit
+        expr: increase(stack_inlet_verdicts_total{reason="chunk_limit"}[5m]) > 0
         labels:
           severity: info
         annotations:
           summary: Senders hit the chunk cap, from a tiny-frame client or a framing attack.
-      - alert: TackInletScanSlow
-        expr: histogram_quantile(0.99, sum by (le) (rate(tack_inlet_scan_duration_seconds_bucket[5m]))) > 0.005
+      - alert: StackInletScanSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(stack_inlet_scan_duration_seconds_bucket[5m]))) > 0.005
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: The p99 time to a verdict is above 5 ms, from CPU starvation or a raised max_len.
-      - alert: TackInletBidiSeen
-        expr: increase(tack_inlet_reason_seen_total{reason="bidi_control"}[1h]) > 0
+      - alert: StackInletBidiSeen
+        expr: increase(stack_inlet_reason_seen_total{reason="bidi_control"}[1h]) > 0
         labels:
           severity: info
         annotations:
@@ -334,7 +334,7 @@ The red team ran 24 tests covering 23 attacks against the built crate. Before fi
 | One million empty `feed` calls on a 64-byte cap (major) | Broke: about 90 full scans of CPU, then PASS. Fixed. | New `max_chunks` cap, default 4,096. The stream now stops after 4,097 calls with RETRY, in 56 microseconds. |
 | Line and paragraph separators U+2028 and U+2029 (minor) | Broke. Fixed. | Refused as `del_or_c1_control`, like the C1 line break NEL. |
 | `precheck(u64::MAX)` reports an attacker-sized length (minor) | Broke: len 18446744073709551615. Fixed. | The length is clamped to the cap plus one: 65,537 at the default. |
-| The same declared length poisons `tack_inlet_input_bytes` (minor) | Broke: one value ruined the histogram's sum. Fixed. | The same clamp applies, so the histogram records 65,537. |
+| The same declared length poisons `stack_inlet_input_bytes` (minor) | Broke: one value ruined the histogram's sum. Fixed. | The same clamp applies, so the histogram records 65,537. |
 | 64 KiB fed as 65,536 one-byte chunks (minor) | Broke: 11.0 times the cost of one chunk. Fixed. | The span is entered only at finish: 2.6 times with the chunk cap raised. At the default cap the stream stops at chunk 4,097. |
 | Refusal log length encodes the bad byte's position (minor) | Broke: 254 versus 258 bytes. Fixed: 231 and 231. | Offsets and counts are zero-padded to 8 digits. The `reason` length still reveals the class. |
 | A stream dropped before `finish` leaves no trace (minor) | Broke. Fixed. | `Drop` now judges and records what was fed, so a dropped Trojan Source probe reaches the quarantine counter. |
@@ -354,10 +354,10 @@ The red team ran 24 tests covering 23 attacks against the built crate. Before fi
 
 The fix pass edited some existing tests and recorded each edit. Tests in hand_cases.rs and logging.rs that asserted the exact behaviour a fix changed now assert the new behaviour. In redteam.rs, the reference ban list grew to match the new bans, and a log-capture cache race was fixed.
 
-Final run of `cargo test -p tack-inlet --all-targets` for this manual: 71 passed and 0 failed across 7 targets. The doctest passes separately, and `cargo clippy -p tack-inlet --all-targets -- -D warnings` is clean.
+Final run of `cargo test -p stack-inlet --all-targets` for this manual: 71 passed and 0 failed across 7 targets. The doctest passes separately, and `cargo clippy -p stack-inlet --all-targets -- -D warnings` is clean.
 
 ```text
-     Running unittests src/lib.rs (target/debug/deps/tack_inlet-a6affdc3e6919659)
+     Running unittests src/lib.rs (target/debug/deps/stack_inlet-a6affdc3e6919659)
 test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
      Running tests/hand_cases.rs (target/debug/deps/hand_cases-f0e9726ed489621d)
 test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.97s
