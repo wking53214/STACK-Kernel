@@ -121,7 +121,7 @@ pub struct Report {
 /// Mirror of the CNS `GateOutcome` vocabulary (`cns/gate.py`), so strategy
 /// crates can map a verdict without depending on anything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
 pub enum GateOutcome {
     /// No leak detected at the threshold.
     Pass,
@@ -144,12 +144,13 @@ pub enum InconclusiveReason {
 }
 
 impl GateOutcome {
-    /// The CNS spelling: `PASS`, `RETRY` or `TERMINAL_BREACH`.
+    /// The CNS wire value: `pass`, `retry` or `terminal_breach`, the
+    /// values of `cns.gate.GateOutcome`. Serialization uses the same strings.
     pub const fn as_str(self) -> &'static str {
         match self {
-            GateOutcome::Pass => "PASS",
-            GateOutcome::Retry => "RETRY",
-            GateOutcome::TerminalBreach => "TERMINAL_BREACH",
+            GateOutcome::Pass => "pass",
+            GateOutcome::Retry => "retry",
+            GateOutcome::TerminalBreach => "terminal_breach",
         }
     }
 }
