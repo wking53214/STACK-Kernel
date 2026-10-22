@@ -49,6 +49,14 @@ cargo test --workspace --all-targets --no-fail-fast
 
 The ANC red-team tests are timing-sensitive. On a loaded machine a run can fail one or two of them, for example `attack_one_slow_request_per_epoch_pins_cap`. Rerun before treating a failure as a regression. The Summary section lists the open ANC limits.
 
+CI tests the four ANC crates in two jobs, both in release and one test at a
+time. `anc` runs every test except the wall-clock ones and blocks a merge.
+`anc-wall-clock` runs exactly the wall-clock ones, named with the reason for
+each in `ANC_WALL_CLOCK_TESTS` in `.github/workflows/ci.yml`, on every push
+and pull request. It is marked `continue-on-error` because a shared runner
+can fail them with no code change, so read its result before merging ANC
+changes.
+
 Timing measurements need release builds on a quiet machine:
 
 ```
