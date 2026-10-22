@@ -70,6 +70,8 @@ It currently reports one understood difference (an anchor that seals zero rows:
 Python says `VERIFIED`, Rust says `TRUNCATED`). The header of
 `crates/stack-sentinel/tests/crosscheck.rs` explains the rest.
 
+A second test in the same file, `live_edge_cases_differ_only_as_documented`, feeds both programs twelve hand-built inputs. They agree on six. On the other six Rust is stricter by design: duplicate JSON keys, nesting deeper than 256, a key file over 1 MiB, more than 64 keys, and keys supplied only through the environment.
+
 ## Design Analogy: The Flywheel
 
 ≡STACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
