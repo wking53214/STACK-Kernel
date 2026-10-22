@@ -4,7 +4,7 @@ Ceiling padding showed no detectable leak in 9 of 9 release runs at about 100,00
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 A pass here means no detectable leak at that sample size, on one 4-vCPU (virtual CPU) machine. It is never a proof. The same runs, plus a red-team pass, also show where the brief's design had to change.
 
@@ -20,7 +20,7 @@ The idea of the fix is a train that leaves on the timetable, not when the last p
 
 1. Read the monotonic clock and call it `start`. A monotonic clock only moves forward, unlike wall-clock time, which an operator or a time-sync service can reset.
 2. Check public facts only: the halted flag, the input length, a free concurrency slot and the spin budget. A failed check returns at once with a fixed code that carries nothing from the input or the secret. An empty spin budget only switches the wait to Sleep.
-3. Run the operation. This is the only secret-dependent step.
+3. Run the operation. This is the only secret-dependent step. A panic inside it is caught here and treated like a late finish, so it never crosses the pad.
 4. Read the clock again. Compute the bucket k: the smallest whole number for which k times the ceiling reaches the completion time. On time is k = 1.
 5. Wait until `start + k * ceiling`, then return the reply. The pad never releases early.
 
@@ -63,6 +63,7 @@ pub fn release_bucket(elapsed: Duration, ceiling: Duration) -> u64 {
 | `ClockFailure` | The clock went backwards, stopped, or overflowed | TERMINAL_BREACH | halt | Padding means nothing without a trustworthy clock. The pad refuses all work until an operator calls `reset()`. |
 | `Halted` | Any request after a clock failure | TERMINAL_BREACH | halt | The same halt, held until operator reset. |
 | `TimerUnavailable` | Async call on a tokio runtime without its timer | TERMINAL_BREACH | reject | A deployment error that resubmitting cannot fix. The pad itself is healthy, so it does not halt. |
+| `OperationPanicked` | The operation panicked | TERMINAL_BREACH | reject | The panic is caught, the reply leaves on the same schedule as a normal one, and the slot is freed and counted. A halt would let one bad request stop the pad. |
 
 Two events are not trips, and both are counted. An overrun inside the hard ceiling is served as PASS at bucket k. An empty spin budget is served as PASS in Sleep mode.
 
@@ -318,4 +319,5 @@ The 10 unit tests, the leak guard and both telemetry tests passed every time the
 - **The debug digest is unkeyed.** A low-entropy input such as a token guess can be recovered from its SHA-256 by dictionary search. Keep debug logs off, or private, on secret-bearing paths.
 - **The threat model has edges.** Attackers on the same physical core, through its cache or a sibling hardware thread (SMT), are out of scope. The metrics endpoint must stay private, because the overrun and fallback counters describe load.
 - **Timer detection can abort.** `TimerUnavailable` is detected by creating a timer inside `catch_unwind`, so a `panic = "abort"` build aborts instead of returning the trip.
+- **Panic catching needs unwinding.** `OperationPanicked` relies on `catch_unwind`, so a `panic = "abort"` build aborts the process instead of returning the trip.
 - **These numbers describe one host.** Rerun `examples/verify.rs` on the target machine before choosing a ceiling or a mode.

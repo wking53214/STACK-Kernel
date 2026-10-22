@@ -1,6 +1,6 @@
-# ≡STACK Kernel
+# ≡TACK Kernel
 
-Reference implementation of the ≡STACK governance kernel, written in Rust and C++ with comprehensive red-team validation. Each component was built, attacked by a separate red-team agent, hardened, measured and documented. The complete manual is in `manual/`.
+Reference implementation of the ≡TACK governance kernel, written in Rust and C++ with comprehensive red-team validation. Each component was built, attacked by a separate red-team agent, hardened, measured and documented. The complete manual is in `manual/`.
 
 These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](https://github.com/wking53214/CNS), Apache-2.0). Several source comments reference that contract.
 
@@ -47,7 +47,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets --no-fail-fast
 ```
 
-The ANC red-team tests are timing-sensitive. On a loaded machine a run can fail one or two of them, for example `attack_one_slow_request_per_epoch_pins_cap`. Rerun before treating a failure as a regression. The Summary section lists the open ANC limits.
+Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. One test fails every time because it records an open finding: `shedding_reflects_load_only_for_balanced_dummy`, in ANC Strategy 3. The Summary section lists the open ANC limits.
+
+CI tests the four ANC crates in two jobs, both in release and one test at a
+time. `anc` runs every test except the wall-clock ones and blocks a merge.
+`anc-wall-clock` runs exactly the wall-clock ones, named with the reason for
+each in `ANC_WALL_CLOCK_TESTS` in `.github/workflows/ci.yml`, on every push
+and pull request. It is marked `continue-on-error` because a shared runner
+can fail them with no code change, so read its result before merging ANC
+changes.
 
 Timing measurements need release builds on a quiet machine:
 
@@ -70,9 +78,11 @@ It currently reports one understood difference (an anchor that seals zero rows:
 Python says `VERIFIED`, Rust says `TRUNCATED`). The header of
 `crates/stack-sentinel/tests/crosscheck.rs` explains the rest.
 
+A second test in the same file, `live_edge_cases_differ_only_as_documented`, feeds both programs twelve hand-built inputs. They agree on six. On the other six Rust is stricter by design: duplicate JSON keys, nesting deeper than 256, a key file over 1 MiB, more than 64 keys, and keys supplied only through the environment.
+
 ## Design Analogy: The Flywheel
 
-≡STACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
+≡TACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
 
 ### The River and Its Banks
 
@@ -80,7 +90,7 @@ Imagine a river system where banks are not static walls, but adaptive barriers. 
 
 Neither the water nor the banks are static. They are in constant conversation.
 
-### Applied to ≡STACK
+### Applied to ≡TACK
 
 1. **Payload executes** within the six-layer containment boundary
 2. **Boundary enforces**: deadline fires, quota exhausted, capability revoked, memory exceeded

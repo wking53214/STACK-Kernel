@@ -49,6 +49,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use stack_sentinel::canonical::sha256_hex;
 use stack_sentinel::pyjson::{dumps, Object, Separators, Value};
@@ -178,7 +179,9 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("stack-crosscheck-{}", std::process::id()));
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("stack-crosscheck-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -205,7 +208,7 @@ fn write_private(path: &Path, text: &str) {
     f.write_all(text.as_bytes()).unwrap();
 }
 
-fn run(program: &str, leading: &[&str], args: &[&str]) -> Outcome {
+fn run(program: &str, leading: &[&str], args: &[&str], extra_env: &[(&str, &str)]) -> Outcome {
     let mut cmd = Command::new(program);
     cmd.args(leading).args(args);
     // The same environment for both programs, with the ledger's own key
@@ -216,6 +219,9 @@ fn run(program: &str, leading: &[&str], args: &[&str]) -> Outcome {
         }
     }
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
     let out = cmd.output().unwrap_or_else(|e| panic!("could not start {program}: {e}"));
     let code = i64::from(out.status.code().unwrap_or(-1));
     Outcome::from_output(code, &String::from_utf8_lossy(&out.stdout))
@@ -296,8 +302,8 @@ fn live_python_and_rust_binaries_agree_on_every_case() {
             keys_s.as_str(),
         ];
 
-        let py = run(&python, &[tool.as_str()], &args);
-        let rs = run(rust, &[], &args);
+        let py = run(&python, &[tool.as_str()], &args, &[]);
+        let rs = run(rust, &[], &args, &[]);
         *tally
             .entry(py.verdict.clone().unwrap_or_else(|| format!("exit {}", py.exit)))
             .or_default() += 1;
@@ -343,4 +349,201 @@ fn live_python_and_rust_binaries_agree_on_every_case() {
     for word in ["VERIFIED", "TAMPERED", "TRANSPLANTED", "SEED_FORGED", "TRUNCATED", "UNATTESTED", "exit 2"] {
         assert!(tally.contains_key(word), "no case produced {word}: {tally:?}");
     }
+}
+
+
+/// One hand-built input aimed at a place where the two programs are known or
+/// suspected to differ.
+struct Edge {
+    name: &'static str,
+    export_text: String,
+    /// `None` leaves `--key-file` off the command line.
+    key_file: Option<String>,
+    env: Vec<(&'static str, String)>,
+    /// `None` means the two programs must agree. `Some` lists the exact
+    /// Python and Rust outcomes of a documented difference.
+    expected: Option<(Outcome, Outcome, &'static str)>,
+}
+
+/// Byte range of the first `"key": "..."` string value, quotes included.
+fn string_value_span(text: &str, key: &str) -> (usize, usize) {
+    let pattern = format!("\"{key}\": \"");
+    let at = text.find(&pattern).unwrap_or_else(|| panic!("no string value for {key}"));
+    let open = at + pattern.len() - 1;
+    let close = open + 1 + text[open + 1..].find('"').expect("unterminated string");
+    (open, close + 1)
+}
+
+fn replace_first_value(text: &str, key: &str, raw_json: &str) -> String {
+    let (a, b) = string_value_span(text, key);
+    format!("{}{}{}", &text[..a], raw_json, &text[b..])
+}
+
+fn duplicate_first_pair(text: &str, key: &str) -> String {
+    let (a, b) = string_value_span(text, key);
+    let start = a - format!("\"{key}\": ").len();
+    format!("{}{}, {}", &text[..start], &text[start..b], &text[start..])
+}
+
+fn edge_cases() -> Vec<Edge> {
+    let base = load_cases()
+        .into_iter()
+        .find(|c| {
+            c.recorded_python.verdict.as_deref() == Some("VERIFIED")
+                && c.anchor.is_some()
+                && c.key_file.lines().count() == 1
+        })
+        .expect("the manifest has no single-key VERIFIED case to build from");
+    let text = base.export_text.clone();
+    let one_key = base.key_file.clone();
+    let edge = |name: &'static str, export_text: String, key_file: Option<String>| Edge {
+        name,
+        export_text,
+        key_file,
+        env: Vec::new(),
+        expected: None,
+    };
+    let nested = |depth: usize| format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+    let mut padded_over_cap = one_key.clone();
+    for i in 0..30_000 {
+        padded_over_cap.push_str(&format!("padding-key-{i:06}-not-a-real-secret\n"));
+    }
+    let mut sixty_five_keys = one_key.clone();
+    for i in 0..64 {
+        sixty_five_keys.push_str(&format!("padding-key-{i:02}-not-a-real-secret\n"));
+    }
+    let mut env_only = edge("env_key_only", text.clone(), None);
+    env_only.env.push(("ICEBERG_LEDGER_ATTESTATION_KEY", one_key.trim().to_owned()));
+    let mut edges = vec![
+        edge("control_verified", text.clone(), Some(one_key.clone())),
+        edge(
+            "duplicate_top_level_key",
+            text.replacen('{', "{\"format\": \"sentinel_os.ledger_export.v1\", ", 1),
+            Some(one_key.clone()),
+        ),
+        edge("duplicate_row_key", duplicate_first_pair(&text, "current_hash"), Some(one_key.clone())),
+        edge(
+            "lone_surrogate_escape",
+            replace_first_value(&text, "current_hash", "\"\\ud800\""),
+            Some(one_key.clone()),
+        ),
+        edge("nesting_300_deep", replace_first_value(&text, "current_hash", &nested(300)), Some(one_key.clone())),
+        edge("nesting_5000_deep", replace_first_value(&text, "current_hash", &nested(5000)), Some(one_key.clone())),
+        edge(
+            "integer_5000_digits",
+            replace_first_value(&text, "current_hash", &"1".repeat(5000)),
+            Some(one_key.clone()),
+        ),
+        edge("nan_literal", replace_first_value(&text, "current_hash", "NaN"), Some(one_key.clone())),
+        edge("utf8_bom_prefix", format!("\u{feff}{text}"), Some(one_key.clone())),
+        edge("key_file_over_1_mib", text.clone(), Some(padded_over_cap)),
+        edge("sixty_five_keys", text.clone(), Some(sixty_five_keys)),
+        env_only,
+    ];
+    let outcome = |exit: i64, verdict: Option<&str>, row: Option<&str>| Outcome {
+        exit,
+        verdict: verdict.map(str::to_owned),
+        row: row.map(str::to_owned),
+        also: false,
+    };
+    // Where the two differ, Rust is the stricter program. The manual
+    // (sentinel.md, "Stricter than Python") gives each reason.
+    for e in &mut edges {
+        e.expected = match e.name {
+            "duplicate_top_level_key" | "duplicate_row_key" => Some((
+                outcome(0, Some("VERIFIED"), None),
+                outcome(1, None, None),
+                "Python keeps the last of two equal keys; Rust refuses duplicate JSON keys as malformed",
+            )),
+            "nesting_300_deep" => Some((
+                outcome(1, Some("TAMPERED"), Some("1")),
+                outcome(1, None, None),
+                "Python parses 300 levels and finds the hash wrong; Rust refuses nesting deeper than 256",
+            )),
+            "key_file_over_1_mib" => Some((
+                outcome(0, Some("VERIFIED"), None),
+                outcome(2, None, None),
+                "Rust refuses a key file over max_key_file_bytes (1 MiB); Python reads any size",
+            )),
+            "sixty_five_keys" => Some((
+                outcome(0, Some("VERIFIED"), None),
+                outcome(2, None, None),
+                "Rust refuses more than max_keys (64) keys; Python takes any number",
+            )),
+            "env_key_only" => Some((
+                outcome(0, Some("VERIFIED"), None),
+                outcome(2, None, None),
+                "Python also reads ICEBERG_LEDGER_ATTESTATION_KEY; Rust takes keys only from --key-file",
+            )),
+            _ => None,
+        };
+    }
+    edges
+}
+
+/// Twelve hand-built inputs that probe where the two parsers and loaders could
+/// differ: duplicate keys, deep nesting, huge integers, lone surrogates, NaN, a
+/// byte-order mark, key-file size and count, and keys given only by the
+/// environment. Six must agree with each other. On the other six the test pins
+/// exactly how they differ, so a change to either program shows up here.
+#[test]
+#[ignore = "needs SENTINEL_OS_DIR (a sentinel_os checkout) and PYTHON (an interpreter with its dependencies); run with --ignored"]
+fn live_edge_cases_differ_only_as_documented() {
+    let os_dir = std::env::var("SENTINEL_OS_DIR")
+        .expect("set SENTINEL_OS_DIR to a sentinel_os checkout (see the header of this file)");
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_owned());
+    let tool = Path::new(&os_dir).join("tools").join("verify_receipts.py");
+    assert!(tool.is_file(), "{} does not exist; is SENTINEL_OS_DIR a sentinel_os checkout?", tool.display());
+    let tool = tool.to_str().unwrap().to_owned();
+    let rust = env!("CARGO_BIN_EXE_stack-sentinel-verify");
+
+    let base = load_cases()
+        .into_iter()
+        .find(|c| {
+            c.recorded_python.verdict.as_deref() == Some("VERIFIED")
+                && c.anchor.is_some()
+                && c.key_file.lines().count() == 1
+        })
+        .expect("the manifest has no single-key VERIFIED case to build from");
+    let scratch = Scratch::new();
+    let export = scratch.path("export.json");
+    let anchor = scratch.path("ledger.anchor");
+    let keys = scratch.path("keys.txt");
+    fs::write(&anchor, base.anchor.as_deref().unwrap()).unwrap();
+    let fps = base.fingerprints.join(",");
+
+    let mut problems = Vec::new();
+    for e in edge_cases() {
+        fs::write(&export, &e.export_text).unwrap();
+        let mut args: Vec<String> = vec![
+            "--export".into(),
+            export.to_str().unwrap().into(),
+            "--anchor".into(),
+            anchor.to_str().unwrap().into(),
+            "--trusted-fingerprints".into(),
+            fps.clone(),
+        ];
+        if let Some(k) = &e.key_file {
+            write_private(&keys, k);
+            args.push("--key-file".into());
+            args.push(keys.to_str().unwrap().into());
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let env: Vec<(&str, &str)> = e.env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let py = run(&python, &[tool.as_str()], &args, &env);
+        let rs = run(rust, &[], &args, &env);
+        if e.name == "control_verified" && (py.verdict.as_deref() != Some("VERIFIED") || rs.verdict.as_deref() != Some("VERIFIED")) {
+            problems.push(format!("control_verified is not VERIFIED in both: python={py:?} rust={rs:?}"));
+        }
+        match &e.expected {
+            None if py != rs => problems.push(format!("{}: python={:?} rust={:?}", e.name, py, rs)),
+            None => {}
+            Some((ep, er, why)) if py != *ep || rs != *er => problems.push(format!(
+                "{}: listed as `{why}` but now python={py:?} rust={rs:?}, expected python={ep:?} rust={er:?}",
+                e.name
+            )),
+            Some(_) => {}
+        }
+    }
+    assert!(problems.is_empty(), "{} unexplained edge-case difference(s):\n{}", problems.len(), problems.join("\n"));
 }

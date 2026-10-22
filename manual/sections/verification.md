@@ -74,8 +74,8 @@ jobs:
         run: |
           taskset -c "$CPU" bin/calibrate 200000 1000 > out/calibrate.json
           jq -e '.aa.false_positives_max_abs_t <= 10
-            and ([.victims[] | .leaky.gate_outcome == "TERMINAL_BREACH"
-                  and .ct.gate_outcome == "PASS"] | all)' out/calibrate.json
+            and ([.victims[] | .leaky.gate_outcome == "terminal_breach"
+                  and .ct.gate_outcome == "pass"] | all)' out/calibrate.json
       - name: Measure the three strategies
         run: |
           for c in ceiling adaptive pipeline; do
@@ -93,7 +93,7 @@ jobs:
             and ([.summary.primary_gate.constant_time,
                   .summary.primary_gate_with_debugging_recorder.constant_time,
                   .summary.secondary_gate.constant_time,
-                  .summary.bare.constant_time] | all(.harness_gate_outcome == "PASS"))
+                  .summary.bare.constant_time] | all(.harness_gate_outcome == "pass"))
             and .summary.constant_time_conditional_branches == 0' out/pipeline.json
       - name: KS hold (p below 0.001 needs a recorded owner decision)
         run: |
@@ -114,6 +114,8 @@ jobs:
 ```
 
 The three `verify` programs share one binary name, so each is copied out right after its build. The `jq -e` lines exit non-zero when their expression is false, which fails the step.
+
+The harness writes gate outcomes as CNS's wire values, `pass`, `retry` and `terminal_breach`, and the gates above compare against those. The runs recorded in `manual/measurements/` were taken before that change and spell them `PASS` and `TERMINAL_BREACH`.
 
 The Strategy 2 and 3 gates are the ones their sections tested; the Strategy 1 gate was written for this section. Against the recorded results, the |t| gate exited 0 on all 10 runs: 3, 4 and 3 for Strategies 1, 2 and 3.
 

@@ -1,8 +1,8 @@
 //! # stack-minotaur: the Minotaur String
 //!
-//! **Status: new design.** Of the seven components of the STACK governance
+//! **Status: new design.** Of the seven components of the TACK governance
 //! kernel, only the Sentinel Hash-Chain exists today (in `sentinel_os`). The
-//! Minotaur String did not exist in any STACK repository before this crate;
+//! Minotaur String did not exist in any TACK repository before this crate;
 //! this is its first reference implementation, and nothing in `sentinel_os`,
 //! CNS, observe-perceive, ghost_tools or Resume_OS calls it yet.
 //!
@@ -80,8 +80,9 @@
 //!   periodic cycle up to `max_cycle_period` steps long.
 //! * A recent-state table of `min(max_cycle_period, max_distinct_states)`
 //!   slots counts visits to states the map could not hold, exactly, with
-//!   the same rule as the map. It evicts by the CLOCK rule, which never
-//!   evicts a state whose visits are fewer than the table size apart. This
+//!   the same rule as the map. It never evicts a state visited fewer than
+//!   the table size of table operations ago, so a state whose visits are
+//!   closer together than that is counted exactly. This
 //!   catches a repeated state with fresh filler states between its visits
 //!   (`A, n1, A, n2, ...`), which Brent alone can miss when the walker lines
 //!   up its saved state with the fillers. The table never overcounts, so it

@@ -31,7 +31,7 @@ fn shifted_classes_leak() {
     let v = r.verdict(T_THRESHOLD);
     assert!(v.is_leak(), "{v:?}");
     assert_eq!(v.gate_outcome(), GateOutcome::TerminalBreach);
-    assert_eq!(v.gate_outcome().as_str(), "TERMINAL_BREACH");
+    assert_eq!(v.gate_outcome().as_str(), "terminal_breach");
     assert!(r.ks_p.unwrap() < 1e-6);
 }
 

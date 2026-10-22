@@ -1,9 +1,9 @@
 //! # stack-trident: the Inter-Agent Trident
 //!
-//! **Status: new design.** Of the seven STACK kernel components, only the
+//! **Status: new design.** Of the seven TACK kernel components, only the
 //! Sentinel Hash-Chain exists today (in `sentinel_os`). This crate is a
 //! reference implementation of a component that does not yet exist in any
-//! STACK repository. It borrows one check from `sentinel_os` (TRANSPLANTED)
+//! TACK repository. It borrows one check from `sentinel_os` (TRANSPLANTED)
 //! and the gate vocabulary from CNS; nothing else here is running anywhere.
 //!
 //! ## The metaphor

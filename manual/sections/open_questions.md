@@ -1,6 +1,6 @@
 ## Open questions
 
-64 decisions remain; the one that touches most components is who owns per-sender quotas, since no component keeps honest clients served under flood.
+65 decisions remain; the one that touches most components is who owns per-sender quotas, since no component keeps honest clients served under flood.
 
 *New design decisions, except the six Sentinel items, which concern sentinel_os as it exists today*
 
@@ -11,7 +11,7 @@ Each item is one question, then its tradeoff. They come from every builder's ope
 - [ ] Which component owns per-sender quotas and quarantine for repeated refusals: Inlet, a new admission layer, or each caller? Every component is stateless about senders, so floods starve honest clients; per-sender state costs memory and needs an authenticated identity.
 - [ ] Should kernel convention 4 log a keyed digest (HMAC under a per-process key) instead of plain SHA-256? A plain digest lets a log reader test guesses of a low-entropy input offline; a keyed one cannot be matched across processes.
 - [ ] Should GateOutcome and GatePosition move into one shared stack-core crate? Each crate re-declares the CNS vocabulary today, which can drift; a shared crate is one more dependency every component tracks.
-- [ ] Should every STACK fingerprint hash carry a domain-separation tag, a fixed prefix naming its purpose? Plain SHA-256 matches digests made elsewhere, which is convenient but lets a digest from one context pass in another.
+- [ ] Should every TACK fingerprint hash carry a domain-separation tag, a fixed prefix naming its purpose? Plain SHA-256 matches digests made elsewhere, which is convenient but lets a digest from one context pass in another.
 - [x] May the CNS subject_digest encoding be reproduced in Rust and in this manual? Resolved 2026-10-06: yes. CNS is public under Apache-2.0, so the confidentiality marking that raised this question no longer exists.
 - [ ] Which subject_digest format will Python producers and the Trident share: the CNS rendering or RFC 8785 canonical JSON? Today a producer using the CNS function fails every Trident envelope; either choice needs new code on one side.
 - [ ] Which histogram bucket boundaries should the kernel standardize? The metrics facade leaves buckets to the exporter, so components may export histograms that cannot be compared.
@@ -19,7 +19,6 @@ Each item is one question, then its tradeoff. They come from every builder's ope
 - [ ] Should every gauge be written as 0 at construction, so absence alerts work? Some gauges stay absent until their first event, but writing 0 at build time resets a series another instance shares.
 - [ ] Should metrics and logs move off the request path, through a bounded channel to a telemetry thread? Outcome-dependent nanoseconds land in the time a caller sees today; a channel is one more queue to bound, and it can drop events.
 - [ ] Should the allowed dependency list grow to admit a formal constant-time checker, the sha2 assembly feature, a confusables table or a signature scheme? Each closes a limit recorded in this manual, at the cost of more code in the trusted base.
-- [ ] Should the Inlet and Elastic Bumpers move inside the ANC boundary? The diagram releases their refusals at once, but the bumper's refusal time varies with the input and its section asks for ANC around the whole request. Moving them inside pads every refusal, at the cost of holding a slot for each one.
 
 ### ANC strategies and harness
 

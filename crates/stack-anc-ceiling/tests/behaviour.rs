@@ -223,18 +223,40 @@ fn semaphore_sheds_beyond_cap_before_any_work() {
 }
 
 #[test]
-fn panicking_operation_frees_its_slot() {
+fn panicking_operation_is_released_on_schedule_and_frees_its_slot() {
+    let ceiling = Duration::from_millis(20);
     let pad = CeilingPad::new(CeilingConfig {
-        max_concurrent: 1,
-        ..cfg(Duration::from_micros(100), WaitMode::Sleep)
+        // A slot stays held for a fixed time after admission, so the follow-up call needs a second one.
+        max_concurrent: 2,
+        ..cfg(ceiling, WaitMode::Sleep)
     })
     .unwrap();
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        pad.pad(|| -> u8 { panic!("operation failed") })
-    }));
-    assert!(r.is_err());
+    let t0 = Instant::now();
+    let r = pad.pad(|| -> u8 { panic!("operation failed") });
+    assert_eq!(r, Err(Trip::OperationPanicked));
+    assert!(t0.elapsed() >= ceiling, "released early: {:?}", t0.elapsed());
     assert_eq!(pad.in_flight(), 0);
     assert!(pad.pad(|| ()).is_ok());
+}
+
+#[test]
+fn a_panic_after_the_ceiling_waits_for_the_next_whole_ceiling() {
+    let ceiling = Duration::from_millis(20);
+    let pad = CeilingPad::new(cfg(ceiling, WaitMode::Sleep)).unwrap();
+    let t0 = Instant::now();
+    let r = pad.pad(|| -> u8 {
+        std::thread::sleep(ceiling + Duration::from_millis(5));
+        panic!("operation failed")
+    });
+    assert_eq!(r, Err(Trip::OperationPanicked));
+    assert!(t0.elapsed() >= ceiling * 2, "released at the raw panic time: {:?}", t0.elapsed());
+}
+
+#[test]
+fn operation_panicked_is_terminal_breach_and_reject() {
+    assert_eq!(Trip::OperationPanicked.gate_outcome(), GateOutcome::TerminalBreach);
+    assert_eq!(Trip::OperationPanicked.resolution(), Resolution::Reject);
+    assert_eq!(Trip::OperationPanicked.label(), "operation_panicked");
 }
 
 #[test]
@@ -423,4 +445,42 @@ async fn async_shares_the_concurrency_cap() {
     assert_eq!(pad.pad_async(|| async { 2u8 }).await, Err(Trip::SlotsFull));
     assert_eq!(pad.pad(|| 3u8), Err(Trip::SlotsFull));
     assert!(holder.await.unwrap().is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panicking_async_operation_is_released_on_schedule_and_frees_its_slot() {
+    let ceiling = Duration::from_millis(20);
+    let pad = CeilingPad::new(CeilingConfig {
+        // A slot stays held for a fixed time after admission, so the follow-up call needs a second one.
+        max_concurrent: 2,
+        ..cfg(ceiling, WaitMode::Sleep)
+    })
+    .unwrap();
+    let t0 = Instant::now();
+    let r = pad
+        .pad_async(|| async {
+            tokio::task::yield_now().await;
+            if true {
+                panic!("operation failed");
+            }
+            0u8
+        })
+        .await;
+    assert_eq!(r, Err(Trip::OperationPanicked));
+    assert!(t0.elapsed() >= ceiling, "released early: {:?}", t0.elapsed());
+    assert_eq!(pad.in_flight(), 0);
+    assert!(pad.pad_async(|| async {}).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panic_while_building_the_future_is_caught_too() {
+    let ceiling = Duration::from_millis(20);
+    let pad = CeilingPad::new(cfg(ceiling, WaitMode::Sleep)).unwrap();
+    let t0 = Instant::now();
+    let r = pad
+        .pad_async(|| -> std::future::Ready<u8> { panic!("building failed") })
+        .await;
+    assert_eq!(r, Err(Trip::OperationPanicked));
+    assert!(t0.elapsed() >= ceiling, "released early: {:?}", t0.elapsed());
+    assert_eq!(pad.in_flight(), 0);
 }

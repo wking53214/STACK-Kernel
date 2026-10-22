@@ -8,9 +8,9 @@ The Inlet Winnowing Filter refuses malformed UTF-8 and 4,307 banned characters b
 
 A combine harvester has a winnowing fan at its grain inlet. The fan blows the light chaff away before anything reaches the threshing drum, so the drum only ever sees grain.
 
-The inlet is that fan for the STACK kernel. It sits at the kernel boundary and refuses bad text before any other component reads it. In CNS terms it is an ALPHA gate: a check that runs before any work starts.
+The inlet is that fan for the TACK kernel. It sits at the kernel boundary and refuses bad text before any other component reads it. In CNS terms it is an ALPHA gate: a check that runs before any work starts.
 
-It is a new design. No STACK repository had an inlet filter before the `stack-inlet` crate, and no Python version exists. Of the seven components, only the Sentinel Hash-Chain in sentinel_os exists today.
+It is a new design. No TACK repository had an inlet filter before the `stack-inlet` crate, and no Python version exists. Of the seven components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 The goal has two parts. First, nothing malformed or disguised crosses the boundary. Second, the check itself cannot be turned into a weapon.
 

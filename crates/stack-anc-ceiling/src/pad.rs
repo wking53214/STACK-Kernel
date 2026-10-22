@@ -31,8 +31,11 @@ use crate::outcome::{GateOutcome, PadResult, Padded, ReleaseInfo, Trip};
 use crate::slots::{Permit, Slots, Step};
 use crate::telemetry::{self, Event};
 use crate::wait::{self, bucket_offset, release_bucket, ClockFault};
+use std::any::Any;
 use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 use tracing::field::Empty;
 use tracing::Instrument;
@@ -203,8 +206,10 @@ impl<C: Clock> CeilingPad<C> {
     /// that, a RETRY at a multiple of the retry window). Blocks the calling
     /// thread.
     ///
-    /// Returns [`Padded`] on success, or a [`Trip`]; never panics itself
-    /// (a panic inside `op` propagates to the caller, as with any closure).
+    /// Returns [`Padded`] on success, or a [`Trip`]. A panic inside `op` is
+    /// caught: the reply is released on schedule and the call returns
+    /// [`Trip::OperationPanicked`]. In a `panic = "abort"` build nothing is
+    /// caught.
     pub fn pad<T, F>(&self, op: F) -> PadResult<T>
     where
         F: FnOnce() -> T,
@@ -411,13 +416,18 @@ impl<C: Clock> CeilingPad<C> {
             Ok(a) => a,
             Err((trip, spilled)) => return (Err(trip), self.early(first, trip, spilled)),
         };
-        let value = op();
+        // Kernel convention 1: no panic crosses the request boundary. No
+        // lock is held here, so a panic cannot poison one.
+        let (value, panic) = match catch_unwind(AssertUnwindSafe(op)) {
+            Ok(v) => (Some(v), None),
+            Err(payload) => (None, Some(payload)),
+        };
         let completion = self.clock.now();
         let tail = self.config.spin_tail;
         let (value, waited) = match self.plan(start, completion) {
             Ok((target, k, true)) => {
                 let w = wait::wait_blocking(&self.clock, target, adm.mode, tail);
-                (Some(value), w.map(|()| (k, true)))
+                (value, w.map(|()| (k, true)))
             }
             Ok((_, _, false)) => {
                 // Hard overrun: drop the discarded value inside the padded
@@ -431,9 +441,9 @@ impl<C: Clock> CeilingPad<C> {
                     });
                 (None, w)
             }
-            Err(e) => (Some(value), Err(e)),
+            Err(e) => (value, Err(e)),
         };
-        self.conclude(start, adm, value, waited)
+        self.conclude(start, adm, value, waited, panic)
     }
 
     /// The release target for a hard-overrun RETRY: the first whole
@@ -510,19 +520,43 @@ impl<C: Clock> CeilingPad<C> {
             .and_then(|hard| Some((hard, hard.checked_add(ASYNC_TIMER_SLACK)?)));
         let Some((hard_deadline, floor)) = deadlines else {
             guard.armed = false;
-            return self.conclude::<T>(start, adm, None, Err(ClockFault));
+            return self.conclude::<T>(start, adm, None, Err(ClockFault), None);
         };
         // Awaiting the timeout future by value drops it, and with it a
         // cancelled operation future, at the end of this statement: inside
         // the padded time, before the retry wait below.
-        let out =
-            tokio::time::timeout_at(tokio::time::Instant::from_std(hard_deadline), op()).await;
+        // A panic while building or polling the future is caught (kernel
+        // convention 1) and ends the work at that moment.
+        let out: Result<Result<T, Box<dyn Any + Send>>, tokio::time::error::Elapsed> =
+            match catch_unwind(AssertUnwindSafe(op)) {
+                Ok(fut) => {
+                    let mut fut = std::pin::pin!(fut);
+                    let guarded = std::future::poll_fn(|cx| {
+                        match catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
+                            Ok(Poll::Pending) => Poll::Pending,
+                            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+                            Err(payload) => Poll::Ready(Err(payload)),
+                        }
+                    });
+                    tokio::time::timeout_at(tokio::time::Instant::from_std(hard_deadline), guarded)
+                        .await
+                }
+                Err(payload) => Ok(Err(payload)),
+            };
         let completion = self.clock.now();
-        let (value, waited) = match out {
-            Ok(value) => match self.plan(start, completion) {
+        let (value, panic, timed_out) = match out {
+            Ok(Ok(v)) => (Some(v), None, false),
+            Ok(Err(payload)) => (None, Some(payload), false),
+            Err(_elapsed) => (None, None, true),
+        };
+        let (value, waited) = if timed_out {
+            let w = self.wait_retry_async(start, floor, adm.mode, tail).await;
+            (None, w)
+        } else {
+            match self.plan(start, completion) {
                 Ok((target, k, true)) => {
                     let w = wait::wait_async(&self.clock, target, adm.mode, tail).await;
-                    (Some(value), w.map(|()| (k, true)))
+                    (value, w.map(|()| (k, true)))
                 }
                 Ok((_, _, false)) => {
                     // Finished after the hard ceiling but before the timer
@@ -531,15 +565,11 @@ impl<C: Clock> CeilingPad<C> {
                     let w = self.wait_retry_async(start, floor, adm.mode, tail).await;
                     (None, w)
                 }
-                Err(e) => (Some(value), Err(e)),
-            },
-            Err(_elapsed) => {
-                let w = self.wait_retry_async(start, floor, adm.mode, tail).await;
-                (None, w)
+                Err(e) => (value, Err(e)),
             }
         };
         guard.armed = false;
-        self.conclude(start, adm, value, waited)
+        self.conclude(start, adm, value, waited, panic)
     }
 
     /// Step 6. Everything here happens after the release time.
@@ -549,6 +579,7 @@ impl<C: Clock> CeilingPad<C> {
         adm: Admitted<'_>,
         value: Option<T>,
         waited: Waited,
+        panic: Option<Box<dyn Any + Send>>,
     ) -> (PadResult<T>, Event) {
         let released = self.clock.now();
         // `observed` is the padded window (what `ReleaseInfo` reports); the
@@ -578,6 +609,16 @@ impl<C: Clock> CeilingPad<C> {
                     },
                 })
             }
+            (Ok((k, on_time)), _) if panic.is_some() => {
+                if !on_time {
+                    ev.overrun_released = Some(false);
+                } else if k > 1 {
+                    ev.overrun_released = Some(true);
+                }
+                ev.outcome = GateOutcome::TerminalBreach;
+                ev.trip = Some(Trip::OperationPanicked);
+                Err(Trip::OperationPanicked)
+            }
             (Ok(_), _) => {
                 ev.outcome = GateOutcome::Retry;
                 ev.trip = Some(Trip::Overrun);
@@ -591,6 +632,11 @@ impl<C: Clock> CeilingPad<C> {
                 Err(Trip::ClockFailure)
             }
         };
+        // A payload whose own `Drop` panics is caught too, so nothing
+        // unwinds out of the pad.
+        if let Some(payload) = panic {
+            let _ = catch_unwind(AssertUnwindSafe(move || drop(payload)));
+        }
         // `adm` (the slot) drops here, after the release time was read. A
         // hard-overrun value was already dropped before the retry wait; a
         // value is dropped here only on a clock failure (no padding then).
@@ -632,6 +678,12 @@ impl<C: Clock> CeilingPad<C> {
                 let _g = span.enter();
                 tracing::debug!(
                     "hard ceiling overrun: result discarded, RETRY released on the retry window"
+                );
+            }
+            Some(Trip::OperationPanicked) => {
+                let _g = span.enter();
+                tracing::error!(
+                    "operation panicked inside the ceiling pad: released on schedule, reject the request"
                 );
             }
             _ => {}

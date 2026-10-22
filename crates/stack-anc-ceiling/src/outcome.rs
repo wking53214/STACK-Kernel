@@ -37,7 +37,7 @@ impl GateOutcome {
 }
 
 /// The kernel-wide state resolutions. This crate uses `Reject` and `Halt`;
-/// the other two are listed so the vocabulary matches the other STACK
+/// the other two are listed so the vocabulary matches the other TACK
 /// components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resolution {
@@ -97,6 +97,14 @@ pub enum Trip {
     /// startup. TERMINAL_BREACH, reject.
     #[error("TERMINAL_BREACH: no tokio timer")]
     TimerUnavailable,
+    /// The operation panicked. The panic is caught inside the pad, the
+    /// reply is released on the same schedule as any other request (the
+    /// work time is the time until the panic), the request is counted, and
+    /// the panic payload is dropped. A resubmission would hit the same bug,
+    /// so TERMINAL_BREACH; reject, not halt, because a request that can
+    /// trigger the panic would otherwise halt the pad for everyone.
+    #[error("TERMINAL_BREACH: operation panicked")]
+    OperationPanicked,
 }
 
 impl Trip {
@@ -104,18 +112,21 @@ impl Trip {
     pub const fn gate_outcome(self) -> GateOutcome {
         match self {
             Trip::SlotsFull | Trip::InputTooLarge | Trip::Overrun => GateOutcome::Retry,
-            Trip::Halted | Trip::ClockFailure | Trip::TimerUnavailable => {
-                GateOutcome::TerminalBreach
-            }
+            Trip::Halted
+            | Trip::ClockFailure
+            | Trip::TimerUnavailable
+            | Trip::OperationPanicked => GateOutcome::TerminalBreach,
         }
     }
 
     /// State resolution.
     pub const fn resolution(self) -> Resolution {
         match self {
-            Trip::SlotsFull | Trip::InputTooLarge | Trip::Overrun | Trip::TimerUnavailable => {
-                Resolution::Reject
-            }
+            Trip::SlotsFull
+            | Trip::InputTooLarge
+            | Trip::Overrun
+            | Trip::TimerUnavailable
+            | Trip::OperationPanicked => Resolution::Reject,
             Trip::Halted | Trip::ClockFailure => Resolution::Halt,
         }
     }
@@ -129,6 +140,7 @@ impl Trip {
             Trip::Halted => "halted",
             Trip::ClockFailure => "clock_failure",
             Trip::TimerUnavailable => "timer_unavailable",
+            Trip::OperationPanicked => "operation_panicked",
         }
     }
 }

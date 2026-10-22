@@ -190,7 +190,7 @@ pub(crate) fn emit(strategy: &'static str, ev: &Event) {
                 metrics::gauge!(names::HALTED, "strategy" => strategy).increment(1.0);
             }
         }
-        Some(Trip::Overrun) | None => {}
+        Some(Trip::Overrun | Trip::OperationPanicked) | None => {}
     }
     if let Some(released) = ev.overrun_released {
         let disposition = if released { "released" } else { "retry" };

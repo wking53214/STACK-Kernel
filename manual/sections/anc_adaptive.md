@@ -4,7 +4,7 @@ The brief's rolling-average target leaked (max |t| up to 24.7, leak line 4.5); t
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-adaptive`, is a new design and is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-adaptive`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 Max |t| is a test statistic, explained under the verification harness; above 4.5 counts as a detected leak. A pass means no detectable leak at that sample size, on one 4-vCPU virtual machine; it is never a proof. The fix's Sleep mode still failed a stricter test of distribution shape (KS) in every full-size run, while its Hybrid mode passed.
 

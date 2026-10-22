@@ -1,4 +1,4 @@
-# ≡STACK Rollout Manifest v1.0.0
+# ≡TACK Rollout Manifest v1.0.0
 # Component 20: Deployment Strategy for 17 Host Body Repositories
 
 ## Phase 1: Dependency Injection (Repos 1-5) [Core Infrastructure]
