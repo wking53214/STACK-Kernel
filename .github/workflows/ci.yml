@@ -135,6 +135,48 @@ jobs:
       - name: Test the CNS digest vectors
         run: cargo test -p stack-sentinel --test cns_vectors --locked
 
+  crosscheck:
+    # Runs the real Python verifier (sentinel_os tools/verify_receipts.py) and the Rust stack-sentinel-verify
+    # binary on the same inputs and fails on any difference that is not listed in
+    # crates/stack-sentinel/tests/crosscheck.rs. sentinel_os is private, so the job needs a read-only token
+    # for it in the repository secret SENTINEL_OS_TOKEN. Without the secret the job is skipped and passes;
+    # it then checks nothing, so do not make it a required check until the secret is set.
+    runs-on: ubuntu-latest
+    env:
+      HAS_TOKEN: ${{ secrets.SENTINEL_OS_TOKEN != '' }}
+    steps:
+      - name: Report a skipped cross-check
+        if: env.HAS_TOKEN != 'true'
+        run: echo "SENTINEL_OS_TOKEN is not set, so the cross-check did not run."
+      - uses: actions/checkout@v4
+        if: env.HAS_TOKEN == 'true'
+      - uses: actions/checkout@v4
+        if: env.HAS_TOKEN == 'true'
+        with:
+          repository: wking53214/sentinel_os
+          token: ${{ secrets.SENTINEL_OS_TOKEN }}
+          path: sentinel_os
+      - uses: actions/setup-python@v5
+        if: env.HAS_TOKEN == 'true'
+        with:
+          python-version: "3.11"
+      - name: Install the verifier's Python dependencies
+        if: env.HAS_TOKEN == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          grep -E '^(cryptography|cns)' sentinel_os/sentinel_os/requirements.txt > verifier-requirements.txt
+          python -m pip install -r verifier-requirements.txt
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.HAS_TOKEN == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: env.HAS_TOKEN == 'true'
+      - name: Cross-check the Python and Rust verifiers
+        if: env.HAS_TOKEN == 'true'
+        env:
+          SENTINEL_OS_DIR: ${{ github.workspace }}/sentinel_os
+          PYTHON: python
+        run: cargo test -p stack-sentinel --test crosscheck --locked -- --ignored
+
   anc:
     # The four ANC crates, every test except ANC_WALL_CLOCK_TESTS. Blocking.
     # Release (whose profile keeps overflow checks; the ANC crates have no
