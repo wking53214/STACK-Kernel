@@ -18,9 +18,9 @@ using namespace stack::telemetry;
 
 TEST_CASE("Components 1-5: Governor & Sync Core", "[components][1-5]") {
     KineticGovernor<> gov;
-    auto res = gov.Consume(10, PriorityClass::Standard);
+    auto res = gov.Consume(0, 10, PriorityClass::Standard);
     REQUIRE(res.has_value());
-    gov.Refund(10);
+    REQUIRE(gov.Refund(0, 10).has_value());
 }
 
 TEST_CASE("Components 6-10: Preemption Timer & Deadlines", "[components][6-10]") {
@@ -71,12 +71,12 @@ TEST_CASE("Component 12: Layer 4 - Debt Refund Asymmetry Fix", "[layer-4][defect
         ComputeDebtTracker<256> tracker;
 
         // Verify initial token consumption succeeds
-        auto consume_res = gov.Consume(100, PriorityClass::Standard);
+        auto consume_res = gov.Consume(1, 100, PriorityClass::Standard);
         REQUIRE(consume_res.has_value());
 
         {
             // Create guard: will refund tokens and debt on destruction (abort)
-            TransactionRollbackGuard<> guard(gov, tracker, 1, 0, 0, 100);
+            TransactionRollbackGuard guard(gov, tracker, 1, 0, 0, 100);
             guard.accrued_ticks = 5000;
             // Guard destroyed here WITHOUT Commit() call
             // Should refund both 100 tokens AND 5000 ticks of debt
@@ -92,11 +92,12 @@ TEST_CASE("Component 12: Layer 4 - Debt Refund Asymmetry Fix", "[layer-4][defect
         KineticGovernor<> gov;
         ComputeDebtTracker<256> tracker;
 
-        auto consume_res = gov.Consume(50, PriorityClass::Standard);
+        auto consume_res = gov.Consume(2, 50, PriorityClass::Standard);
         REQUIRE(consume_res.has_value());
+        REQUIRE(tracker.AccrueDebt(2, 2000).has_value());
 
         {
-            TransactionRollbackGuard<> guard(gov, tracker, 2, 0, 0, 50);
+            TransactionRollbackGuard guard(gov, tracker, 2, 0, 0, 50);
             guard.accrued_ticks = 2000;
             guard.Commit();  // COMMITTED - no refund should happen
             // Guard destroyed here WITH Commit() call
@@ -198,13 +199,13 @@ TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][def
         // Capability setter threads: update capabilities while executors run
         for (int i = 0; i < num_capability_setters; ++i) {
             threads.emplace_back([&host, &capability_updates]() {
-                for (int j = 0; j < 50; ++j) {
+                // Retry until applied and finish on 0xFF so the outcome does not depend on scheduling.
+                for (int j = 0; j < 51; ++j) {
                     CapabilityMask256 mask((j % 2 == 0) ? 0xFF : 0xAA, 0, 0, 0);
-                    bool success = host.SetActiveCapabilities(mask);
-                    if (success) {
-                        capability_updates++;
+                    while (!host.SetActiveCapabilities(mask)) {
+                        std::this_thread::yield();
                     }
-                    std::this_thread::yield();
+                    capability_updates++;
                 }
             });
         }
@@ -223,19 +224,23 @@ TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][def
         REQUIRE(host.SetActiveCapabilities(initial_caps));
 
         std::atomic<bool> token_validated{false};
+        std::atomic<bool> validator_done{false};
+        std::atomic<bool> transaction_ok{false};
         std::atomic<bool> capabilities_changed{false};
 
-        std::thread validator([&host, &token_validated]() {
+        std::thread validator([&host, &token_validated, &validator_done, &transaction_ok]() {
             SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
             auto res = host.ExecuteGovernedTransaction(
                 token, 5, 100'000ULL, 50'000ULL,
                 [&token_validated]() { token_validated.store(true, std::memory_order_release); }
             );
-            REQUIRE(res.has_value());
+            transaction_ok.store(res.has_value(), std::memory_order_release);
+            validator_done.store(true, std::memory_order_release);
         });
 
-        std::thread changer([&host, &token_validated, &capabilities_changed]() {
+        std::thread changer([&host, &token_validated, &validator_done, &capabilities_changed]() {
             while (!token_validated.load(std::memory_order_acquire)) {
+                if (validator_done.load(std::memory_order_acquire)) return;
                 std::this_thread::yield();
             }
             // Try to change capabilities during validation
@@ -245,6 +250,8 @@ TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][def
 
         validator.join();
         changer.join();
+
+        REQUIRE(transaction_ok.load());
 
         // Capability change should have been rejected (transaction was in flight)
         REQUIRE(capabilities_changed.load());
@@ -323,13 +330,19 @@ TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][def
     {
         GovernedMinotaurHost<> host;
         std::atomic<int> init_attempts{0};
+        std::atomic<int> init_failures{0};
 
-        for (int i = 0; i < 100; ++i) {
-            auto res = host.InitializeAndSeal();
-            REQUIRE(res.has_value());
-            init_attempts++;
-        }
+        // Sealing blocks clone for the sealed thread, so seal on a worker and keep main unsealed.
+        std::thread sealer([&host, &init_attempts, &init_failures]() {
+            for (int i = 0; i < 100; ++i) {
+                auto res = host.InitializeAndSeal();
+                if (!res.has_value()) init_failures++;
+                init_attempts++;
+            }
+        });
+        sealer.join();
 
+        REQUIRE(init_failures.load() == 0);
         REQUIRE(init_attempts.load() == 100);
     }
 }

@@ -4,6 +4,8 @@
 #include <atomic>
 #include <string>
 #include <chrono>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "../include/stack_kernel.hpp"
 #include "../include/stack_kinetic_governor.hpp"
@@ -31,6 +33,28 @@ void test_pass() {
 void test_fail(const std::string& msg) {
     std::cout << "FAIL: " << msg << "\n";
     std::cout.flush();
+}
+
+// Sealing installs a seccomp filter that cannot be removed and blocks clone,
+// so a test that seals runs in a forked child and the parent keeps its threads.
+void run_sealed(void (*test)()) {
+    std::cout.flush();
+    const int passed_before = test_passed;
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::alarm(60);
+        test();
+        ::_exit(test_passed == passed_before + 1 ? 0 : 1);
+    }
+    test_count++;
+    int status = 0;
+    if (pid < 0 || ::waitpid(pid, &status, 0) != pid) {
+        std::cout << "TEST " << test_count << ": FAIL: could not run sealed child\n";
+    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        test_passed++;
+    } else if (!WIFEXITED(status)) {
+        std::cout << "FAIL: sealed child terminated by signal " << WTERMSIG(status) << "\n";
+    }
 }
 
 // ============================================================================
@@ -214,11 +238,11 @@ int main() {
     std::cout << "========================================\n\n";
 
     std::cout << "LAYER 8: Concurrent Capability Mutation Re-validation\n";
-    test_layer8_capability_validation_baseline();
-    test_layer8_capability_mismatch_rejected();
-    test_layer8_concurrent_revocation_attempted();
-    test_layer8_revocation_before_execution();
-    test_layer8_multiple_transactions_isolated();
+    run_sealed(test_layer8_capability_validation_baseline);
+    run_sealed(test_layer8_capability_mismatch_rejected);
+    run_sealed(test_layer8_concurrent_revocation_attempted);
+    run_sealed(test_layer8_revocation_before_execution);
+    run_sealed(test_layer8_multiple_transactions_isolated);
 
     std::cout << "\n========================================\n";
     std::cout << "RESULTS: " << test_passed << "/" << test_count << " tests passed\n";
