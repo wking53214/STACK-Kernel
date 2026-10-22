@@ -47,7 +47,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets --no-fail-fast
 ```
 
-The ANC red-team tests are timing-sensitive. On a loaded machine a run can fail one or two of them, for example `attack_one_slow_request_per_epoch_pins_cap`. Rerun before treating a failure as a regression. The Summary section lists the open ANC limits.
+Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. One test fails every time because it records an open finding: `shedding_reflects_load_only_for_balanced_dummy`, in ANC Strategy 3. The Summary section lists the open ANC limits.
 
 Timing measurements need release builds on a quiet machine:
 
