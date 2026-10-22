@@ -2,7 +2,7 @@
 //!
 //! ## What exists today, and what this crate is
 //!
-//! The Sentinel Hash-Chain is the one STACK component that exists today. It
+//! The Sentinel Hash-Chain is the one TACK component that exists today. It
 //! lives in the Python repository `sentinel_os`, where every ledger row is
 //! written to Postgres with a SHA-256 hash that covers the row before it.
 //! This crate is new. It is an independent second implementation, in Rust,

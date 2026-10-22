@@ -21,7 +21,7 @@ The goal is to stop four failure patterns before they consume the machine, while
 | State-space explosion | A search keeps finding new states forever | `max_steps` and `max_untracked_transitions` |
 | Replay | The orchestrator rewinds and resubmits just before each cap | The lifetime budget |
 
-Facts first: the Minotaur String existed in no STACK repository before this crate. Nothing in sentinel_os, CNS, observe-perceive, ghost_tools or Resume_OS calls it yet, and no Python version exists. The default caps are engineering guesses, not values measured from real agent traces.
+Facts first: the Minotaur String existed in no TACK repository before this crate. Nothing in sentinel_os, CNS, observe-perceive, ghost_tools or Resume_OS calls it yet, and no Python version exists. The default caps are engineering guesses, not values measured from real agent traces.
 
 ### Mechanism
 

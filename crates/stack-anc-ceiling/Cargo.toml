@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "STACK ANC strategy 1: deterministic ceiling padding. Every response leaves at admission time plus a fixed ceiling. New design."
+description = "TACK ANC strategy 1: deterministic ceiling padding. Every response leaves at admission time plus a fixed ceiling. New design."
 
 [dependencies]
 tracing.workspace = true

@@ -4,7 +4,7 @@ The brief's padding design leaked in 9 of 9 release measurements, while the bran
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn secrets from how long replies take. This crate, `stack-anc-pipeline`, is a new design that is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn secrets from how long replies take. This crate, `stack-anc-pipeline`, is a new design that is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain exists today.
 
 Each measurement timed 100,000 guesses in each of two classes. A max |t|, the test statistic explained below, above 4.5 counts as a detected leak. A pass means no detectable leak at that n on one machine; it is never a proof.
 
@@ -98,7 +98,7 @@ Every trip maps to the CNS outcome RETRY (repairable: the caller may resubmit) w
 | `SlotsFull` | In-flight count already at `max_in_flight` | RETRY | reject | Load shedding before any secret work. The caller may retry later. |
 | `Mismatch` | 32 bytes, wrong value | RETRY | reject | The caller may resubmit the right token. The reply is a fixed code that never names the wrong byte. |
 
-No trip yields TERMINAL_BREACH, quarantine, rollback or halt. The gate keeps no state except an in-flight counter that each request restores, so there is nothing to isolate or restore. Isolating a sender who keeps guessing belongs upstream, for example in STACK Inlet, and which component owns it is an open decision.
+No trip yields TERMINAL_BREACH, quarantine, rollback or halt. The gate keeps no state except an in-flight counter that each request restores, so there is nothing to isolate or restore. Isolating a sender who keeps guessing belongs upstream, for example in TACK Inlet, and which component owns it is an open decision.
 
 No decision reads the clock, so the kernel's "clock unavailable" trip cannot arise. There is no ceiling and no adaptive controller either, so "ceiling overrun" and "leakage budget spent" do not exist here.
 
@@ -409,7 +409,7 @@ Formal tools that could check the no-branch property, such as ct-verif and binse
 
 **The metrics endpoint must stay private.** For a leaky validator, `stack_anc_response_seconds` is a histogram of the leak. Whether that histogram should default to off for this strategy is an open question.
 
-**Not rate limiting, lockout or replay protection.** The token is a static bearer token: whoever presents it gets in. The gate keeps no per-sender state, so a captured token replays forever. Those controls belong to the layer that issues and carries the token, such as STACK Inlet.
+**Not rate limiting, lockout or replay protection.** The token is a static bearer token: whoever presents it gets in. The gate keeps no per-sender state, so a captured token replays forever. Those controls belong to the layer that issues and carries the token, such as TACK Inlet.
 
 **Not total CPU protection.** The gate caps the cost of each request and how many run at once. A flood still takes every core it is allowed.
 

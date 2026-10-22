@@ -1,6 +1,6 @@
-# ≡STACK Kernel
+# ≡TACK Kernel
 
-Reference implementation of the ≡STACK governance kernel, written in Rust and C++ with comprehensive red-team validation. Each component was built, attacked by a separate red-team agent, hardened, measured and documented. The complete manual is in `manual/`.
+Reference implementation of the ≡TACK governance kernel, written in Rust and C++ with comprehensive red-team validation. Each component was built, attacked by a separate red-team agent, hardened, measured and documented. The complete manual is in `manual/`.
 
 These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](https://github.com/wking53214/CNS), Apache-2.0). Several source comments reference that contract.
 
@@ -72,7 +72,7 @@ Python says `VERIFIED`, Rust says `TRUNCATED`). The header of
 
 ## Design Analogy: The Flywheel
 
-≡STACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
+≡TACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
 
 ### The River and Its Banks
 
@@ -80,7 +80,7 @@ Imagine a river system where banks are not static walls, but adaptive barriers. 
 
 Neither the water nor the banks are static. They are in constant conversation.
 
-### Applied to ≡STACK
+### Applied to ≡TACK
 
 1. **Payload executes** within the six-layer containment boundary
 2. **Boundary enforces**: deadline fires, quota exhausted, capability revoked, memory exceeded

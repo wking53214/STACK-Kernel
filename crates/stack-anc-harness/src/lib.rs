@@ -1,7 +1,7 @@
-//! stack-anc-harness: the statistical engine that every STACK ANC (Active
+//! stack-anc-harness: the statistical engine that every TACK ANC (Active
 //! Timing Cancellation) strategy is verified with.
 //!
-//! Status: new design. This crate is test tooling; nothing in the STACK
+//! Status: new design. This crate is test tooling; nothing in the TACK
 //! runtime links it in production.
 //!
 //! # What it answers

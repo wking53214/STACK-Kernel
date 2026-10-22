@@ -12,7 +12,7 @@ A governed service has operating modes: the policy version in force, the current
 
 The goal is that a mode changes only while no request is running. Every request then reads exactly one mode from start to finish.
 
-This is a new design. No STACK repository contains it today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The `stack-transmission` crate is its first implementation.
+This is a new design. No TACK repository contains it today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The `stack-transmission` crate is its first implementation.
 
 One name clash needs flagging. In sentinel_os, `queue_schema.py` calls its Redis job queue "the transmission" (`TransmissionQueue`). That queue moves jobs to workers and does not gate mode changes, and no code connects it to this crate.
 

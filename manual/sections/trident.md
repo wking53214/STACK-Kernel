@@ -26,7 +26,7 @@ Terms used below:
 - **Replay.** A genuine envelope, captured and sent again.
 - **Canonical encoding.** One exact byte form for every value, so sender and receiver hash identical bytes.
 
-This is a new design. No STACK repository has a Trident today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The crate borrows two things that do exist: the TRANSPLANTED check from sentinel_os and the gate vocabulary from CNS.
+This is a new design. No TACK repository has a Trident today; of the seven components, only the Sentinel Hash-Chain in sentinel_os exists. The crate borrows two things that do exist: the TRANSPLANTED check from sentinel_os and the gate vocabulary from CNS.
 
 ### Mechanism
 

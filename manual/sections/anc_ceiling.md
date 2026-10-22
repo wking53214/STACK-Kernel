@@ -4,7 +4,7 @@ Ceiling padding showed no detectable leak in 9 of 9 release runs at about 100,00
 
 *New design: reference implementation compiled and tested on Rust 1.94*
 
-ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven STACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
+ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
 A pass here means no detectable leak at that sample size, on one 4-vCPU (virtual CPU) machine. It is never a proof. The same runs, plus a red-team pass, also show where the brief's design had to change.
 
