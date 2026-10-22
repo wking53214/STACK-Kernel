@@ -20,7 +20,7 @@ The goal is persistent memory whose every alteration, reordering or truncation c
 | Canonical form | The exact set of fields the writer hashed for a row, rebuilt the same way every time. |
 | Export | A JSON file holding every ledger row, in the format `sentinel_os.ledger_export.v1`. |
 
-Facts first. The Sentinel Hash-Chain is the only STACK component that exists today, written in Python in sentinel_os. The crate `stack-sentinel` is new: an independent second implementation of sentinel_os's offline verifier, written in Rust.
+Facts first. The Sentinel Hash-Chain is the only TACK component that exists today, written in Python in sentinel_os. The crate `stack-sentinel` is new: an independent second implementation of sentinel_os's offline verifier, written in Rust.
 
 It reads the same export and anchor files and prints the same verdict words, without importing, calling or trusting any Python. It is read-only: it opens no database, writes no file and keeps nothing between calls. Two independent implementations that agree on every verdict are evidence that the rule is written down correctly.
 

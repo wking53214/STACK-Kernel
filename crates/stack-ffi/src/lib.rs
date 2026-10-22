@@ -1,4 +1,4 @@
-//! ≡STACK C++/Rust FFI Bridge
+//! ≡TACK C++/Rust FFI Bridge
 //! 
 //! Safe Rust bindings to the C++23 containment stack.
 //! Compiles C++ directly via `cc` crate for hardened integration.

@@ -1,8 +1,8 @@
 //! # stack-inlet: the Inlet Winnowing Filter
 //!
-//! **Status: new design.** Of the seven components of the STACK governance
+//! **Status: new design.** Of the seven components of the TACK governance
 //! kernel, only the Sentinel Hash-Chain exists today (in `sentinel_os`). The
-//! Inlet Winnowing Filter did not exist in any STACK repository before this
+//! Inlet Winnowing Filter did not exist in any TACK repository before this
 //! crate; this is its reference implementation.
 //!
 //! ## The metaphor

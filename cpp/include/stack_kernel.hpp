@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * ≡STACK KERNEL FOUNDATION: Hardware-Locked Timing and Admission Control
+ * ≡TACK KERNEL FOUNDATION: Hardware-Locked Timing and Admission Control
  *
  * This module is the ground floor of the containment stack.
  * Everything built above depends on what it measures.
@@ -132,7 +132,7 @@ struct alignas(64) HardwareClock {
         // Previously: returned 0 (silent defect, breaks containment).
         // Now: compilation error prevents deployment to unsupported platforms.
         // This prevents the entire timing layer from being disabled without notice.
-#error "≡STACK kernel requires x86_64 (with RDTSCP) or ARM64 (with ISB+cntvct_el0). Unsupported architecture."
+#error "≡TACK kernel requires x86_64 (with RDTSCP) or ARM64 (with ISB+cntvct_el0). Unsupported architecture."
 #endif
     }
 };

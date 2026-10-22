@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * ≡STACK KERNEL LAYER 4: Host Boundary Orchestration and SECCOMP Enforcement
+ * ≡TACK KERNEL LAYER 4: Host Boundary Orchestration and SECCOMP Enforcement
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ORCHESTRATION LAYER: Binding Execution to Governance

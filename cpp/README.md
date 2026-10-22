@@ -1,12 +1,12 @@
 # C++23 Host Body Containment Stack
 
-Production-locked implementation of the STACK Host Body — the system-level security boundary that contains and protects untrusted agent execution (Minotaur, from the Rust crates).
+Production-locked implementation of the TACK Host Body — the system-level security boundary that contains and protects untrusted agent execution (Minotaur, from the Rust crates).
 
 ## Components (13/20 Completed)
 
 | Component | Header | Purpose |
 |---|---|---|
-| 1-10 | stack_kernel.hpp | ≡STACK Kernel: StackArena, CapabilityGuard, DelegationTable, BoundedRingBuffer, KernelDispatcher, ExecutionContextSupervisor |
+| 1-10 | stack_kernel.hpp | ≡TACK Kernel: StackArena, CapabilityGuard, DelegationTable, BoundedRingBuffer, KernelDispatcher, ExecutionContextSupervisor |
 | 2-5 | stack_kinetic_governor.hpp + tier2 | Rate limiting, token bucket, reserved pool, dual-compensation rollbacks (RT-01-05 patches) |
 | 6 | stack_kinetic_governor_tier2.hpp | ExecutionDeadlineScope (cooperative software deadline enforcement) |
 | 7 | stack_kinetic_governor_tier2.hpp | BackpressureController (yield on high water mark) |

@@ -1,6 +1,6 @@
-//! # stack-bumpers: Elastic Bumpers for the STACK governance kernel
+//! # stack-bumpers: Elastic Bumpers for the TACK governance kernel
 //!
-//! **Status: new design.** Of the seven STACK kernel components, only the
+//! **Status: new design.** Of the seven TACK kernel components, only the
 //! Sentinel Hash-Chain exists today (in `sentinel_os`). Elastic Bumpers is
 //! one of the six new designs. This crate is its reference implementation;
 //! it is not yet wired into any of the Python repositories.

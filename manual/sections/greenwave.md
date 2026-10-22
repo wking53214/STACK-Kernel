@@ -212,7 +212,7 @@ Before each poll the driver reserves room in its output channel, and the poll ta
 | Missed phases are lost, not made up | Lanes never borrow each other's phases | A late driver costs that lane its turn |
 | Live tickets expire at a per-lane cap | Memory stays bounded per lane | Work slower than the cap allows has its completion refused |
 
-**The Python that exists.** A search of the five STACK repositories found no Python scheduler like this. Two nearby pieces live in sentinel_os/sentinel_os, read on 2026-10-01. `rate_limiter_v2.py` is a Redis token bucket per validated API key that answers HTTP 429 with a Retry-After header.
+**The Python that exists.** A search of the five TACK repositories found no Python scheduler like this. Two nearby pieces live in sentinel_os/sentinel_os, read on 2026-10-01. `rate_limiter_v2.py` is a Redis token bucket per validated API key that answers HTTP 429 with a Retry-After header.
 
 That limiter caps how fast each caller sends, but it gives no caller a guaranteed turn. Its docstring says it fails open when Redis is unavailable, the opposite of this crate's fail-closed rule. `queue_schema.py` keeps pending jobs in one Redis list per queue, so one caller's backlog can sit ahead of everyone else's.
 

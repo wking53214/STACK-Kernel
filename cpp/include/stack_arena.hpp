@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * ≡STACK KERNEL LAYER 6: Memory Isolation Arena (Bump Allocator)
+ * ≡TACK KERNEL LAYER 6: Memory Isolation Arena (Bump Allocator)
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ISOLATION LAYER: Linear Allocation Without Escape
