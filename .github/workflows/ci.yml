@@ -23,6 +23,11 @@ env:
   #       release times checked against millisecond ceilings.
   #     async_shares_the_concurrency_cap: one slot held across a real sleep
   #       by a second tokio task; the order of the two tasks follows the clock.
+  #     panicking_operation_frees_its_slot: retries at once after a panic, but
+  #       a slot is held for the hard ceiling (4 x 100 us) after admission, so
+  #       the retry passes only if unwinding took longer than that. It failed
+  #       on the first GitHub run (fast unwinding); with a silent panic hook it
+  #       fails locally too (46 us). The test predates the fixed hold.
   #   stack-anc-ceiling  tests/lanes.rs
   #     the_fast_lane_is_fast_and_the_standard_lane_is_not,
   #     a_mislabeled_slow_operation_gets_a_retry_and_is_counted:
@@ -104,6 +109,7 @@ env:
     slots_full_is_shed_before_any_work
     async_shares_the_concurrency_cap
     rt02_async_cancelled_future_drop_cost_not_visible_to_caller
+    panicking_operation_frees_its_slot
 
 jobs:
   p3-2:
