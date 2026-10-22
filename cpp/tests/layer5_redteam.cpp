@@ -3,6 +3,8 @@
 #include <vector>
 #include <atomic>
 #include <string>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "../include/stack_kernel.hpp"
 #include "../include/stack_kinetic_governor.hpp"
@@ -32,6 +34,28 @@ void test_pass() {
 void test_fail(const std::string& msg) {
     std::cout << "FAIL: " << msg << "\n";
     std::cout.flush();
+}
+
+// Sealing installs a seccomp filter that cannot be removed and blocks clone,
+// so a test that seals runs in a forked child and the parent keeps its threads.
+void run_sealed(void (*test)()) {
+    std::cout.flush();
+    const int passed_before = test_passed;
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::alarm(60);
+        test();
+        ::_exit(test_passed == passed_before + 1 ? 0 : 1);
+    }
+    test_count++;
+    int status = 0;
+    if (pid < 0 || ::waitpid(pid, &status, 0) != pid) {
+        std::cout << "TEST " << test_count << ": FAIL: could not run sealed child\n";
+    } else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        test_passed++;
+    } else if (!WIFEXITED(status)) {
+        std::cout << "FAIL: sealed child terminated by signal " << WTERMSIG(status) << "\n";
+    }
 }
 
 // ============================================================================
@@ -204,17 +228,21 @@ void test_layer5_seqlock_consistency() {
     // Reader threads
     std::vector<std::thread> readers;
     for (int r = 0; r < 2; ++r) {
-        readers.emplace_back([&audit_ring, &successful_reads]() {
+        readers.emplace_back([&audit_ring, &successful_reads, &writer_done]() {
             AuditEventRecord rec;
             for (int i = 0; i < 50; ++i) {
-                while (audit_ring.ReadSlot(i, rec)) {
+                bool valid = audit_ring.ReadSlot(i, rec);
+                // A slot reads as invalid until the writer reaches it; wait for it or for the writer to finish
+                while (!valid && !writer_done.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                    valid = audit_ring.ReadSlot(i, rec);
+                }
+                if (valid) {
                     // Verify record sanity (no torn reads)
                     if (rec.context_id < 50) {
                         successful_reads++;
                     }
-                    // Retry up to 10 times if seqlock detects in-flight write
                     std::this_thread::yield();
-                    break;
                 }
             }
         });
@@ -279,8 +307,8 @@ int main() {
 
     std::cout << "LAYER 5: Audit Trail Event Recording\n";
     test_layer5_audit_ring_basic();
-    test_layer5_capability_violation_event();
-    test_layer5_rate_limit_event();
+    run_sealed(test_layer5_capability_violation_event);
+    run_sealed(test_layer5_rate_limit_event);
     test_layer5_concurrent_audit_events();
     test_layer5_seqlock_consistency();
     test_layer5_event_types_all_recordable();
