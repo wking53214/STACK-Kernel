@@ -49,6 +49,14 @@ cargo test --workspace --all-targets --no-fail-fast
 
 Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. One test fails every time because it records an open finding: `shedding_reflects_load_only_for_balanced_dummy`, in ANC Strategy 3. The Summary section lists the open ANC limits.
 
+CI tests the four ANC crates in two jobs, both in release and one test at a
+time. `anc` runs every test except the wall-clock ones and blocks a merge.
+`anc-wall-clock` runs exactly the wall-clock ones, named with the reason for
+each in `ANC_WALL_CLOCK_TESTS` in `.github/workflows/ci.yml`, on every push
+and pull request. It is marked `continue-on-error` because a shared runner
+can fail them with no code change, so read its result before merging ANC
+changes.
+
 Timing measurements need release builds on a quiet machine:
 
 ```

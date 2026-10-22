@@ -19,6 +19,18 @@ serde.workspace = true
 proptest.workspace = true
 metrics-util.workspace = true
 serde_json.workspace = true
+# Only for tests/cns_outcome.rs, which checks that every copy of the CNS
+# GateOutcome vocabulary in the workspace spells it the same way.
+stack-anc-adaptive = { path = "../stack-anc-adaptive" }
+stack-anc-ceiling = { path = "../stack-anc-ceiling" }
+stack-anc-pipeline = { path = "../stack-anc-pipeline" }
+stack-bumpers = { path = "../stack-bumpers" }
+stack-greenwave = { path = "../stack-greenwave" }
+stack-inlet = { path = "../stack-inlet" }
+stack-minotaur = { path = "../stack-minotaur" }
+stack-sentinel = { path = "../stack-sentinel" }
+stack-transmission = { path = "../stack-transmission" }
+stack-trident = { path = "../stack-trident" }
 
 [lints]
 workspace = true
