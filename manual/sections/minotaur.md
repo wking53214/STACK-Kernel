@@ -155,9 +155,9 @@ This excerpt of `Thread::record` (src/thread.rs) shows three cases: a known stat
 - Brent's algorithm finds a cycle by comparing each new step against one saved step, called the tortoise. This streaming version (src/brent.rs) finds any strictly repeating cycle up to 256 steps long.
 - The recent-state table (src/recent.rs) holds up to 256 of the states the full map could not hold (its size is the smaller of `max_cycle_period` and `max_distinct_states`. It keeps exact visit counts and applies the same loop rule as the map.
 
-Eviction follows the CLOCK rule. A hand sweeps the slots, sparing entries revisited since its last pass, and evicts the first entry that was not revisited.
+Eviction uses a sweeping hand and a per-slot count of the table operation that last visited it. The hand spares any entry visited fewer than `cap` operations ago and evicts the first entry it reaches that was not. A victim always exists, because each operation visits one slot and so the slots cannot all be that recent.
 
-A state whose visits are fewer than the table size apart is never evicted between them. Counts are never too high, so a walk of distinct states never trips the table.
+A state whose visits are fewer than the table size of operations apart is never evicted between them. Counts are never too high, so a walk of distinct states never trips the table.
 
 **Breadcrumbs travel with every trip.** The last K fingerprints (32 by default) sit in a ring buffer, a fixed-size queue that drops its oldest entry. On a trip they are copied into the `Trip`, so the caller can see where the walk was heading.
 

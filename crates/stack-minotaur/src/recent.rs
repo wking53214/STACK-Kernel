@@ -12,24 +12,24 @@
 //! It holds at most `cap` states. Each entry keeps the same two numbers the
 //! exact set keeps (visit count and the step of the latest visit), and the
 //! loop rule is the same: more than `allowance` revisits is a loop. When the
-//! table is full, a new state evicts an old one chosen by the CLOCK rule: a
-//! hand sweeps the slots, sparing (and clearing the mark of) any entry
-//! revisited since the hand last passed it, and evicts the first unmarked
-//! entry.
+//! table is full, a new state evicts an old one: a hand sweeps the slots,
+//! sparing any entry visited fewer than `cap` table operations ago, and
+//! evicts the first entry it reaches that was not.
 //!
 //! Guarantee: a state whose successive visits are fewer than `cap` table
 //! operations apart is never evicted between them, so its revisits are
-//! counted exactly. (For the hand to evict it, it must pass the state once,
-//! which clears the mark, and then travel all `cap` slots again. Every slot
-//! the hand moves over in that second lap costs one table operation: an
-//! eviction or a mark set by a revisit.) Counts are never overestimated, so
-//! the table has no false positives: a walk of all-distinct states never
-//! trips it.
+//! counted exactly. (Eviction only happens to an entry last visited `cap` or
+//! more operations ago, and the gap between the two visits is shorter than
+//! that.) A victim always exists: every operation visits exactly one slot, so
+//! the slots' last-visit numbers are all different, and the `cap` slots
+//! cannot all fall in the `cap - 1` most recent operations. Counts are never
+//! overestimated, so the table has no false positives: a walk of
+//! all-distinct states never trips it.
 //!
 //! Memory: `cap` slots and a hash index of `cap` entries, allocated once.
 //! The index uses the standard library's randomly keyed SipHash, so chosen
-//! fingerprints cannot force slow collisions. Work per operation is
-//! amortized constant; one eviction can sweep up to `cap` slots.
+//! fingerprints cannot force slow collisions. A hit costs constant work; an
+//! eviction can sweep up to `cap` slots.
 
 use std::collections::HashMap;
 
@@ -42,8 +42,8 @@ struct Slot {
     count: u32,
     /// Step number of the most recent visit.
     last_step: u64,
-    /// Revisited since the CLOCK hand last passed this slot.
-    marked: bool,
+    /// Number of the table operation that last visited this slot.
+    last_op: u64,
 }
 
 #[derive(Debug)]
@@ -52,6 +52,8 @@ pub(crate) struct Recent {
     slots: Vec<Slot>,
     hand: usize,
     cap: usize,
+    /// Table operations performed so far (every `observe` call is one).
+    ops: u64,
 }
 
 impl Recent {
@@ -63,6 +65,7 @@ impl Recent {
             slots: Vec::with_capacity(cap),
             hand: 0,
             cap,
+            ops: 0,
         }
     }
 
@@ -70,6 +73,7 @@ impl Recent {
         self.index.clear();
         self.slots.clear();
         self.hand = 0;
+        self.ops = 0;
     }
 
     /// Slots this table holds at most.
@@ -81,31 +85,34 @@ impl Recent {
     /// since its previous visit when it has now been revisited more than
     /// `allowance` times while resident.
     pub(crate) fn observe(&mut self, x: Fingerprint, step: u64, allowance: u32) -> Option<u64> {
+        self.ops = self.ops.saturating_add(1);
+        let now = self.ops;
         if let Some(&i) = self.index.get(&x) {
             let s = self.slots.get_mut(i)?;
             s.count = s.count.saturating_add(1);
             let gap = step.saturating_sub(s.last_step);
             s.last_step = step;
-            s.marked = true;
+            s.last_op = now;
             return (s.count.saturating_sub(1) > allowance).then_some(gap);
         }
         let fresh = Slot {
             fp: x,
             count: 1,
             last_step: step,
-            marked: false,
+            last_op: now,
         };
         if self.slots.len() < self.cap {
             self.index.insert(x, self.slots.len());
             self.slots.push(fresh);
             return None;
         }
-        // CLOCK sweep. After one full lap every mark is clear, so at most
-        // `cap + 1` iterations run before an unmarked slot is found.
-        for _ in 0..=self.cap {
-            match self.slots.get_mut(self.hand) {
-                Some(s) if s.marked => {
-                    s.marked = false;
+        // Skip slots visited fewer than `cap` operations ago. One of the
+        // `cap` slots is always older (see the module docs), so the sweep
+        // stops within one lap.
+        let cap = self.cap as u64;
+        for _ in 0..self.cap {
+            match self.slots.get(self.hand) {
+                Some(s) if now.saturating_sub(s.last_op) < cap => {
                     self.hand = (self.hand + 1) % self.cap;
                 }
                 _ => break,
@@ -177,6 +184,59 @@ mod tests {
             }
         }
         assert_eq!(hits, 1);
+    }
+
+    #[test]
+    fn a_stale_sweep_does_not_evict_a_state_seen_two_operations_ago() {
+        // cap 4. Fill, then revisit three residents so all three are marked.
+        // `a` takes the unmarked slot; the next fresh state `b` then clears
+        // three stale marks in one sweep and lands on `a`, even though `a`
+        // was visited only two operations earlier (less than cap).
+        let mut r = Recent::new(4);
+        let (a, b) = (fp(100), fp(101));
+        let mut step = 0u64;
+        let mut at = |r: &mut Recent, x, allowance| {
+            step += 1;
+            r.observe(x, step, allowance)
+        };
+        for n in 0..4 {
+            assert_eq!(at(&mut r, fp(n), 100), None);
+        }
+        for n in 1..4 {
+            assert_eq!(at(&mut r, fp(n), 100), None);
+        }
+        assert_eq!(at(&mut r, a, 0), None);
+        assert_eq!(at(&mut r, b, 0), None);
+        // Revisit of `a` after a gap of 2 steps and 2 operations.
+        assert_eq!(at(&mut r, a, 0), Some(2));
+    }
+
+    #[test]
+    fn a_state_revisited_within_capacity_operations_is_always_resident() {
+        // The documented guarantee, checked against a plain model on a
+        // pseudo-random walk over a small alphabet.
+        for cap in [1usize, 2, 3, 4, 7] {
+            let mut r = Recent::new(cap);
+            let mut last_op = std::collections::HashMap::new();
+            let mut rng = 0x9E37_79B9_7F4A_7C15u64 ^ cap as u64;
+            for op in 0..20_000u64 {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                let x = fp(rng % 12);
+                if let Some(&prev) = last_op.get(&x) {
+                    if op - prev < cap as u64 {
+                        assert!(
+                            r.index.contains_key(&x),
+                            "cap {cap}: state evicted {} operations after its last visit",
+                            op - prev
+                        );
+                    }
+                }
+                last_op.insert(x, op);
+                r.observe(x, op, u32::MAX);
+            }
+        }
     }
 
     #[test]
