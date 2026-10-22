@@ -75,6 +75,7 @@
 //! | [`Trip::Overrun`] | RETRY | reject | work too slow this time; value discarded |
 //! | [`Trip::ClockFailure`] | TERMINAL_BREACH | halt | no trustworthy clock, no padding |
 //! | [`Trip::Halted`] | TERMINAL_BREACH | halt | until operator [`CeilingPad::reset`] |
+//! | [`Trip::OperationPanicked`] | TERMINAL_BREACH | reject | the op panicked; caught, released on schedule, counted; a halt would let one request stop the pad |
 //! | [`Trip::TimerUnavailable`] | TERMINAL_BREACH | reject | async API on a runtime without the tokio time driver; deployment error, the pad is not halted |
 //!
 //! An empty spin budget is not a trip: the request is served in Sleep mode

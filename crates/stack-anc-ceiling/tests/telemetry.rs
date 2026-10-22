@@ -350,3 +350,21 @@ fn the_fast_lane_has_its_own_series() {
     assert!(find(&snap, names::OVERRUN_TOTAL, &[std_s]).is_none());
     assert!(gauge(&snap, names::SLOTS_OPEN, &[fast_s]).is_some());
 }
+
+#[test]
+fn a_panicking_operation_is_counted_once_as_a_terminal_breach() {
+    let snap = record(|| {
+        let pad = CeilingPad::new(CeilingConfig::new(ms(2))).unwrap();
+        let r = pad.pad(|| -> u8 { panic!("operation failed") });
+        assert_eq!(r, Err(Trip::OperationPanicked));
+    });
+    let s = ("strategy", STRATEGY);
+    assert_eq!(
+        counter(&snap, names::REQUESTS_TOTAL, &[s, ("outcome", "terminal_breach")]),
+        1
+    );
+    assert!(
+        find(&snap, names::REQUESTS_TOTAL, &[s, ("outcome", "pass")]).is_none(),
+        "a panic must not also count as a pass"
+    );
+}
