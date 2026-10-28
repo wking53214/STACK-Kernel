@@ -55,8 +55,8 @@ fn fnv1a64(data: &[u8]) -> u64 {
 
 fn is_canary_task(agent: &str, seq: u64, every: u64, key: Option<&str>) -> bool {
     match key {
-        None => seq % every == 0,
-        Some(k) => fnv1a64(format!("{k}|{agent}|{seq}").as_bytes()) % every == 0,
+        None => seq.is_multiple_of(every),
+        Some(k) => fnv1a64(format!("{k}|{agent}|{seq}").as_bytes()).is_multiple_of(every),
     }
 }
 
