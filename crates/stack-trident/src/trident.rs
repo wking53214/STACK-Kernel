@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use subtle::{Choice, ConstantTimeEq};
 use tracing::field;
 
+use crate::cns_digest::subject_digest_raw;
 use crate::canonical::{decode_hex_lower, parse_strict, sha256_hex, CanonicalError, Limits};
 use crate::clock::{Clock, SystemClock};
 use crate::config::{BreakerAttribution, ConfigError, TridentConfig};
@@ -311,11 +312,19 @@ impl Trident {
         if gate_outcome.is_none() {
             reasons.push(ReasonCode::UnknownGateOutcome);
         }
-        let recomputed: [u8; 32] = Sha256::digest(&payload_bytes).into();
+        // The CNS subject digest of the payload, recomputed here. The payload
+        // already encoded under the same limits, so an error is not expected;
+        // if one ever occurs the binding cannot hold, so it counts as a
+        // mismatch rather than being skipped.
+        let recomputed = subject_digest_raw(&env.payload, &self.limits);
         match decode_hex_lower::<32>(&env.subject_digest) {
             None => reasons.push(ReasonCode::MalformedDigest),
             Some(claimed) => {
-                if !bool::from(claimed.ct_eq(&recomputed)) {
+                let bound = match recomputed {
+                    Ok(r) => bool::from(claimed.ct_eq(&r)),
+                    Err(_) => false,
+                };
+                if !bound {
                     reasons.push(ReasonCode::SubjectDigestMismatch);
                 }
             }
