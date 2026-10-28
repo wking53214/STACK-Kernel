@@ -168,6 +168,9 @@ public:
  *   - SYS_rt_sigaction (13): Register signal handlers (GOVERNOR_PREEMPT_SIG only)
  *   - SYS_clock_gettime (228): Query clock (for timing/metrics)
  *   - SYS_futex (202): Wait/wake (if payload uses atomics/mutexes)
+ *   - SYS_timer_settime (223): Arm and disarm the thread's deadline timer. The
+ *     timer is created before the filter is installed (timer_create is not
+ *     allowed), but a sealed thread must still be able to arm it.
  *
  * All other syscalls return SECCOMP_RET_ERRNO (ENOSYS). This is safer:
  * if a payload tries ptrace, mmap, prctl, socket, etc., it gets ENOSYS
@@ -201,6 +204,7 @@ private:
     static constexpr long SYS_RT_SIGACTION = 13;
     static constexpr long SYS_CLOCK_GETTIME = 228;
     static constexpr long SYS_FUTEX = 202;
+    static constexpr long SYS_TIMER_SETTIME = 223;
 #elif defined(__aarch64__)
     static constexpr long SYS_READ = 63;
     static constexpr long SYS_WRITE = 64;
@@ -209,6 +213,7 @@ private:
     static constexpr long SYS_RT_SIGACTION = 134;
     static constexpr long SYS_CLOCK_GETTIME = 113;
     static constexpr long SYS_FUTEX = 98;
+    static constexpr long SYS_TIMER_SETTIME = 110;
 #else
 #error "SeccompFilterEngine: no syscall table for this architecture"
 #endif
@@ -219,6 +224,7 @@ private:
     static_assert(SYS_RT_SIGACTION == __NR_rt_sigaction, "SYS_RT_SIGACTION must equal __NR_rt_sigaction for this architecture");
     static_assert(SYS_CLOCK_GETTIME == __NR_clock_gettime, "SYS_CLOCK_GETTIME must equal __NR_clock_gettime for this architecture");
     static_assert(SYS_FUTEX == __NR_futex, "SYS_FUTEX must equal __NR_futex for this architecture");
+    static_assert(SYS_TIMER_SETTIME == __NR_timer_settime, "SYS_TIMER_SETTIME must equal __NR_timer_settime for this architecture");
 
 public:
     [[nodiscard]] static std::expected<void, SeccompError> InstallFilter() noexcept {
@@ -243,26 +249,27 @@ public:
             // [3] Load Syscall Number
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
 
-            // [4-10] Whitelist explicit allowed syscalls (jump-on-match to allow)
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_READ, 10, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_WRITE, 9, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT_GROUP, 8, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_CLOCK_GETTIME, 7, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_FUTEX, 6, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT, 5, 0),
+            // [4-11] Whitelist explicit allowed syscalls (jump-on-match to allow)
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_READ, 11, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_WRITE, 10, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT_GROUP, 9, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_CLOCK_GETTIME, 8, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_FUTEX, 7, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT, 6, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_TIMER_SETTIME, 5, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_RT_SIGACTION, 1, 0),
 
-            // [11] Default deny (not in whitelist)
+            // [12] Default deny (not in whitelist)
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
 
-            // [12] SYS_rt_sigaction special case (check for GOVERNOR_PREEMPT_SIG)
+            // [13] SYS_rt_sigaction special case (check for GOVERNOR_PREEMPT_SIG)
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(GOVERNOR_PREEMPT_SIG), 1, 0),
 
-            // [14] SYS_rt_sigaction deny (not for GOVERNOR_PREEMPT_SIG)
+            // [15] SYS_rt_sigaction deny (not for GOVERNOR_PREEMPT_SIG)
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
 
-            // [15] All whitelisted calls: allow
+            // [16] All whitelisted calls: allow
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         };
 

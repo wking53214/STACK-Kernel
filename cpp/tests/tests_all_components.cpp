@@ -1,5 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
+#include <sys/syscall.h>
 #include <sys/wait.h>
+#include <unistd.h>
+#include <cerrno>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -281,10 +284,9 @@ TEST_CASE("Component 12: Layer 4 - Capability change refused while a payload run
     // releases the payload, and asks again once the transaction has returned (must
     // be applied).
     //
-    // Sealing is per thread, while the host's sealed flag is per host, and the
-    // allowlist omits timer_settime, so a sealed thread cannot arm the deadline
-    // timer and never reaches its payload. A sacrificial thread therefore seals
-    // first; the worker below then runs unsealed and its payload executes.
+    // Sealing is per thread, while the host's sealed flag is per host. A
+    // sacrificial thread seals first; the worker below then runs unsealed,
+    // so this test pins the in-flight counter and not the filter.
     GovernedMinotaurHost<> host;
     REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
 
@@ -334,6 +336,38 @@ TEST_CASE("Component 12: Layer 4 - Capability change refused while a payload run
     REQUIRE(refused_while_running);
     // Asked after the transaction returned: the counter is back to zero.
     REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0)));
+}
+
+TEST_CASE("Component 12: Layer 4 - A sealed thread can arm its deadline timer", "[layer-4][defect-5]") {
+    // The allowlist must carry timer_settime: the timer is created before the
+    // filter goes on (timer_create is not allowed), but Arm() calls timer_settime
+    // on the sealed thread for every transaction. Without it the transaction
+    // fails with TimerInitializationFailed and the payload never runs.
+    // Results are collected on the worker and checked on the main thread, which
+    // is not sealed.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    std::atomic<bool> payload_ran{false};
+    std::atomic<bool> transaction_ok{false};
+    std::atomic<bool> filter_active{false};
+
+    std::thread worker([&]() {
+        SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
+        auto res = host.ExecuteGovernedTransaction(
+            token, 5, 100'000'000'000ULL, 1'000'000'000ULL,
+            [&]() { payload_ran.store(true, std::memory_order_release); });
+        transaction_ok.store(res.has_value(), std::memory_order_release);
+        // getpid is not on the allowlist, so a sealed thread gets ENOSYS.
+        errno = 0;
+        const long rc = ::syscall(SYS_getpid);
+        filter_active.store(rc == -1 && errno == ENOSYS, std::memory_order_release);
+    });
+    worker.join();
+
+    REQUIRE(filter_active.load());
+    REQUIRE(payload_ran.load());
+    REQUIRE(transaction_ok.load());
 }
 
 TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][defect-1]") {
