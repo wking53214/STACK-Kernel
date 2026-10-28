@@ -312,13 +312,16 @@ public:
      * Returns false if transaction is in flight, preventing capability mutation.
      *
      * Thread safety: Acquires capability_lock_ to ensure atomicity with
-     * concurrent reads in ExecuteGovernedTransaction().
+     * concurrent reads in ExecuteGovernedTransaction(). The in-flight check
+     * runs under that lock, and ExecuteGovernedTransaction() raises the
+     * counter under the same lock as its snapshot, so a transaction cannot
+     * start between this check and the write.
      */
     [[nodiscard]] bool SetActiveCapabilities(const CapabilityMask256& mask) noexcept {
+        std::lock_guard<std::mutex> lock(capability_lock_);
         if (transactions_in_flight_.load(std::memory_order_acquire) > 0) {
             return false;  // Transaction in flight; cannot change capabilities
         }
-        std::lock_guard<std::mutex> lock(capability_lock_);
         active_host_capabilities_ = mask;
         return true;
     }
@@ -366,26 +369,27 @@ public:
             if (!init_res.has_value()) return std::unexpected(init_res.error());
         }
 
-        // Snapshot active capabilities to prevent torn reads during concurrent mutations
+        // Snapshot active capabilities to prevent torn reads during concurrent mutations.
+        // Lifecycle guard: mark the transaction in flight under the same lock, so
+        // SetActiveCapabilities() (which checks the counter under capability_lock_)
+        // sees either the old counter and no snapshot yet, or the raised counter.
         CapabilityMask256 snapshot_capabilities{};
         {
             std::lock_guard<std::mutex> lock(capability_lock_);
             snapshot_capabilities = active_host_capabilities_;
+            transactions_in_flight_.fetch_add(1, std::memory_order_release);
         }
 
-        // Extract domain ID early for audit logging
-        const uint64_t domain_id = token.GetContextId();
-
-        // Lifecycle guard: mark transaction in flight
-        transactions_in_flight_.fetch_add(1, std::memory_order_release);
-
-        // RAII cleanup: decrement on exit
+        // RAII cleanup: decrement on exit (pairs with the fetch_add above on every path)
         struct TransactionGuard {
             std::atomic<uint32_t>& counter;
             ~TransactionGuard() noexcept {
                 counter.fetch_sub(1, std::memory_order_release);
             }
         } lifecycle_guard{transactions_in_flight_};
+
+        // Extract domain ID early for audit logging
+        const uint64_t domain_id = token.GetContextId();
 
         // Component 13 Check: SIMD Capability Verification (against snapshot)
         if (!token.Validate(snapshot_capabilities)) [[unlikely]] {
