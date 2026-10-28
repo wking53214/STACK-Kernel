@@ -121,6 +121,14 @@ struct alignas(32) CapabilityMask256 {
     }
 };
 
+/**
+ * SIMD CAPABILITY TOKEN: the capabilities a transaction asks for.
+ *
+ * The token is a caller-supplied request descriptor, not a credential: the
+ * host checks that the requested mask is a subset of the active mask, and
+ * context_id is caller-asserted, used for rate limiting, debt and audit
+ * attribution, with nothing here authenticating it.
+ */
 class SIMDCapabilityToken {
 private:
     CapabilityMask256 required_capabilities_{};

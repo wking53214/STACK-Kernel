@@ -11,10 +11,10 @@ Production-locked implementation of the TACK Host Body — the system-level secu
 | 6 | stack_kinetic_governor_tier2.hpp | ExecutionDeadlineScope (cooperative software deadline enforcement) |
 | 7 | stack_kinetic_governor_tier2.hpp | BackpressureController (yield on high water mark) |
 | 8-9 | stack_kinetic_governor_tier2.hpp | ComputeDebtTracker + deferred preemption hooks (RT-05: saturating CAS) |
-| 10 | posix_deadline_timer_hardened.hpp | Persistent per-thread POSIX timer (≤220 cycles Arm), sival_ptr routing (RT-06, RT-08 fixes) |
+| 10 | posix_deadline_timer_hardened.hpp | Persistent per-thread POSIX timer (≤220 cycles Arm), sival_ptr routing (RT-06, RT-08 fixes). The deadline timer only sets a flag that is read after the payload returns; a payload that never returns is not stopped. |
 | 11 | stack_host_binding.hpp | SeccompFilterEngine: BPF-enforced signal mask immutability (RT-07 fix) |
 | 12 | stack_host_binding.hpp | GovernedMinotaurHost: One-way security ratchet + boundary executor |
-| 13 | stack_host_binding.hpp | SIMDCapabilityToken: 256-bit AVX2/NEON capability verification |
+| 13 | stack_host_binding.hpp | SIMDCapabilityToken: 256-bit AVX2/NEON capability verification. The token is a caller-supplied request descriptor, not a credential: its context_id is caller-asserted and nothing authenticates it. |
 
 The seccomp allowlist in `stack_host_binding.hpp` carries one syscall-number table per architecture (x86_64 and aarch64), and a `static_assert` against each `__NR_*` value turns a wrong entry into a compile error.
 
