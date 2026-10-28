@@ -75,7 +75,7 @@ impl Timing {
     /// True when `t` is exactly on an epoch boundary.
     #[must_use]
     pub const fn is_epoch_boundary(&self, t: Nanos) -> bool {
-        t % self.epoch_len == 0
+        t.is_multiple_of(self.epoch_len)
     }
 
     /// Release quantization: the first epoch boundary strictly after
