@@ -112,6 +112,21 @@ env:
     panicking_operation_frees_its_slot
 
 jobs:
+  workspace:
+    # Every crate outside the four ANC crates (those have the anc and
+    # anc-wall-clock jobs below). A clippy step is not here yet: on the
+    # local toolchain `cargo clippy --workspace --all-targets --locked -- -D warnings`
+    # still reports findings, so it would fail on day one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test the workspace without the ANC crates
+        run: |
+          cargo test --workspace --locked --exclude stack-anc-harness --exclude stack-anc-ceiling \
+            --exclude stack-anc-adaptive --exclude stack-anc-pipeline
+
   p3-2:
     # The crate that reads governed limits and emits trap events.
     runs-on: ubuntu-latest

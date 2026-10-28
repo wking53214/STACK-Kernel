@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <sys/wait.h>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 #include <iostream>
@@ -271,6 +273,67 @@ TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][def
 
         REQUIRE(successful_updates.load() > 0);
     }
+}
+
+TEST_CASE("Component 12: Layer 4 - Capability change refused while a payload runs", "[layer-4][defect-2]") {
+    // Deterministic, latch based: the payload parks on a condition variable, the
+    // main thread asks for a capability change while it is parked (must be refused),
+    // releases the payload, and asks again once the transaction has returned (must
+    // be applied).
+    //
+    // Sealing is per thread, while the host's sealed flag is per host, and the
+    // allowlist omits timer_settime, so a sealed thread cannot arm the deadline
+    // timer and never reaches its payload. A sacrificial thread therefore seals
+    // first; the worker below then runs unsealed and its payload executes.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    std::thread([&host]() {
+        SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
+        (void)host.ExecuteGovernedTransaction(token, 5, 1'000'000ULL, 1'000'000'000ULL, []() {});
+    }).join();
+
+    std::mutex latch_mutex;
+    std::condition_variable latch_cv;
+    bool payload_parked = false;
+    bool release_payload = false;
+    bool transaction_done = false;
+    std::atomic<bool> payload_ran{false};
+
+    std::thread worker([&]() {
+        SIMDCapabilityToken token(2, CapabilityMask256(0x01, 0, 0, 0));
+        (void)host.ExecuteGovernedTransaction(
+            token, 5, 100'000'000'000ULL, 1'000'000'000ULL,
+            [&]() {
+                payload_ran.store(true, std::memory_order_release);
+                std::unique_lock<std::mutex> lk(latch_mutex);
+                payload_parked = true;
+                latch_cv.notify_all();
+                latch_cv.wait(lk, [&] { return release_payload; });
+            });
+        std::lock_guard<std::mutex> lk(latch_mutex);
+        transaction_done = true;
+        latch_cv.notify_all();
+    });
+
+    {
+        std::unique_lock<std::mutex> lk(latch_mutex);
+        latch_cv.wait(lk, [&] { return payload_parked || transaction_done; });
+    }
+    // Asked while the payload is parked inside the transaction.
+    const bool refused_while_running = !host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0));
+    {
+        std::lock_guard<std::mutex> lk(latch_mutex);
+        release_payload = true;
+        latch_cv.notify_all();
+    }
+    worker.join();
+
+    // The payload must have run, or the refusal above proves nothing.
+    REQUIRE(payload_ran.load(std::memory_order_acquire));
+    REQUIRE(refused_while_running);
+    // Asked after the transaction returned: the counter is back to zero.
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0)));
 }
 
 TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][defect-1]") {

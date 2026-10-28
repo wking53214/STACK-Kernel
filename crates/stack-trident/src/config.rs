@@ -167,6 +167,14 @@ fn as_u64(n: usize) -> u64 {
 impl TridentConfig {
     /// Checks every field against its range. The Trident refuses to start
     /// with a config that fails this.
+    ///
+    /// A config that passes may still rest on an assumption the operator
+    /// should know about. Each one is reported once per call as a
+    /// `tracing::warn!` and never changes the result: an empty `audience`
+    /// (any receiver with the shared key accepts the envelope), and
+    /// `enforce_startup_epoch` with `restored_high_water_ms` left at 0 (the
+    /// restart replay guard then trusts the wall clock). The defaults set
+    /// both off, so the default config warns twice.
     pub fn validate(&self) -> Result<(), ConfigError> {
         check(
             "max_envelope_bytes",
@@ -206,6 +214,16 @@ impl TridentConfig {
             u64::from(BREAKER_THRESHOLD_CEILING),
         )?;
         check("breaker_window_ms", self.breaker_window_ms, 1, BREAKER_WINDOW_CEILING_MS)?;
+        if self.audience.is_empty() {
+            tracing::warn!(
+                "stack.trident audience binding is off: any holder of the shared key can replay this envelope to any receiver"
+            );
+        }
+        if self.enforce_startup_epoch && self.restored_high_water_ms == 0 {
+            tracing::warn!(
+                "stack.trident restart replay guard assumes the wall clock did not go backwards: restored_high_water_ms is 0"
+            );
+        }
         Ok(())
     }
 
@@ -234,11 +252,83 @@ impl TridentConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Level, Metadata, Subscriber};
+
     use super::*;
 
     #[test]
     fn default_is_valid() {
         TridentConfig::default().validate().unwrap();
+    }
+
+    /// A subscriber that keeps the message of every WARN event. The crate
+    /// has no log-capture fixture and no `tracing-subscriber` dev-dependency,
+    /// so this is the smallest thing that can see the warnings.
+    struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+    struct Message(String);
+
+    impl Visit for Message {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl Subscriber for WarnCapture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() == Level::WARN
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    fn warnings_from(cfg: &TridentConfig) -> Vec<String> {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(WarnCapture(sink.clone()), || cfg.validate().unwrap());
+        let warnings = sink.lock().unwrap().clone();
+        warnings
+    }
+
+    #[test]
+    fn default_config_warns_once_per_replay_assumption() {
+        let warnings = warnings_from(&TridentConfig::default());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("audience binding is off"), "{warnings:?}");
+        assert!(warnings[1].contains("wall clock did not go backwards"), "{warnings:?}");
+    }
+
+    #[test]
+    fn bound_audience_and_restored_high_water_do_not_warn() {
+        let cfg = TridentConfig {
+            audience: "receiver-a".to_owned(),
+            restored_high_water_ms: 1,
+            ..TridentConfig::default()
+        };
+        assert_eq!(warnings_from(&cfg), Vec::<String>::new());
+
+        let epoch_off = TridentConfig {
+            enforce_startup_epoch: false,
+            ..TridentConfig::default()
+        };
+        let warnings = warnings_from(&epoch_off);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("audience binding is off"), "{warnings:?}");
     }
 
     #[test]

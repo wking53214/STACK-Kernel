@@ -121,6 +121,14 @@ struct alignas(32) CapabilityMask256 {
     }
 };
 
+/**
+ * SIMD CAPABILITY TOKEN: the capabilities a transaction asks for.
+ *
+ * The token is a caller-supplied request descriptor, not a credential: the
+ * host checks that the requested mask is a subset of the active mask, and
+ * context_id is caller-asserted, used for rate limiting, debt and audit
+ * attribution, with nothing here authenticating it.
+ */
 class SIMDCapabilityToken {
 private:
     CapabilityMask256 required_capabilities_{};
@@ -150,7 +158,8 @@ public:
  * DEFECT (Fixed): Previous filter was blacklist-based (allow all except specific
  * blocks). This is "too permissive" — it allows syscalls we don't need/want.
  *
- * NEW: Whitelist-based model. Explicitly allows ONLY these syscalls:
+ * NEW: Whitelist-based model. Explicitly allows ONLY these syscalls
+ * (numbers shown are x86_64; the aarch64 table is in SeccompFilterEngine):
  *   - SYS_read (0): Read from file descriptors
  *   - SYS_write (1): Write to file descriptors
  *   - SYS_exit (60): Terminate the calling thread. A sealed thread must be
@@ -178,7 +187,13 @@ enum class SeccompError : uint8_t {
 class SeccompFilterEngine {
 private:
     // LAYER 4 P1 FIX: Whitelist-based filter (explicit allow, default deny)
-    // Syscall numbers (x86_64 / ARM64 as fallback)
+    // Syscall numbers are per architecture. x86_64 keeps its own table;
+    // aarch64 uses the asm-generic table, where the x86_64 values name
+    // io_setup, io_destroy, quotactl, munlockall, flistxattr, mlock and
+    // accept instead. The static_asserts below hold every entry to the
+    // libc's __NR_* value for the architecture being compiled, so a wrong
+    // table is a compile error rather than ENOSYS on every read.
+#if defined(__x86_64__) || defined(_M_X64)
     static constexpr long SYS_READ = 0;
     static constexpr long SYS_WRITE = 1;
     static constexpr long SYS_EXIT = 60;
@@ -186,6 +201,24 @@ private:
     static constexpr long SYS_RT_SIGACTION = 13;
     static constexpr long SYS_CLOCK_GETTIME = 228;
     static constexpr long SYS_FUTEX = 202;
+#elif defined(__aarch64__)
+    static constexpr long SYS_READ = 63;
+    static constexpr long SYS_WRITE = 64;
+    static constexpr long SYS_EXIT = 93;
+    static constexpr long SYS_EXIT_GROUP = 94;
+    static constexpr long SYS_RT_SIGACTION = 134;
+    static constexpr long SYS_CLOCK_GETTIME = 113;
+    static constexpr long SYS_FUTEX = 98;
+#else
+#error "SeccompFilterEngine: no syscall table for this architecture"
+#endif
+    static_assert(SYS_READ == __NR_read, "SYS_READ must equal __NR_read for this architecture");
+    static_assert(SYS_WRITE == __NR_write, "SYS_WRITE must equal __NR_write for this architecture");
+    static_assert(SYS_EXIT == __NR_exit, "SYS_EXIT must equal __NR_exit for this architecture");
+    static_assert(SYS_EXIT_GROUP == __NR_exit_group, "SYS_EXIT_GROUP must equal __NR_exit_group for this architecture");
+    static_assert(SYS_RT_SIGACTION == __NR_rt_sigaction, "SYS_RT_SIGACTION must equal __NR_rt_sigaction for this architecture");
+    static_assert(SYS_CLOCK_GETTIME == __NR_clock_gettime, "SYS_CLOCK_GETTIME must equal __NR_clock_gettime for this architecture");
+    static_assert(SYS_FUTEX == __NR_futex, "SYS_FUTEX must equal __NR_futex for this architecture");
 
 public:
     [[nodiscard]] static std::expected<void, SeccompError> InstallFilter() noexcept {
@@ -287,13 +320,16 @@ public:
      * Returns false if transaction is in flight, preventing capability mutation.
      *
      * Thread safety: Acquires capability_lock_ to ensure atomicity with
-     * concurrent reads in ExecuteGovernedTransaction().
+     * concurrent reads in ExecuteGovernedTransaction(). The in-flight check
+     * runs under that lock, and ExecuteGovernedTransaction() raises the
+     * counter under the same lock as its snapshot, so a transaction cannot
+     * start between this check and the write.
      */
     [[nodiscard]] bool SetActiveCapabilities(const CapabilityMask256& mask) noexcept {
+        std::lock_guard<std::mutex> lock(capability_lock_);
         if (transactions_in_flight_.load(std::memory_order_acquire) > 0) {
             return false;  // Transaction in flight; cannot change capabilities
         }
-        std::lock_guard<std::mutex> lock(capability_lock_);
         active_host_capabilities_ = mask;
         return true;
     }
@@ -341,26 +377,27 @@ public:
             if (!init_res.has_value()) return std::unexpected(init_res.error());
         }
 
-        // Snapshot active capabilities to prevent torn reads during concurrent mutations
+        // Snapshot active capabilities to prevent torn reads during concurrent mutations.
+        // Lifecycle guard: mark the transaction in flight under the same lock, so
+        // SetActiveCapabilities() (which checks the counter under capability_lock_)
+        // sees either the old counter and no snapshot yet, or the raised counter.
         CapabilityMask256 snapshot_capabilities{};
         {
             std::lock_guard<std::mutex> lock(capability_lock_);
             snapshot_capabilities = active_host_capabilities_;
+            transactions_in_flight_.fetch_add(1, std::memory_order_release);
         }
 
-        // Extract domain ID early for audit logging
-        const uint64_t domain_id = token.GetContextId();
-
-        // Lifecycle guard: mark transaction in flight
-        transactions_in_flight_.fetch_add(1, std::memory_order_release);
-
-        // RAII cleanup: decrement on exit
+        // RAII cleanup: decrement on exit (pairs with the fetch_add above on every path)
         struct TransactionGuard {
             std::atomic<uint32_t>& counter;
             ~TransactionGuard() noexcept {
                 counter.fetch_sub(1, std::memory_order_release);
             }
         } lifecycle_guard{transactions_in_flight_};
+
+        // Extract domain ID early for audit logging
+        const uint64_t domain_id = token.GetContextId();
 
         // Component 13 Check: SIMD Capability Verification (against snapshot)
         if (!token.Validate(snapshot_capabilities)) [[unlikely]] {
