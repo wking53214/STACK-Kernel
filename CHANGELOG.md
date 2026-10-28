@@ -29,3 +29,4 @@ Not renamed, on purpose:
 ### Changed
 
 - `stack-anc-adaptive`: `Trip::OperationPanicked` now resolves to `Resolution::Reject`, and the `Resolution::Quarantine` variant is removed from that crate. The pad has no sender identity and isolates nothing, so the old label described an action it did not take.
+- `cpp` (`stack_host_binding.hpp`): the seccomp allowlist now carries an aarch64 syscall table beside the x86_64 one, and a `static_assert` holds each entry to the libc `__NR_*` value. On aarch64 the old x86_64 numbers allowed io_setup, io_destroy, quotactl, munlockall, flistxattr, mlock and accept while read, write, exit, exit_group, rt_sigaction, clock_gettime and futex got ENOSYS.

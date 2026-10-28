@@ -16,6 +16,8 @@ Production-locked implementation of the TACK Host Body — the system-level secu
 | 12 | stack_host_binding.hpp | GovernedMinotaurHost: One-way security ratchet + boundary executor |
 | 13 | stack_host_binding.hpp | SIMDCapabilityToken: 256-bit AVX2/NEON capability verification |
 
+The seccomp allowlist in `stack_host_binding.hpp` carries one syscall-number table per architecture (x86_64 and aarch64), and a `static_assert` against each `__NR_*` value turns a wrong entry into a compile error.
+
 ## Lock/Key Alignment with Rust Crates
 
 - **stack-inlet** (Winnowing Filter) ← CapabilityGuard (boundary validation)
