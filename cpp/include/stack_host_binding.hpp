@@ -179,6 +179,14 @@ public:
  *
  * Once installed, the filter cannot be removed or modified—only by the host
  * process with appropriate privileges. For Minotaur, once sealed, it is sealed.
+ *
+ * SCOPE: a filter attaches to the one thread that installs it (no
+ * SECCOMP_FILTER_FLAG_TSYNC), so every thread that governs transactions
+ * installs its own, exactly once. Applying it process wide was rejected: it
+ * would also put this tiny allowlist on threads that never asked for it (an
+ * allocator or runtime thread of a Rust caller needs mmap, openat and clone),
+ * and it would not help the threads it reached, which could not call
+ * timer_create to set up their deadline timers.
  */
 enum class SeccompError : uint8_t {
     None = 0,
@@ -226,8 +234,19 @@ private:
     static_assert(SYS_FUTEX == __NR_futex, "SYS_FUTEX must equal __NR_futex for this architecture");
     static_assert(SYS_TIMER_SETTIME == __NR_timer_settime, "SYS_TIMER_SETTIME must equal __NR_timer_settime for this architecture");
 
+    // Set only after the filter is installed on this thread. Per thread and not
+    // per host: the filter is, and a second install would be denied by it.
+    static inline thread_local bool installed_on_this_thread_ = false;
+
 public:
+    [[nodiscard]] static bool IsInstalledOnThisThread() noexcept {
+        return installed_on_this_thread_;
+    }
+
     [[nodiscard]] static std::expected<void, SeccompError> InstallFilter() noexcept {
+        if (installed_on_this_thread_) [[unlikely]] {
+            return {};
+        }
         if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) [[unlikely]] {
             return std::unexpected(SeccompError::SetNoNewPrivsFailed);
         }
@@ -282,6 +301,7 @@ public:
             return std::unexpected(SeccompError::FilterApplyFailed);
         }
 
+        installed_on_this_thread_ = true;
         return {};
     }
 };
@@ -313,7 +333,6 @@ private:
     KineticGovernor<MaxCapacity, ReservedTokens, MaxBurstTokens, TicksPerToken, MaxDomains> governor_{};
     ComputeDebtTracker<MaxDomains> debt_tracker_{};
     CapabilityMask256 active_host_capabilities_{};
-    std::atomic<bool> seccomp_sealed_{false};
     std::atomic<uint32_t> transactions_in_flight_{0};  // Lifecycle guard
     mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
     mutable std::mutex capability_lock_{};  // Protects active_host_capabilities_
@@ -342,18 +361,14 @@ public:
     }
 
     [[nodiscard]] std::expected<void, HostExecutionError> InitializeAndSeal() noexcept {
-        // Double-checked locking: fast path (no lock)
-        if (seccomp_sealed_.load(std::memory_order_acquire)) [[likely]] {
+        // Fast path: this thread already carries the filter. The state is per
+        // thread, so another thread having sealed says nothing about this one.
+        if (SeccompFilterEngine::IsInstalledOnThisThread()) [[likely]] {
             return {};
         }
 
         // Slow path: acquire lock for initialization
         std::lock_guard<std::mutex> lock(initialization_lock_);
-
-        // Recheck after acquiring lock: another thread may have initialized
-        if (seccomp_sealed_.load(std::memory_order_acquire)) [[likely]] {
-            return {};
-        }
 
         if (!HardenedPosixPreemptionGuard::RegisterSignalHandler().has_value()) [[unlikely]] {
             return std::unexpected(HostExecutionError::SignalHandlerRegistrationFailed);
@@ -363,11 +378,12 @@ public:
             return std::unexpected(HostExecutionError::TimerInitializationFailed);
         }
 
+        // The timer above must exist first: timer_create is not on the allowlist.
+        // A failed install returns an error and leaves this thread unsealed.
         if (!SeccompFilterEngine::InstallFilter().has_value()) [[unlikely]] {
             return std::unexpected(HostExecutionError::SeccompInitializationFailed);
         }
 
-        seccomp_sealed_.store(true, std::memory_order_release);
         return {};
     }
 
@@ -379,7 +395,7 @@ public:
         uint64_t hard_timeout_nanoseconds,
         ExecutionPayload&& payload) noexcept
     {
-        if (!seccomp_sealed_) [[unlikely]] {
+        if (!SeccompFilterEngine::IsInstalledOnThisThread()) [[unlikely]] {
             auto init_res = InitializeAndSeal();
             if (!init_res.has_value()) return std::unexpected(init_res.error());
         }

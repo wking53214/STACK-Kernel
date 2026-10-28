@@ -21,12 +21,12 @@ static telemetry::SeccompAuditRing<1024> g_audit_ring;
 extern "C" {
 
 // Initialize host and seal with SECCOMP
+// The host is process wide but the seccomp filter is per thread, so every
+// calling thread seals itself; a thread that is already sealed returns at once.
 int stack_host_initialize_and_seal() {
-    if (g_initialized.load()) return 0;
-    
     // Allocate host instance
     static host::GovernedMinotaurHost<64, 100, 1000, 100, 16> host_instance;
-    g_host = &host_instance;
+    if (!g_initialized.load()) g_host = &host_instance;
     
     // Initialize the hardened POSIX timer for this thread
     auto timer_result = governor::HardenedPosixPreemptionGuard::InitializeThreadTimer();

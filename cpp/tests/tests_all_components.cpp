@@ -21,6 +21,13 @@ using namespace stack::host;
 using namespace stack::isolation;
 using namespace stack::telemetry;
 
+// getpid is not on the allowlist, so a thread that has installed the filter
+// gets ENOSYS and an unfiltered thread gets its pid.
+static bool ThisThreadIsFiltered() {
+    errno = 0;
+    const long rc = ::syscall(SYS_getpid);
+    return rc == -1 && errno == ENOSYS;
+}
 TEST_CASE("Components 1-5: Governor & Sync Core", "[components][1-5]") {
     KineticGovernor<> gov;
     auto res = gov.Consume(0, 10, PriorityClass::Standard);
@@ -284,9 +291,9 @@ TEST_CASE("Component 12: Layer 4 - Capability change refused while a payload run
     // releases the payload, and asks again once the transaction has returned (must
     // be applied).
     //
-    // Sealing is per thread, while the host's sealed flag is per host. A
-    // sacrificial thread seals first; the worker below then runs unsealed,
-    // so this test pins the in-flight counter and not the filter.
+    // Sealing is per thread: the sacrificial thread below seals itself and the
+    // worker seals itself when it runs its transaction. The test pins the
+    // in-flight counter, and the main thread stays unsealed.
     GovernedMinotaurHost<> host;
     REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
 
@@ -358,16 +365,41 @@ TEST_CASE("Component 12: Layer 4 - A sealed thread can arm its deadline timer", 
             token, 5, 100'000'000'000ULL, 1'000'000'000ULL,
             [&]() { payload_ran.store(true, std::memory_order_release); });
         transaction_ok.store(res.has_value(), std::memory_order_release);
-        // getpid is not on the allowlist, so a sealed thread gets ENOSYS.
-        errno = 0;
-        const long rc = ::syscall(SYS_getpid);
-        filter_active.store(rc == -1 && errno == ENOSYS, std::memory_order_release);
+        filter_active.store(ThisThreadIsFiltered(), std::memory_order_release);
     });
     worker.join();
 
     REQUIRE(filter_active.load());
     REQUIRE(payload_ran.load());
     REQUIRE(transaction_ok.load());
+}
+
+TEST_CASE("Component 12: Layer 4 - Every governed thread installs its own filter", "[layer-4][defect-6]") {
+    // A seccomp filter attaches to the thread that installs it, and the host's
+    // sealed state used to be per host, so only the first thread to call in was
+    // filtered and every later thread ran unfiltered. Each thread below runs one
+    // transaction after the previous thread has finished; all must succeed (the
+    // timer is created before the filter) and all must be filtered. The calling
+    // thread never seals, which pins that the filter is not process wide.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    constexpr int num_threads = 3;
+    std::atomic<int> transactions_ok{0};
+    std::atomic<int> threads_filtered{0};
+    for (int i = 0; i < num_threads; ++i) {
+        std::thread([&host, &transactions_ok, &threads_filtered, i]() {
+            SIMDCapabilityToken token(static_cast<uint64_t>(i) + 1, CapabilityMask256(0x01, 0, 0, 0));
+            auto res = host.ExecuteGovernedTransaction(
+                token, 5, 100'000'000'000ULL, 1'000'000'000ULL, []() {});
+            if (res.has_value()) transactions_ok++;
+            if (ThisThreadIsFiltered()) threads_filtered++;
+        }).join();
+    }
+
+    REQUIRE(transactions_ok.load() == num_threads);
+    REQUIRE(threads_filtered.load() == num_threads);
+    REQUIRE_FALSE(ThisThreadIsFiltered());
 }
 
 TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][defect-1]") {
@@ -402,6 +434,7 @@ TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][def
         GovernedMinotaurHost<> host;
         std::atomic<bool> thread1_sealed{false};
         std::atomic<bool> thread2_saw_sealed{false};
+        std::atomic<bool> thread2_filtered{false};
 
         std::thread t1([&host, &thread1_sealed]() {
             auto res = host.InitializeAndSeal();
@@ -409,18 +442,21 @@ TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][def
             thread1_sealed.store(true, std::memory_order_release);
         });
 
-        std::thread t2([&host, &thread1_sealed, &thread2_saw_sealed]() {
+        std::thread t2([&host, &thread1_sealed, &thread2_saw_sealed, &thread2_filtered]() {
             while (!thread1_sealed.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
             auto res = host.InitializeAndSeal();
             REQUIRE(res.has_value());
             thread2_saw_sealed.store(true, std::memory_order_release);
+            thread2_filtered.store(ThisThreadIsFiltered(), std::memory_order_release);
         });
 
         t1.join();
         t2.join();
         REQUIRE(thread2_saw_sealed.load());
+        // A filter attaches to one thread, so the second thread installed its own.
+        REQUIRE(thread2_filtered.load());
     }
 
     // RED TEAM: Test 3 - Rapid sequential init (stress test lock contention)
