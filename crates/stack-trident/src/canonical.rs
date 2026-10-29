@@ -27,8 +27,9 @@
 //! `json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`,
 //! because Python sorts by code point and UTF-16 order only differs from
 //! code-point order above U+FFFF. That agreement is tested with a
-//! known-answer vector. It is **not** what CNS `subject_digest` computes;
-//! see the crate-level open questions.
+//! known-answer vector. It is **not** what CNS `subject_digest` computes:
+//! the envelope's `subject_digest` uses [`crate::cns_digest`], and this
+//! encoding is what the MAC and the size limits cover.
 //!
 //! # Bounds
 //!
