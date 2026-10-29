@@ -10,19 +10,20 @@ method, the controls and the results are in
 |---|---|
 | `crates/stack-anc-ceiling/examples/padding_jitter.rs` | The experiment. One launch = one (mode, block): seven cells, each cell a padding policy |
 | `run_experiment.sh` | Runs the launches, each a separate process, pinned to the last CPU |
-| `analyze.py` | Combines the blocks and writes `summary.json` and the tables used in the write-up |
+| `analyze.py` | Combines the blocks and writes `summary.json` and `tables.md` |
 | `runs/block<B>_<mode>.json` | One file per launch: per-cell, per-class, per-pair statistics |
-| `summary.json` | Output of `analyze.py` |
+| `summary.json`, `tables.md` | Output of `analyze.py`: every combined number, and the tables the write-up quotes |
+| `runs/launch.log` | Start and end time, pinning and load of every launch |
 
 ## Rerun
 
 ```text
 cargo build --release -p stack-anc-ceiling --example padding_jitter --locked
 ./manual/measurements/randomized_padding_2026-10-29/run_experiment.sh /tmp/runs 0 4
-python3 manual/measurements/randomized_padding_2026-10-29/analyze.py /tmp/runs /tmp/summary.json
+python3 manual/measurements/randomized_padding_2026-10-29/analyze.py /tmp/runs /tmp/summary.json /tmp/tables.md
 ```
 
-A full run (3 modes x 5 blocks) takes about 50 minutes. Use `N_TOTAL=12000`
+A full run (3 modes x 5 blocks) takes about an hour (the recorded run took 58 minutes). Use `N_TOTAL=12000`
 for a quick smoke run. Seeds are recorded in every file; with the same seeds
 the class schedule and the jitter draws repeat exactly, the timings do not.
 
@@ -31,8 +32,9 @@ the class schedule and the jitter draws repeat exactly, the timings do not.
 Each launch computes its statistics (Welch t, the crate's cropped t values,
 the second-order t, KS, a permutation p-value, bootstrap confidence
 intervals, percentiles of every class) from the per-sample timings in
-memory, then writes only those. The per-sample timings themselves (about 36
-million values) are not committed: they would be about 150 MB.
+memory, then writes only those. The per-sample timings themselves (7,559,974
+kept values) are not committed: as raw 64-bit floats they would be about 60 MB
+plus the class and draw of each.
 
 ## Host limits
 
