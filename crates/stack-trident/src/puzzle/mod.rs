@@ -21,6 +21,7 @@ pub mod gate;
 pub mod inspect;
 pub mod piece;
 pub mod rules;
+pub mod telemetry;
 #[cfg(test)]
 mod rules_evidence;
 
