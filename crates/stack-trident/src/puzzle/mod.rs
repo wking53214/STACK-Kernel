@@ -16,7 +16,9 @@
 //! the gate's concern and cannot be skipped by a caller.
 
 pub mod config;
+pub mod inspect;
 pub mod piece;
 
 pub use config::PuzzleConfig;
+pub use inspect::{DenyListError, DenyListInspector, Finding, InspectInput, Inspector};
 pub use piece::{abort_payload, parse_message, root_of, split, Message, Piece, PieceError, PuzzleId, SplitError, ROOT_DOMAIN};

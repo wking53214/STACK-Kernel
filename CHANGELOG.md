@@ -30,6 +30,7 @@ Not renamed, on purpose:
 
 - `manual/sections/trident_puzzles.md`: design note for the Trident puzzle gate, which holds every piece of a declared puzzle until the whole is present and has passed inspection, so a hostile payload cut into harmless pieces is inspected where it is assembled. Defaults come from a synthetic simulation; the note lists what that simulation could not show.
 - `stack-trident` `puzzle` (prototype, not wired into anything): `PuzzleConfig` with documented defaults and hard ceilings, and the strict piece format. A piece is a verified envelope whose payload has exactly the keys `kind`, `puzzle`, `index`, `total`, `root` and `data`; an abort has exactly `kind` and `puzzle`. Extra keys, upper-case or odd-length hex, text or float numbers and out-of-range values are refused. `root_of` commits to the finished puzzle with a domain-separated SHA-256 over the piece digests; `split` is the producer side.
+- `stack-trident` `puzzle`: the `Inspector` trait, `InspectInput` (the assembled whole plus the trailing bytes of the sender's last released wholes) and `Finding` (`Pass`, `Suspicious`, `Hostile`). There is no default inspector. `DenyListInspector` is a reference tripwire for known byte patterns, including a pattern split across a join; it misses any paraphrase.
 
 ### Changed
 
