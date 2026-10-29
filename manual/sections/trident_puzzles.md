@@ -67,7 +67,7 @@ What the simulation could not show: whether any real inspector finds real hostil
 
 ### Limits that remain
 
-- **The gate decides where to look, not what is hostile.** Its value is bounded by the inspector it is given. The reference `DenyListInspector` is a tripwire for known byte patterns, as the baseline policy in GSA is: it misses paraphrase.
+- **The gate decides where to look, not what is hostile.** Its value is bounded by the inspector it is given. `DenyListInspector` is a reference tripwire for known byte patterns. `RuleInspector` is the first real inspector and is bounded by its lists: it misses paraphrase, encodings and look-alike characters (see "The rules inspector").
 - **Patterns longer than the retained tail are invisible across joins.** `history_tail_bytes` bounds memory and therefore the longest pattern a split can be caught in.
 - **A split wider than the look-back still passes.** Any window can be exceeded. The window is a setting; the arms race is not closed.
 - **Meaning assembled by a reader is out of reach.** If the receiver is a person or a language model that connects separate messages, no byte-level gate sees the assembly.
@@ -106,12 +106,95 @@ Tests come first and each attack is its own test:
 - A forged envelope (wrong MAC) never touches any puzzle and never counts against the claimed sender.
 - A small deterministic mixed run (a few hundred puzzles of every kind) checks the end state: no hostile whole released, no honest sender quarantined.
 
-### Open questions
+### Decisions on the open questions
 
-- [ ] Should a puzzle quarantine feed the Trident's own breaker, which needs an operator to release, or stay separate with automatic expiry? The prototype keeps it separate so a burst of honest explosions cannot lock a sender out until someone intervenes.
-- [ ] Should the gate persist open puzzles, tails and quarantines across a restart? Persistence keeps a quarantined attacker quarantined; it also adds a store to bound and secure.
-- [ ] Should the Trident's per-sender sequence rule be relaxed inside a puzzle so honest network reordering is tolerated? That would weaken replay protection exactly where state is held longest.
-- [ ] Which inspector will the first production gate use? The gate is only as good as its inspector, and none is chosen.
-- [ ] What should the "busy" reply look like on the wire so honest clients back off instead of retrying in a storm?
-- [ ] Should metrics and spans be added with closed-enum labels, as the Trident has? The prototype logs closes with `tracing` and has no metrics yet.
-- [ ] Is the timing of release a leak? Releasing a whole at completion time reveals when the last piece arrived; releasing on a fixed schedule hides it at the cost of delay. The padding layers in the ANC crates are the place to answer this.
+Decided by the owner on 2026-10-29, following the recommendations in the design discussion.
+
+- [x] **Quarantine and the Trident's breaker.** Keep them separate, with automatic expiry, so a burst of honest explosions cannot lock a sender out until someone intervenes.
+- [x] **Persistence.** None for now. A restart destroys open puzzles, which is safe, but it resets quarantines. Revisit when something depends on the gate, because persistence adds a store to bound and secure.
+- [x] **Relax the sequence rule inside a puzzle.** No. It would weaken replay protection exactly where state is held longest.
+- [x] **Which inspector first.** Rules, not a model: `RuleInspector` (see below). A model-based inspector can come later; it would need to be quick or run outside the gate lock, because inspection holds the lock.
+- [ ] **The "busy" reply on the wire.** Deferred until the gate is wired into something that sends replies. Without a typed reply with a retry-after hint, honest clients will retry in a storm.
+- [x] **Metrics and spans.** Built, with closed labels (see "Observability").
+- [ ] **Is the release timing a leak?** Parked. Releasing a whole when the last piece arrives reveals when it arrived; releasing on a fixed schedule hides it at the cost of delay. The randomized-padding measurement in the ANC crates is where the answer will come from.
+
+### The rules inspector
+
+`RuleInspector` (`puzzle::rules`) is the first real inspector. It is cheap and honest, and it is bounded by its lists.
+
+What it does:
+
+- **Normalizes before matching.** ASCII case is folded, zero-width and bidirectional-control characters and other control characters are dropped, and whitespace runs become one space. A marker hidden by spacing, case or invisible characters is still seen.
+- **Matches the operator's deny patterns**, optionally also through spacing (`T R O J A N`).
+- **Matches injection phrases**, ported from the tightened GSA `BaselinePolicy` rules (instruction override, prompt leak, "you are now", DAN mode, override of safety rules), over word tokens so punctuation does not hide a phrase.
+- **Matches one narrow harmful-build rule**: a build verb, a malware artifact and a harm cue in one sentence.
+- **Looks back.** The same checks run on the tails of the sender's recent wholes joined to the head of this one, so a phrase cut across puzzles is seen.
+- **Checks shape and says `Suspicious`, never `Hostile`**: not valid UTF-8, a NUL byte, too many control characters, or a whole over the size cap. A `Suspicious` finding is not a breach.
+
+Measured on the evidence in `src/puzzle/rules_evidence.rs` (all are assertions in the tests):
+
+| Set | Result |
+|---|---|
+| Dev attacks (the forms the rules were written against) | 18 of 18 caught |
+| Held-out attacks (other phrasings, measured once before any change) | 12 of 14 caught |
+| Red-team obfuscations (case, spacing, invisible and control characters, punctuation) | 18 of 18 caught; with normalization switched off, 6 of 18 |
+| Phrase cut over 2, 3 and 4 puzzles | caught with look-back 3; a 5-way cut escapes, and look-back 4 catches it |
+| Paraphrases | 0 of 8 caught |
+| Encodings and look-alike characters (fullwidth, Cyrillic, leetspeak, ROT13, base64, French) | 0 of 6 caught |
+| Benign text, including routine text with scary words | 6 of 49 flagged |
+
+The two held-out misses are natural variants outside the ported word lists ("every previous", "all earlier"). They are recorded, not tuned against: extending the lists is cheap, but it needs a fresh held-out set to measure the fix.
+
+The six benign flags are asserted by name. Two come from the deny list used in the evidence config (`TROJAN` in "trojan horse prop", and `TROJAN` matched through spacing in "intro Jan"). Four come from the ported phrase rules: defender-style requests ("build a tool that detects malware spreading across the company network"), a question about DAN mode, and "disregard the above figure". The benign set is chosen to overlap scary vocabulary, so 12 percent is a pessimistic bound for that kind of text, not a rate for real traffic, which is unknown.
+
+What it cannot see, by design: a paraphrase, an encoding, a translation, a look-alike character from another script, and meaning that a reader assembles from separate messages. The gate releases all of these, and the tests assert that they are released so the gap cannot go quiet.
+
+Cost, measured once in a release build in a container (not a benchmark): about 58 ms for a 256 KiB prose whole and about 230 ms for 1 MB of input built to be slow, linear with no quadratic behaviour. Inspection runs while the gate holds its lock, so at the largest default whole a gate that inspects only large wholes handles on the order of 15 per second.
+
+### Observability
+
+Metrics go through the `metrics` facade and every label value comes from a closed set (`puzzle::telemetry`). Nothing a sender, a puzzle or an inspector says becomes a label; an inspector's own reason text is logged only. `tests/puzzle_telemetry.rs` asserts that each metric fires and that every label value is in its closed set, including with 150 senders and an inspector that returns odd reasons.
+
+| Name | Type | Labels | Meaning |
+|---|---|---|---|
+| `stack_trident_puzzle_messages_total` | counter | `outcome` (held, released, aborted, refused, rejected) | One per message offered to the gate. |
+| `stack_trident_puzzle_refusals_total` | counter | `reason` (14 spellings: halted, sender_gate_not_pass, quarantined, three busy kinds, malformed, unknown_puzzle, already_closed, conflict, replayed_whole, root_mismatch, content_blocked, content_suspicious) | One per refusal. |
+| `stack_trident_puzzle_closed_total` | counter | `reason` (released, aborted, exploded, evicted, conflict, root_mismatch, hostile, suspicious, quarantined) | One per puzzle that stopped being open. |
+| `stack_trident_puzzle_breaches_total` | counter | none | Breaches counted against senders. |
+| `stack_trident_puzzle_quarantine_trips_total` | counter | none | Senders quarantined by the gate's breaker. |
+| `stack_trident_puzzle_open_puzzles` | gauge | none | Puzzles currently open. |
+| `stack_trident_puzzle_held_bytes` | gauge | none | Bytes held in open puzzles. |
+| `stack_trident_puzzle_inspect_duration_seconds` | histogram | `finding` (pass, suspicious, hostile) | Wall time of one inspection, which holds the gate lock. |
+
+Spans: `stack.trident.puzzle.offer` (INFO, fields `outcome` and `refusal`) and `stack.trident.puzzle.sweep` (INFO). A blocked or suspicious whole logs a WARN event with the inspector's reason text.
+
+Example alert rules. They have not been run against a Prometheus:
+
+```yaml
+groups:
+  - name: stack-trident-puzzle
+    rules:
+      - alert: PuzzleSenderQuarantined
+        expr: increase(stack_trident_puzzle_quarantine_trips_total[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "A sender was quarantined by the puzzle gate. It lifts by itself."}
+      - alert: PuzzleHostileContent
+        expr: increase(stack_trident_puzzle_refusals_total{reason="content_blocked"}[5m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The inspector blocked a hostile whole."}
+      - alert: PuzzleExplosions
+        expr: sum(rate(stack_trident_puzzle_closed_total{reason="exploded"}[10m])) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Puzzles are timing out at a sustained rate: a hoarder or a broken producer."}
+      - alert: PuzzleBusy
+        expr: sum(rate(stack_trident_puzzle_refusals_total{reason=~"busy_.*"}[10m])) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Honest senders are being told busy. Raise the limits or find the flooder."}
+      - alert: PuzzleSlowInspection
+        expr: histogram_quantile(0.99, sum by (le) (rate(stack_trident_puzzle_inspect_duration_seconds_bucket[5m]))) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "p99 inspection time above 100 ms. Inspection holds the gate lock. Needs an exporter that renders histogram buckets."}
+```
