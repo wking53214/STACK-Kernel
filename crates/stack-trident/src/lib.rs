@@ -159,8 +159,10 @@
 //! has passed an [`puzzle::Inspector`]. Incomplete puzzles are destroyed after
 //! a lifetime that follows progress. Design, rules and open questions are in
 //! `manual/sections/trident_puzzles.md`. Inspection runs while the gate lock
-//! is held, so an inspector must be quick. Nothing outside this crate uses
-//! the gate yet.
+//! is held, so an inspector must be quick. [`puzzle::RuleInspector`] is the
+//! first real inspector (rules, not a model); the gate has no default
+//! inspector. Metrics and spans are in [`puzzle::telemetry`]. Nothing
+//! outside this crate uses the gate yet.
 //!
 //! ## Open questions
 //!

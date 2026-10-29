@@ -4,11 +4,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use metrics::{counter, gauge, histogram};
 
 use super::breaker::SenderState;
 use super::config::PuzzleConfig;
 use super::inspect::{Finding, InspectInput, Inspector};
 use super::piece::{parse_message, root_of, Message, Piece, PieceError, PuzzleId};
+use super::telemetry as t;
 use crate::clock::Clock;
 use crate::config::ConfigError;
 use crate::envelope::HandoffEnvelope;
@@ -84,6 +88,27 @@ pub enum PuzzleRefusal {
 }
 
 impl PuzzleRefusal {
+    /// The closed spelling used as a metric label. An inspector's own reason
+    /// text is deliberately not part of it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Halted => "halted",
+            Self::SenderGateNotPass => "sender_gate_not_pass",
+            Self::Quarantined { .. } => "quarantined",
+            Self::Busy(BusyReason::TooManyOpen) => "busy_too_many_open",
+            Self::Busy(BusyReason::HoldingAreaFull) => "busy_holding_area_full",
+            Self::Busy(BusyReason::TooManySenders) => "busy_too_many_senders",
+            Self::Malformed(_) => "malformed",
+            Self::UnknownPuzzle => "unknown_puzzle",
+            Self::AlreadyClosed => "already_closed",
+            Self::Conflict => "conflict",
+            Self::ReplayedWhole => "replayed_whole",
+            Self::RootMismatch => "root_mismatch",
+            Self::ContentBlocked(_) => "content_blocked",
+            Self::ContentSuspicious(_) => "content_suspicious",
+        }
+    }
+
     /// Whether this refusal costs the sender a breach. Refusals that are the
     /// gate's doing (busy, quarantined, halted) or that cannot be pinned on
     /// the sender (unknown puzzle, late pieces, an uncertain finding) do not.
@@ -135,6 +160,36 @@ pub enum CloseReason {
     Suspicious,
     /// Its sender was quarantined.
     Quarantined,
+}
+
+impl CloseReason {
+    /// The closed spelling used as a metric label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Released => "released",
+            Self::Aborted => "aborted",
+            Self::Exploded => "exploded",
+            Self::Evicted => "evicted",
+            Self::Conflict => "conflict",
+            Self::RootMismatch => "root_mismatch",
+            Self::Hostile => "hostile",
+            Self::Suspicious => "suspicious",
+            Self::Quarantined => "quarantined",
+        }
+    }
+}
+
+impl Outcome {
+    /// The closed spelling used as the `outcome` metric label.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Held { .. } => "held",
+            Self::Released(_) => "released",
+            Self::Aborted => "aborted",
+            Self::Refused(_) => "refused",
+            Self::Rejected(_) => "rejected",
+        }
+    }
 }
 
 /// A puzzle that is no longer open.
@@ -191,6 +246,11 @@ struct State {
 }
 
 impl State {
+    fn publish_gauges(&self) {
+        gauge!(t::OPEN_PUZZLES).set(t::gauge_value(self.open.len()));
+        gauge!(t::HELD_BYTES).set(t::gauge_value(self.held_bytes));
+    }
+
     fn push_closed(&mut self, c: Closed) {
         if self.closed.len() >= MAX_CLOSED_EVENTS {
             self.closed.pop_front();
@@ -271,7 +331,9 @@ impl State {
     /// the sender's open puzzles.
     fn breach(&mut self, fp: Fingerprint, now: u64, cfg: &PuzzleConfig) {
         let started = self.senders.get_mut(&fp).is_some_and(|s| s.record_breach(now, cfg));
+        counter!(t::BREACHES_TOTAL).increment(1);
         if started {
+            counter!(t::QUARANTINE_TRIPS_TOTAL).increment(1);
             tracing::warn!(target: "stack_trident::puzzle", sender = %fp, "sender quarantined by the puzzle gate");
             let keys: Vec<Key> = self.open.keys().filter(|k| k.0 == fp).copied().collect();
             for k in keys {
@@ -292,6 +354,8 @@ impl State {
             s.open = s.open.saturating_sub(1);
         }
         self.remember_closed(key, now, cfg);
+        counter!(t::CLOSED_TOTAL, "reason" => reason.as_str()).increment(1);
+        self.publish_gauges();
         self.push_closed(Closed {
             sender: key.0,
             puzzle: key.1,
@@ -408,6 +472,8 @@ impl State {
         }
 
         // Add the piece and let the deadline follow progress.
+        gauge!(t::OPEN_PUZZLES).set(t::gauge_value(self.open.len()));
+        gauge!(t::HELD_BYTES).set(t::gauge_value(self.held_bytes.saturating_add(incoming)));
         let Some(o) = self.open.get_mut(&key) else {
             return Outcome::Refused(PuzzleRefusal::UnknownPuzzle);
         };
@@ -433,6 +499,7 @@ impl State {
             self.close(key, CloseReason::RootMismatch, true, now, cfg);
             return Outcome::Refused(PuzzleRefusal::RootMismatch);
         }
+        let started = Instant::now();
         let finding = {
             let history: &[Vec<u8>] = match self.senders.get_mut(&fp) {
                 Some(s) => &*s.history.make_contiguous(),
@@ -440,6 +507,12 @@ impl State {
             };
             inspector.inspect(&InspectInput { sender: &fp, puzzle: p.puzzle, whole: &whole, history })
         };
+        let kind = match finding {
+            Finding::Pass => "pass",
+            Finding::Suspicious(_) => "suspicious",
+            Finding::Hostile(_) => "hostile",
+        };
+        histogram!(t::INSPECT_DURATION_SECONDS, "finding" => kind).record(started.elapsed().as_secs_f64());
         match finding {
             Finding::Hostile(reason) => {
                 self.close(key, CloseReason::Hostile, true, now, cfg);
@@ -509,6 +582,7 @@ impl PuzzleGate {
     /// also does this before handling any message; call this from a timer so
     /// explosions happen on time when no traffic arrives.
     pub fn sweep(&self) -> usize {
+        let _span = tracing::info_span!(t::SPAN_SWEEP).entered();
         let now = self.clock.now_unix_ms();
         match self.state.lock() {
             Ok(mut st) => st.sweep(now, &self.cfg),
@@ -533,10 +607,32 @@ impl PuzzleGate {
     }
 
     fn offer_verdict(&self, verdict: Verdict) -> Outcome {
-        match verdict {
+        let span = tracing::info_span!(t::SPAN_OFFER, outcome = tracing::field::Empty, refusal = tracing::field::Empty);
+        let _entered = span.enter();
+        let outcome = match verdict {
             Verdict::Refused(r) => Outcome::Rejected(r),
             Verdict::Accepted(h) => self.offer_verified(&h),
+        };
+        counter!(t::MESSAGES_TOTAL, "outcome" => outcome.as_str()).increment(1);
+        span.record("outcome", outcome.as_str());
+        match &outcome {
+            Outcome::Refused(r) => {
+                counter!(t::REFUSALS_TOTAL, "reason" => r.as_str()).increment(1);
+                span.record("refusal", r.as_str());
+                match r {
+                    PuzzleRefusal::ContentBlocked(why) => {
+                        tracing::warn!(target: "stack_trident::puzzle", why = *why, "stack.trident puzzle blocked a whole");
+                    }
+                    PuzzleRefusal::ContentSuspicious(why) => {
+                        tracing::warn!(target: "stack_trident::puzzle", why = *why, "stack.trident puzzle refused a suspicious whole");
+                    }
+                    _ => tracing::debug!(target: "stack_trident::puzzle", refusal = r.as_str(), "stack.trident puzzle refused a message"),
+                }
+            }
+            Outcome::Rejected(_) => tracing::debug!(target: "stack_trident::puzzle", "stack.trident puzzle message rejected by the Trident"),
+            _ => {}
         }
+        outcome
     }
 
     fn offer_verified(&self, h: &VerifiedHandoff) -> Outcome {

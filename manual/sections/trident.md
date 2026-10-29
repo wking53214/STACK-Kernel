@@ -329,7 +329,7 @@ groups:
 
 ### Puzzle gate
 
-A prototype gate that holds pieces until a whole puzzle is present and inspected is described in [Trident puzzles](trident_puzzles.md). It sits in front of the Trident's output and is not wired into anything yet.
+A prototype gate that holds pieces until a whole puzzle is present and inspected is described in [Trident puzzles](trident_puzzles.md), including its rules inspector and its own metrics (`stack_trident_puzzle_*`) and alert examples. It sits in front of the Trident's output and is not wired into anything yet.
 
 ### Red-team results
 
