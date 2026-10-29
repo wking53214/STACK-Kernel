@@ -21,6 +21,8 @@ pub mod gate;
 pub mod inspect;
 pub mod piece;
 pub mod rules;
+#[cfg(test)]
+mod rules_evidence;
 
 pub use config::PuzzleConfig;
 pub use gate::{BusyReason, CloseReason, Closed, GateStats, Outcome, PuzzleGate, PuzzleRefusal, Whole};
