@@ -8,7 +8,7 @@
 
 extern "C" {
     pub fn stack_host_initialize_and_seal() -> i32;
-    pub fn stack_host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64);
+    pub fn stack_host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> i32;
     pub fn stack_execute_governed_transaction(
         context_id: u64,
         required_capability_m0: u64,
@@ -37,10 +37,17 @@ pub fn host_initialize_and_seal() -> Result<(), HostError> {
     }
 }
 
-/// Safe wrapper for setting active capabilities
-pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) {
+/// Safe wrapper for setting active capabilities.
+///
+/// A change is refused while a transaction is in flight, so a caller that must
+/// apply it retries on `TransactionInFlight`.
+pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> Result<(), CapabilityError> {
     unsafe {
-        stack_host_set_capabilities(m0, m1, m2, m3);
+        match stack_host_set_capabilities(m0, m1, m2, m3) {
+            0 => Ok(()),
+            -2 => Err(CapabilityError::TransactionInFlight),
+            _ => Err(CapabilityError::NotInitialized),
+        }
     }
 }
 
@@ -100,6 +107,14 @@ pub fn read_ticks() -> u64 {
 #[derive(Debug, Clone, Copy)]
 pub enum HostError {
     InitializationFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityError {
+    /// The host has not been initialized yet.
+    NotInitialized,
+    /// A governed transaction is in flight; the mask was not changed.
+    TransactionInFlight,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -205,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_capability_setting() {
-        host_set_capabilities(0xFF, 0, 0, 0);
+        let _ = host_set_capabilities(0xFF, 0, 0, 0);
     }
 
     #[test]
@@ -213,5 +228,44 @@ mod tests {
         let t1 = read_ticks();
         let t2 = read_ticks();
         assert!(t2 >= t1);
+    }
+
+    /// Before the host exists, a change is reported as not initialized.
+    /// No test in this process initializes the host (sealing runs in children).
+    #[test]
+    fn test_set_capabilities_before_init_is_reported() {
+        assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Err(CapabilityError::NotInitialized));
+    }
+
+    /// After sealing, a change with no transaction in flight is applied and
+    /// reported as such. Runs in a child copy of this test binary because
+    /// sealing cannot be undone.
+    #[test]
+    fn test_set_capabilities_reports_applied_after_init() {
+        const CHILD_ENV: &str = "STACK_FFI_SET_CAPS_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            assert!(host_initialize_and_seal().is_ok());
+            assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+            assert_eq!(host_set_capabilities(0xAA, 0, 0, 0), Ok(()));
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut child = std::process::Command::new(exe)
+            .args(["--exact", "tests::test_set_capabilities_reports_applied_after_init", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .expect("spawn sealed child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll child") {
+                assert!(status.success(), "sealed child failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("sealed child did not exit within 60 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }

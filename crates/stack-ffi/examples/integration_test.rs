@@ -11,7 +11,10 @@ fn main() {
     println!("✓ Host initialized and sealed");
     
     // Set active capabilities
-    host_set_capabilities(0xFF, 0, 0, 0);
+    if let Err(e) = host_set_capabilities(0xFF, 0, 0, 0) {
+        eprintln!("Failed to set capabilities: {:?}", e);
+        return;
+    }
     println!("✓ Capabilities set");
     
     // Read tick counter
