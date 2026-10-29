@@ -114,14 +114,19 @@ env:
 jobs:
   workspace:
     # Every crate outside the four ANC crates (those have the anc and
-    # anc-wall-clock jobs below). A clippy step is not here yet: on the
-    # local toolchain `cargo clippy --workspace --all-targets --locked -- -D warnings`
-    # still reports findings, so it would fail on day one.
+    # anc-wall-clock jobs below). The clippy step covers the whole workspace,
+    # ANC crates included. The toolchain is pinned so a new Rust release cannot turn
+    # this step red on its own. Move the pin deliberately, together with whatever
+    # new lints that release adds.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Clippy, all targets, warnings are errors
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test the workspace without the ANC crates
         run: |
           cargo test --workspace --locked --exclude stack-anc-harness --exclude stack-anc-ceiling \

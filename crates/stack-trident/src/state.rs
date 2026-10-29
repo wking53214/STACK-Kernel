@@ -189,11 +189,11 @@ impl SenderState {
         self.quarantined_since.is_none()
             && self
                 .last_accepted_at
-                .map_or(true, |t| now >= t.saturating_add(retention_ms))
+                .is_none_or(|t| now >= t.saturating_add(retention_ms))
             && self
                 .breaches
                 .back()
-                .map_or(true, |t| *t < now.saturating_sub(window_ms))
+                .is_none_or(|t| *t < now.saturating_sub(window_ms))
     }
 }
 

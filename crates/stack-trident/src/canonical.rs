@@ -116,7 +116,8 @@ pub fn decode_hex_lower<const N: usize>(s: &str) -> Option<[u8; N]> {
         return None;
     }
     let mut out = [0u8; N];
-    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+    let (pairs, _) = bytes.as_chunks::<2>();
+    for (slot, pair) in out.iter_mut().zip(pairs) {
         let hi = hex_nibble(*pair.first()?)?;
         let lo = hex_nibble(*pair.get(1)?)?;
         *slot = (hi << 4) | lo;

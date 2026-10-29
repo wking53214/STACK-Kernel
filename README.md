@@ -39,7 +39,8 @@ final reviewer's findings. Not all of them are applied to the manual yet.
 
 ## Build and test
 
-Rust 1.94 was used. Dependencies are limited to the workspace list in
+Rust 1.95 or newer is required (`rust-version` in `Cargo.toml`); the original reference
+build used 1.94. Dependencies are limited to the workspace list in
 `Cargo.toml`.
 
 ```
