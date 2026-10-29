@@ -45,7 +45,7 @@ impl ManualClock {
     pub fn advance(&self, ms: u64) {
         let _ = self
             .0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_add(ms)));
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_add(ms)));
     }
 }
 

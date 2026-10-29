@@ -178,7 +178,7 @@ impl PipelineGate {
     fn try_slot(&self) -> Option<Slot<'_>> {
         let max = self.config.max_in_flight;
         self.in_flight
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 if n < max {
                     Some(n + 1)
                 } else {
