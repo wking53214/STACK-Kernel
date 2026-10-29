@@ -45,11 +45,13 @@ int stack_host_initialize_and_seal() {
 }
 
 // Set active capabilities mask (256-bit SIMD)
-void stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t m3) {
-    if (!g_host) return;
+// Returns 0 when the mask was applied, -1 when the host is not initialized, and
+// -2 when the change was refused because a transaction is in flight (retry).
+int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t m3) {
+    if (!g_host) return -1;
 
     host::CapabilityMask256 caps(m0, m1, m2, m3);
-    g_host->SetActiveCapabilities(caps);
+    return g_host->SetActiveCapabilities(caps) ? 0 : -2;
 }
 
 // Execute governed transaction under deadline and token budget
