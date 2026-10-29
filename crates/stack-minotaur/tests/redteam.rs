@@ -516,15 +516,15 @@ fn redteam_metric_labels_stay_closed_under_hostile_input() {
         for _ in 0..2_000 {
             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
             let _ = t.record(fp(seed % 17));
-            if seed % 11 == 0 {
+            if seed.is_multiple_of(11) {
                 if let Ok(mut g) = t.descend() {
                     let _ = g.descend().map(|mut g2| g2.descend().map(|mut g3| g3.descend().is_ok()));
                 }
             }
-            if seed % 97 == 0 {
+            if seed.is_multiple_of(97) {
                 t.rewind();
             }
-            if t.is_halted() && seed % 5 == 0 {
+            if t.is_halted() && seed.is_multiple_of(5) {
                 t.operator_reset();
             }
         }

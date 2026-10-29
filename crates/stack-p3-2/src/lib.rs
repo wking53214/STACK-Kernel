@@ -35,7 +35,6 @@ pub enum BoundaryLayer {
 
 /// Main interface: Create and manage execution contexts with trap logging.
 pub struct HardPreemptionKernel {
-    config: P32Config,
     flywheel: Flywheel,
 }
 
@@ -51,7 +50,6 @@ impl HardPreemptionKernel {
     pub fn new(config: P32Config) -> Result<Self, &'static str> {
         config.validate()?;
         Ok(Self {
-            config,
             flywheel: Flywheel {
                 contexts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 traps: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -96,6 +94,8 @@ impl HardPreemptionKernel {
     }
 
     /// Check preemption boundary: trap if preempted, log context + reason.
+    // TrapEvent is the public error type; boxing it would change this signature for callers.
+    #[allow(clippy::result_large_err)]
     pub fn check_preemption_boundary(
         &self,
         tx_id: uuid::Uuid,

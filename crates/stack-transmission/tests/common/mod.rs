@@ -22,7 +22,7 @@ impl Mode {
             tag,
             policy_version: tag.wrapping_mul(3).wrapping_add(1),
             test_fixture_key_id: tag ^ 0xA5A5,
-            enforcing: tag % 2 == 0,
+            enforcing: tag.is_multiple_of(2),
         }
     }
 

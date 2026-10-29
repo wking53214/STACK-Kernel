@@ -165,7 +165,7 @@ fn parse_limit(v: &serde_json::Value) -> Option<u64> {
         return if u > 0 { Some(u) } else { None };
     }
     let f = v.as_f64()?;
-    if f.is_finite() && f >= 1.0 && f < 1.8446744073709552e19 {
+    if f.is_finite() && (1.0..1.8446744073709552e19).contains(&f) {
         Some(f.floor() as u64)
     } else {
         None
@@ -190,7 +190,7 @@ impl<S: LimitSource> GovernedLimits<S> {
             Ok(g) => g,
             Err(_) => return default,
         };
-        let fresh = guard.0.get(&id).map_or(false, |e| now.duration_since(e.checked) < self.ttl);
+        let fresh = guard.0.get(&id).is_some_and(|e| now.duration_since(e.checked) < self.ttl);
         if !fresh {
             // Network I/O happens under the lock, bounded by the source timeout. A kernel that
             // cannot afford that should call this from a refresher thread and read the cache.
