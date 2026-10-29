@@ -20,8 +20,10 @@ pub mod config;
 pub mod gate;
 pub mod inspect;
 pub mod piece;
+pub mod rules;
 
 pub use config::PuzzleConfig;
 pub use gate::{BusyReason, CloseReason, Closed, GateStats, Outcome, PuzzleGate, PuzzleRefusal, Whole};
 pub use inspect::{DenyListError, DenyListInspector, Finding, InspectInput, Inspector};
+pub use rules::{RuleConfig, RuleError, RuleInspector};
 pub use piece::{abort_payload, parse_message, root_of, split, Message, Piece, PieceError, PuzzleId, SplitError, ROOT_DOMAIN};
