@@ -168,6 +168,9 @@ public:
  *   - SYS_rt_sigaction (13): Register signal handlers (GOVERNOR_PREEMPT_SIG only)
  *   - SYS_clock_gettime (228): Query clock (for timing/metrics)
  *   - SYS_futex (202): Wait/wake (if payload uses atomics/mutexes)
+ *   - SYS_timer_settime (223): Arm and disarm the thread's deadline timer. The
+ *     timer is created before the filter is installed (timer_create is not
+ *     allowed), but a sealed thread must still be able to arm it.
  *
  * All other syscalls return SECCOMP_RET_ERRNO (ENOSYS). This is safer:
  * if a payload tries ptrace, mmap, prctl, socket, etc., it gets ENOSYS
@@ -176,6 +179,14 @@ public:
  *
  * Once installed, the filter cannot be removed or modified—only by the host
  * process with appropriate privileges. For Minotaur, once sealed, it is sealed.
+ *
+ * SCOPE: a filter attaches to the one thread that installs it (no
+ * SECCOMP_FILTER_FLAG_TSYNC), so every thread that governs transactions
+ * installs its own, exactly once. Applying it process wide was rejected: it
+ * would also put this tiny allowlist on threads that never asked for it (an
+ * allocator or runtime thread of a Rust caller needs mmap, openat and clone),
+ * and it would not help the threads it reached, which could not call
+ * timer_create to set up their deadline timers.
  */
 enum class SeccompError : uint8_t {
     None = 0,
@@ -201,6 +212,7 @@ private:
     static constexpr long SYS_RT_SIGACTION = 13;
     static constexpr long SYS_CLOCK_GETTIME = 228;
     static constexpr long SYS_FUTEX = 202;
+    static constexpr long SYS_TIMER_SETTIME = 223;
 #elif defined(__aarch64__)
     static constexpr long SYS_READ = 63;
     static constexpr long SYS_WRITE = 64;
@@ -209,6 +221,7 @@ private:
     static constexpr long SYS_RT_SIGACTION = 134;
     static constexpr long SYS_CLOCK_GETTIME = 113;
     static constexpr long SYS_FUTEX = 98;
+    static constexpr long SYS_TIMER_SETTIME = 110;
 #else
 #error "SeccompFilterEngine: no syscall table for this architecture"
 #endif
@@ -219,9 +232,21 @@ private:
     static_assert(SYS_RT_SIGACTION == __NR_rt_sigaction, "SYS_RT_SIGACTION must equal __NR_rt_sigaction for this architecture");
     static_assert(SYS_CLOCK_GETTIME == __NR_clock_gettime, "SYS_CLOCK_GETTIME must equal __NR_clock_gettime for this architecture");
     static_assert(SYS_FUTEX == __NR_futex, "SYS_FUTEX must equal __NR_futex for this architecture");
+    static_assert(SYS_TIMER_SETTIME == __NR_timer_settime, "SYS_TIMER_SETTIME must equal __NR_timer_settime for this architecture");
+
+    // Set only after the filter is installed on this thread. Per thread and not
+    // per host: the filter is, and a second install would be denied by it.
+    static inline thread_local bool installed_on_this_thread_ = false;
 
 public:
+    [[nodiscard]] static bool IsInstalledOnThisThread() noexcept {
+        return installed_on_this_thread_;
+    }
+
     [[nodiscard]] static std::expected<void, SeccompError> InstallFilter() noexcept {
+        if (installed_on_this_thread_) [[unlikely]] {
+            return {};
+        }
         if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) [[unlikely]] {
             return std::unexpected(SeccompError::SetNoNewPrivsFailed);
         }
@@ -243,26 +268,27 @@ public:
             // [3] Load Syscall Number
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
 
-            // [4-10] Whitelist explicit allowed syscalls (jump-on-match to allow)
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_READ, 10, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_WRITE, 9, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT_GROUP, 8, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_CLOCK_GETTIME, 7, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_FUTEX, 6, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT, 5, 0),
+            // [4-11] Whitelist explicit allowed syscalls (jump-on-match to allow)
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_READ, 11, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_WRITE, 10, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT_GROUP, 9, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_CLOCK_GETTIME, 8, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_FUTEX, 7, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT, 6, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_TIMER_SETTIME, 5, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_RT_SIGACTION, 1, 0),
 
-            // [11] Default deny (not in whitelist)
+            // [12] Default deny (not in whitelist)
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
 
-            // [12] SYS_rt_sigaction special case (check for GOVERNOR_PREEMPT_SIG)
+            // [13] SYS_rt_sigaction special case (check for GOVERNOR_PREEMPT_SIG)
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(GOVERNOR_PREEMPT_SIG), 1, 0),
 
-            // [14] SYS_rt_sigaction deny (not for GOVERNOR_PREEMPT_SIG)
+            // [15] SYS_rt_sigaction deny (not for GOVERNOR_PREEMPT_SIG)
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
 
-            // [15] All whitelisted calls: allow
+            // [16] All whitelisted calls: allow
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         };
 
@@ -275,6 +301,7 @@ public:
             return std::unexpected(SeccompError::FilterApplyFailed);
         }
 
+        installed_on_this_thread_ = true;
         return {};
     }
 };
@@ -306,7 +333,6 @@ private:
     KineticGovernor<MaxCapacity, ReservedTokens, MaxBurstTokens, TicksPerToken, MaxDomains> governor_{};
     ComputeDebtTracker<MaxDomains> debt_tracker_{};
     CapabilityMask256 active_host_capabilities_{};
-    std::atomic<bool> seccomp_sealed_{false};
     std::atomic<uint32_t> transactions_in_flight_{0};  // Lifecycle guard
     mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
     mutable std::mutex capability_lock_{};  // Protects active_host_capabilities_
@@ -335,18 +361,14 @@ public:
     }
 
     [[nodiscard]] std::expected<void, HostExecutionError> InitializeAndSeal() noexcept {
-        // Double-checked locking: fast path (no lock)
-        if (seccomp_sealed_.load(std::memory_order_acquire)) [[likely]] {
+        // Fast path: this thread already carries the filter. The state is per
+        // thread, so another thread having sealed says nothing about this one.
+        if (SeccompFilterEngine::IsInstalledOnThisThread()) [[likely]] {
             return {};
         }
 
         // Slow path: acquire lock for initialization
         std::lock_guard<std::mutex> lock(initialization_lock_);
-
-        // Recheck after acquiring lock: another thread may have initialized
-        if (seccomp_sealed_.load(std::memory_order_acquire)) [[likely]] {
-            return {};
-        }
 
         if (!HardenedPosixPreemptionGuard::RegisterSignalHandler().has_value()) [[unlikely]] {
             return std::unexpected(HostExecutionError::SignalHandlerRegistrationFailed);
@@ -356,11 +378,12 @@ public:
             return std::unexpected(HostExecutionError::TimerInitializationFailed);
         }
 
+        // The timer above must exist first: timer_create is not on the allowlist.
+        // A failed install returns an error and leaves this thread unsealed.
         if (!SeccompFilterEngine::InstallFilter().has_value()) [[unlikely]] {
             return std::unexpected(HostExecutionError::SeccompInitializationFailed);
         }
 
-        seccomp_sealed_.store(true, std::memory_order_release);
         return {};
     }
 
@@ -372,7 +395,7 @@ public:
         uint64_t hard_timeout_nanoseconds,
         ExecutionPayload&& payload) noexcept
     {
-        if (!seccomp_sealed_) [[unlikely]] {
+        if (!SeccompFilterEngine::IsInstalledOnThisThread()) [[unlikely]] {
             auto init_res = InitializeAndSeal();
             if (!init_res.has_value()) return std::unexpected(init_res.error());
         }

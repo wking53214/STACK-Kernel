@@ -18,6 +18,8 @@ Production-locked implementation of the TACK Host Body — the system-level secu
 
 The seccomp allowlist in `stack_host_binding.hpp` carries one syscall-number table per architecture (x86_64 and aarch64), and a `static_assert` against each `__NR_*` value turns a wrong entry into a compile error.
 
+The filter attaches to the thread that installs it, and every thread that calls `InitializeAndSeal` or `ExecuteGovernedTransaction` installs its own, once, after creating its deadline timer (`timer_create` is not on the allowlist). It is not applied process wide with `SECCOMP_FILTER_FLAG_TSYNC`: that would also filter threads that never asked for it, such as a Rust caller's allocator and runtime threads, and would leave them unable to create a timer.
+
 ## Lock/Key Alignment with Rust Crates
 
 - **stack-inlet** (Winnowing Filter) ← CapabilityGuard (boundary validation)
