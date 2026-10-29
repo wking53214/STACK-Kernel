@@ -83,7 +83,7 @@ Every cap lives in `TridentConfig` (src/config.rs). `Trident::new` refuses a con
 | `max_tracked_senders` | 1,024 | 65,536 | Senders with receiver-side state |
 | `breaker_threshold` | 5 | 1,024 | Counted breaches that quarantine a sender |
 | `breaker_window_ms` | 60,000 | One day | The breaker's sliding window |
-| `audience` | Empty (no binding) | 256 bytes | This receiver's identity in the MAC input |
+| `audience` | Required; empty is refused unless `allow_unbound_audience` is set | 256 bytes | This receiver's identity in the MAC input |
 | `restored_high_water_ms` | 0 | 2^53 - 1 | High-water mark carried across a restart |
 
 There is no default key. A `KeyRing` starts empty and authenticates nothing until the caller inserts keys of 32 to 128 bytes. All-zero keys are refused, and a key's debug output is redacted.
@@ -114,7 +114,7 @@ There is no default key. A `KeyRing` starts empty and authenticates nothing unti
 
 `Choice` is the `subtle` crate's constant-time boolean. The envelope is authentic only if the tag matched, a key was found and the tag was well-formed hex.
 
-The MAC can also bind the receiver. With `TridentConfig::audience` set, the MAC input names that receiver. An envelope sealed with `seal_for` for one receiver then fails prong 1 at any other, even one that trusts the same key.
+The MAC can also bind the receiver. `TridentConfig::audience` is required, and the MAC input names that receiver. An empty audience is refused at start unless `allow_unbound_audience` is set (`TridentConfig::unbound_audience()` is the named opt-out, and it still logs a warning). An envelope sealed with `seal_for` for one receiver then fails prong 1 at any other, even one that trusts the same key.
 
 **Prong 2, binding.** The receiver recomputes the CNS `subject_digest` of the payload itself and compares the result with the claimed digest in constant time (src/trident.rs):
 
@@ -342,7 +342,7 @@ TOCTOU (time of check to time of use) names a check that goes stale before the a
 | TOCTOU: an in-flight envelope accepted after `operator_halt` returned | Broke, then fixed | `operator_halt` sets the flag under the state lock, and the commit re-reads it under that lock. |
 | TOCTOU: an envelope accepted after `replace_keyring` revoked its key | Broke, then fixed | The ring is swapped under the state lock. The commit re-checks ring membership and returns `unknown_sender`. |
 | TOCTOU: an envelope accepted after the breaker quarantined its sender | Broke, then fixed | The commit section re-checks quarantine before any freshness or commit work. |
-| Cross-receiver replay: one envelope accepted by two receivers sharing a sender key | Broke, then fixed by opt-in | New `audience` setting and `seal_for` bind the receiver into the MAC. Limitation: the default audience is empty, so binding is off until configured. |
+| Cross-receiver replay: one envelope accepted by two receivers sharing a sender key | Broke, then fixed by opt-in | New `audience` setting and `seal_for` bind the receiver into the MAC. Limitation at the time: the default audience was empty, so binding was off until configured. Since then an empty audience is refused at start unless explicitly allowed. |
 | Replay into a restarted receiver whose clock is 30 s behind | Broke, then fixed with caller help | `high_water_ms` to persist and `restored_high_water_ms` to restore. Limitation: without them, restart safety assumes the clock never went backwards. |
 | Replay after `operator_reset` with the clock stepped back 30 s | Broke, then fixed | The floor is the largest of its old value, now plus 5,000 ms, and the high-water mark plus 1. |
 | One key holder fills the shared replay cache (64-slot test) and starves others | Broke, then fixed | Per-sender nonce queues and a fair share of capacity divided by ring size. New counter `stack_trident_replay_evictions_total`. |
