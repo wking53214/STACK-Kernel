@@ -26,6 +26,10 @@ Not renamed, on purpose:
 - The key bytes `tack-sentinel-other-test-fixture-key-not-a-real-secret` and the files under `crates/stack-sentinel/tests/fixtures/`. The recorded Python signatures and fingerprints depend on them.
 - The recorded runs in `manual/measurements/` and the review records in `manual/review/`.
 
+### Added
+
+- `manual/sections/trident_puzzles.md`: design note for the Trident puzzle gate, which holds every piece of a declared puzzle until the whole is present and has passed inspection, so a hostile payload cut into harmless pieces is inspected where it is assembled. Defaults come from a synthetic simulation; the note lists what that simulation could not show.
+
 ### Changed
 
 - `stack-trident` (breaking for any producer of envelopes): `subject_digest` is now the CNS digest (`cns.gate.subject_digest`) of the payload, not the SHA-256 of its canonical JSON. This makes the CNS rendering the one binding-digest format across Enforcer, GSA, CCC, CCCb, DIT, the Sentinel witness and the Trident. The envelope version stays 1 because the Trident has no deployed producers. A new `cns_digest` module holds the port, and tests/cns_digest.rs checks it against the shared CNS digest vectors. The MAC, the strict parser and the canonical JSON are unchanged. Floats and integers beyond 2^53 - 1 are still refused. Closes the open question on a shared digest format.
