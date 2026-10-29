@@ -185,6 +185,7 @@ pub mod cns_digest;
 pub mod config;
 pub mod envelope;
 pub mod keys;
+pub mod puzzle;
 mod state;
 pub mod telemetry;
 mod trident;
