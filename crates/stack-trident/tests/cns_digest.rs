@@ -34,7 +34,7 @@ fn carriable(v: &Value) -> bool {
 #[test]
 fn every_carriable_cns_vector_digests_identically() {
     let doc: Value = serde_json::from_str(VECTORS).unwrap();
-    let limits = TridentConfig::default().limits();
+    let limits = TridentConfig::unbound_audience().limits();
     let (mut matched, mut refused) = (0, 0);
     for v in doc["vectors"].as_array().unwrap() {
         let name = v["name"].as_str().unwrap();
@@ -69,7 +69,7 @@ fn every_carriable_cns_vector_digests_identically() {
 /// order) disagree. Known answers from `cns.gate.subject_digest`.
 #[test]
 fn key_order_follows_code_points_not_utf16() {
-    let limits = TridentConfig::default().limits();
+    let limits = TridentConfig::unbound_audience().limits();
     let astral = json!({"\u{ffff}": 1, "\u{10000}": 2});
     assert_eq!(
         subject_digest(&astral, &limits).unwrap(),

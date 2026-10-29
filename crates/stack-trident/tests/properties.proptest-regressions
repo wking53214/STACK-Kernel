@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5cddf50043db4d3ae02fa1b805610e2d3d5af361e17e2a9b47f4ea8eb3329e87 # shrinks to mut d = EnvelopeDraft { sequence: 1, issued_at_unix_ms: 0, nonce: Nonce(00000000000000000000000000000000), gate_position: Omega, gate_outcome: Pass, payload: Null }
+cc de6505a9fe000db901d100be71fc9de05602abff9d3f2b3e7bc6e67b8b868e25 # shrinks to mut d = EnvelopeDraft { sequence: 1, issued_at_unix_ms: 0, nonce: Nonce(00000000000000000000000000000000), gate_position: Omega, gate_outcome: Pass, payload: Null }, pos = Index(0), mask = 1

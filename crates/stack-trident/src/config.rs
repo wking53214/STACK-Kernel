@@ -92,11 +92,16 @@ pub struct TridentConfig {
     /// This receiver's identifier. When non-empty, only envelopes sealed
     /// for it (`seal_for` with the same string) pass prong 1, so an
     /// envelope captured on its way to one receiver cannot be replayed into
-    /// another receiver that trusts the same sender key. Default empty,
-    /// which binds no audience: any receiver with an empty audience and the
-    /// sender's key accepts the envelope once. Set it whenever more than
-    /// one receiver trusts the same sender key. At most 256 bytes.
+    /// another receiver that trusts the same sender key. Required: an empty
+    /// audience is refused by [`TridentConfig::validate`] unless
+    /// `allow_unbound_audience` is set. At most 256 bytes.
     pub audience: String,
+    /// Explicit opt-out of the audience requirement. With it set and
+    /// `audience` empty, no receiver is bound: any receiver with an empty
+    /// audience and the sender's key accepts the envelope once, and a
+    /// warning says so. Default false. [`TridentConfig::unbound_audience`]
+    /// is the named way to ask for it.
+    pub allow_unbound_audience: bool,
     /// Most (sender, nonce) pairs remembered. An entry lives for
     /// `replay_retention_ms()` after acceptance. When the cache is full, a
     /// sender holding fewer than its fair share
@@ -138,6 +143,7 @@ impl Default for TridentConfig {
             enforce_startup_epoch: true,
             restored_high_water_ms: 0,
             audience: String::new(),
+            allow_unbound_audience: false,
             replay_cache_capacity: 65_536,
             max_tracked_senders: 1_024,
             breaker_threshold: 5,
@@ -165,16 +171,32 @@ fn as_u64(n: usize) -> u64 {
 }
 
 impl TridentConfig {
+    /// The default config with the audience requirement explicitly waived:
+    /// no receiver is bound, and [`TridentConfig::validate`] warns that any
+    /// holder of the shared key can replay an envelope to any receiver.
+    /// For tests and single-receiver setups. A deployment where more than
+    /// one receiver trusts a sender key sets `audience` instead.
+    pub fn unbound_audience() -> Self {
+        Self {
+            allow_unbound_audience: true,
+            ..Self::default()
+        }
+    }
+
     /// Checks every field against its range. The Trident refuses to start
     /// with a config that fails this.
+    ///
+    /// An empty `audience` fails here (field `audience`) unless
+    /// `allow_unbound_audience` is set, so a receiver that binds no audience
+    /// is always a decision and never an accident.
     ///
     /// A config that passes may still rest on an assumption the operator
     /// should know about. Each one is reported once per call as a
     /// `tracing::warn!` and never changes the result: an empty `audience`
-    /// (any receiver with the shared key accepts the envelope), and
-    /// `enforce_startup_epoch` with `restored_high_water_ms` left at 0 (the
-    /// restart replay guard then trusts the wall clock). The defaults set
-    /// both off, so the default config warns twice.
+    /// that was explicitly allowed (any receiver with the shared key accepts
+    /// the envelope), and `enforce_startup_epoch` with
+    /// `restored_high_water_ms` left at 0 (the restart replay guard then
+    /// trusts the wall clock).
     pub fn validate(&self) -> Result<(), ConfigError> {
         check(
             "max_envelope_bytes",
@@ -215,6 +237,17 @@ impl TridentConfig {
         )?;
         check("breaker_window_ms", self.breaker_window_ms, 1, BREAKER_WINDOW_CEILING_MS)?;
         if self.audience.is_empty() {
+            if !self.allow_unbound_audience {
+                tracing::error!(
+                    "stack.trident needs an audience: set `audience` to this receiver's identifier, or set `allow_unbound_audience` (TridentConfig::unbound_audience) to bind none"
+                );
+                return Err(ConfigError {
+                    field: "audience",
+                    value: 0,
+                    min: 1,
+                    max: as_u64(MAX_AUDIENCE_BYTES),
+                });
+            }
             tracing::warn!(
                 "stack.trident audience binding is off: any holder of the shared key can replay this envelope to any receiver"
             );
@@ -261,8 +294,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_valid() {
-        TridentConfig::default().validate().unwrap();
+    fn default_with_an_audience_is_valid() {
+        TridentConfig {
+            audience: "receiver-a".to_owned(),
+            ..TridentConfig::default()
+        }
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn default_without_an_audience_is_refused_and_says_so() {
+        let err = TridentConfig::default().validate().unwrap_err();
+        assert_eq!(err.field, "audience");
+        assert!(!TridentConfig::default().allow_unbound_audience);
+    }
+
+    #[test]
+    fn unbound_audience_is_the_explicit_opt_out_and_still_warns() {
+        let cfg = TridentConfig::unbound_audience();
+        assert!(cfg.audience.is_empty() && cfg.allow_unbound_audience);
+        let warnings = warnings_from(&cfg);
+        assert!(warnings.iter().any(|w| w.contains("audience binding is off")), "{warnings:?}");
+    }
+
+    #[test]
+    fn allowing_unbound_does_not_excuse_a_bad_audience() {
+        let too_long = TridentConfig {
+            audience: "x".repeat(MAX_AUDIENCE_BYTES + 1),
+            allow_unbound_audience: true,
+            ..TridentConfig::default()
+        };
+        assert_eq!(too_long.validate().unwrap_err().field, "audience");
+    }
+
+    #[test]
+    fn a_set_audience_needs_no_opt_out_and_raises_no_audience_warning() {
+        let cfg = TridentConfig {
+            audience: "receiver-a".to_owned(),
+            ..TridentConfig::default()
+        };
+        let warnings = warnings_from(&cfg);
+        assert!(!warnings.iter().any(|w| w.contains("audience")), "{warnings:?}");
     }
 
     /// A subscriber that keeps the message of every WARN event. The crate
@@ -307,7 +380,7 @@ mod tests {
 
     #[test]
     fn default_config_warns_once_per_replay_assumption() {
-        let warnings = warnings_from(&TridentConfig::default());
+        let warnings = warnings_from(&TridentConfig::unbound_audience());
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(warnings[0].contains("audience binding is off"), "{warnings:?}");
         assert!(warnings[1].contains("wall clock did not go backwards"), "{warnings:?}");
@@ -324,7 +397,7 @@ mod tests {
 
         let epoch_off = TridentConfig {
             enforce_startup_epoch: false,
-            ..TridentConfig::default()
+            ..TridentConfig::unbound_audience()
         };
         let warnings = warnings_from(&epoch_off);
         assert_eq!(warnings.len(), 1, "{warnings:?}");

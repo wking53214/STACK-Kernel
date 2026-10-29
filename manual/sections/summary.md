@@ -9,7 +9,7 @@ Fail closed means a check refuses what it cannot judge instead of passing it. Re
 | Component | Exists today or new | Tests passing | Red-team result | Key limit |
 |---|---|---|---|---|
 | 1. Inlet Winnowing Filter | New | 71 of 71 | 13 of 24 broke the first build, 1 a blocker; all 24 pass after fixes | Refuses ordinary emoji that use U+FE0F or zero-width joiners; some honest Latin-1 text is still quarantined |
-| 2. Inter-Agent Trident | New | 93 of 93 | 13 of 22 broke the first build; all 22 pass | Shared HMAC keys let any receiver forge as a sender; audience binding is off by default, and config validation now warns when it is off or when no restart high-water mark was restored |
+| 2. Inter-Agent Trident | New | 93 of 93 | 13 of 22 broke the first build; all 22 pass | Shared HMAC keys let any receiver forge as a sender; audience is required (an empty one is refused at start unless explicitly allowed), and config validation warns when binding is explicitly off or when no restart high-water mark was restored |
 | 3. Elastic Bumpers | New | 122 of 122 | 7 of 21 broke the first build; all 21 pass | Look-alike letters from other scripts still pass identifier checks |
 | 4. Minotaur String | New | 60 of 60 | 6 of 13 failed on the first build, 2 of them blockers; all 13 pass | Some long-gap repeats escape loop detection until a step budget stops them; trips expose state fingerprints |
 | 5. Traffic Cop and Green Wave Routing | New | 47 of 47 in this re-run; driver tests failed 3 of 10 earlier runs | 15 of 25 failed on the first build, 1 a blocker; all 25 pass in most runs | Under full CPU load the driver misses phases, which voids the fairness bound for that window |

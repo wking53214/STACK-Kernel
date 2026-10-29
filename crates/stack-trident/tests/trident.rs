@@ -268,7 +268,7 @@ fn unknown_sender_fails() {
 #[test]
 fn an_empty_ring_authenticates_nothing() {
     let clock = Arc::new(ManualClock::new(T0));
-    let t = Trident::new(TridentConfig::default(), KeyRing::new(4), clock.clone()).unwrap();
+    let t = Trident::new(TridentConfig::unbound_audience(), KeyRing::new(4), clock.clone()).unwrap();
     clock.advance(10_000);
     let fx = setup();
     fx.clock.set(T0 + 10_000);
@@ -390,7 +390,7 @@ fn skew_window_and_epoch_floor() {
     let clock = Arc::new(ManualClock::new(T0));
     let mut ring = KeyRing::new(4);
     ring.insert(fixture_key("a")).unwrap();
-    let t = Trident::new(TridentConfig::default(), ring, clock.clone()).unwrap();
+    let t = Trident::new(TridentConfig::unbound_audience(), ring, clock.clone()).unwrap();
     let fx = setup();
     fx.clock.set(T0);
     let env = fx.sealed(1);
@@ -400,7 +400,7 @@ fn skew_window_and_epoch_floor() {
     ring.insert(fixture_key("a")).unwrap();
     let cfg = TridentConfig {
         enforce_startup_epoch: false,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     };
     let t = Trident::new(cfg, ring, clock).unwrap();
     assert!(t.verify(&env).is_accepted());
@@ -421,7 +421,7 @@ fn transplanted(fx: &Fx, seq: u64) -> stack_trident::HandoffEnvelope {
 fn quarantine_trips_at_k_and_releases_on_reset() {
     let fx = setup_with(TridentConfig {
         breaker_threshold: 3,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     for seq in 1..=2 {
         let v = fx.trident.verify(&transplanted(&fx, seq));
@@ -456,7 +456,7 @@ fn quarantine_trips_at_k_and_releases_on_reset() {
 fn quarantine_survives_an_operator_reset() {
     let fx = setup_with(TridentConfig {
         breaker_threshold: 1,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     let v = fx.trident.verify(&transplanted(&fx, 1));
     assert_eq!(v.refusal().unwrap().resolution, Resolution::Quarantine);
@@ -469,7 +469,7 @@ fn breaches_outside_the_window_do_not_trip() {
     let fx = setup_with(TridentConfig {
         breaker_threshold: 2,
         breaker_window_ms: 1_000,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     fx.trident.verify(&transplanted(&fx, 1));
     fx.clock.advance(1_001);
@@ -483,7 +483,7 @@ fn breaches_outside_the_window_do_not_trip() {
 fn forgeries_and_replays_cannot_quarantine_a_sender_by_default() {
     let fx = setup_with(TridentConfig {
         breaker_threshold: 2,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     let good = fx.sealed(1);
     assert!(fx.trident.verify(&good).is_accepted());
@@ -503,7 +503,7 @@ fn claimed_sender_attribution_counts_forgeries() {
     let fx = setup_with(TridentConfig {
         breaker_threshold: 2,
         breaker_attribution: BreakerAttribution::ClaimedSender,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     let mut forged = fx.sealed(1);
     forged.mac = "22".repeat(32);
@@ -536,7 +536,7 @@ fn operator_halt_stops_all_work_until_reset() {
 fn replay_cache_full_is_retry_and_drains_with_time() {
     let fx = setup_with(TridentConfig {
         replay_cache_capacity: 2,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     assert!(fx.trident.verify(&fx.sealed(1)).is_accepted());
     assert!(fx.trident.verify(&fx.sealed(2)).is_accepted());
@@ -551,7 +551,7 @@ fn replay_cache_full_is_retry_and_drains_with_time() {
 fn sender_table_full_is_retry() {
     let fx = setup_with(TridentConfig {
         max_tracked_senders: 1,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     assert!(fx.trident.verify(&fx.sealed(1)).is_accepted());
     let v = fx.trident.verify(&fx.sealed_by(&fx.key_b, 1));
@@ -563,7 +563,7 @@ fn sender_table_full_is_retry() {
 fn invalid_config_is_refused_at_construction() {
     let cfg = TridentConfig {
         max_depth: 1_000,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     };
     let err = Trident::with_system_clock(cfg, KeyRing::new(1)).unwrap_err();
     assert_eq!(err.field, "max_depth");
@@ -600,9 +600,22 @@ fn canonical_payload_matches_python_json_dumps_for_bmp_keys() {
         "\u{e9}key": [],
         "\u{ff61}": {}
     });
-    let bytes = to_canonical_bytes(&p, &TridentConfig::default().limits()).unwrap();
+    let bytes = to_canonical_bytes(&p, &TridentConfig::unbound_audience().limits()).unwrap();
     assert_eq!(
         sha256_hex(&bytes),
         "1d37dbf5538e1f9517a8e6a702dafb71e33bc0fc157399c63ac45d36b6b3ed32"
     );
+}
+
+#[test]
+fn a_trident_will_not_start_without_an_audience_or_an_explicit_opt_out() {
+    let build = |cfg: TridentConfig| Trident::new(cfg, KeyRing::new(4), Arc::new(ManualClock::new(T0)));
+
+    match build(TridentConfig::default()) {
+        Ok(_) => panic!("an empty audience must be refused"),
+        Err(refused) => assert_eq!(refused.field, "audience"),
+    }
+
+    assert!(build(TridentConfig { audience: "receiver-a".into(), ..TridentConfig::default() }).is_ok());
+    assert!(build(TridentConfig::unbound_audience()).is_ok());
 }

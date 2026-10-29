@@ -43,7 +43,7 @@ impl World {
         for s in senders {
             ring.insert(fixture_key(s)).unwrap();
         }
-        let tcfg = TridentConfig::default();
+        let tcfg = TridentConfig::unbound_audience();
         let trident = Arc::new(Trident::new(tcfg.clone(), ring, clock.clone()).unwrap());
         clock.advance(tcfg.max_future_skew_ms + 1);
         let inspector = Arc::new(DenyListInspector::new(vec![b"TROJAN".to_vec(), b"EXFIL".to_vec()]).unwrap());

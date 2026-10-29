@@ -51,7 +51,7 @@ Each item is one question, then its tradeoff. They come from every builder's ope
 
 ### Trident
 
-- [ ] Should audience binding be on by default? Off keeps existing envelopes valid, but two default receivers that share a sender key each accept the same envelope.
+- [x] Should audience binding be on by default? Resolved: an audience is required. An empty one is refused at start unless `allow_unbound_audience` is set, because two receivers that share a sender key and bind no audience each accept the same envelope.
 - [ ] Should shared HMAC keys give way to per-pair keys or signatures? Any receiver holding a sender's key can forge as that sender; per-pair keys multiply key management, and signatures need an unlisted dependency.
 - [ ] Should the receiver persist its replay high-water mark by default? Without it, restart safety assumes the clock never ran backwards; persisting needs storage the crate does not own.
 - [ ] Should replay state and quarantines move to a shared store? They live in process memory, so a restart loses quarantines and replicas need shared state or sender affinity.

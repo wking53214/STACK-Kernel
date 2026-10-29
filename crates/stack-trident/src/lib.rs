@@ -185,8 +185,10 @@
 //!    holds a sender's key can also forge envelopes as that sender, and
 //!    `audience` binding only stops honest receivers from accepting a
 //!    redirected envelope. Prefer one key per (sender, receiver) pair, or
-//!    move to signatures. `audience` is empty by default, which binds no
-//!    receiver; set it whenever more than one receiver trusts a sender key.
+//!    move to signatures. `audience` is required: an empty one is refused at
+//!    start unless `allow_unbound_audience` is set (see
+//!    [`TridentConfig::unbound_audience`]), so binding no receiver is a
+//!    decision and never an accident.
 
 #![forbid(unsafe_code)]
 
