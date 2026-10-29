@@ -15,10 +15,13 @@
 //! [`crate::Trident`] first, so authenticity, binding and freshness are not
 //! the gate's concern and cannot be skipped by a caller.
 
+mod breaker;
 pub mod config;
+pub mod gate;
 pub mod inspect;
 pub mod piece;
 
 pub use config::PuzzleConfig;
+pub use gate::{BusyReason, CloseReason, Closed, GateStats, Outcome, PuzzleGate, PuzzleRefusal, Whole};
 pub use inspect::{DenyListError, DenyListInspector, Finding, InspectInput, Inspector};
 pub use piece::{abort_payload, parse_message, root_of, split, Message, Piece, PieceError, PuzzleId, SplitError, ROOT_DOMAIN};
