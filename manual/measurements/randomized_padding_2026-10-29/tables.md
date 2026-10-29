@@ -26,6 +26,25 @@ Positive controls (|Z| of the best crop; crate line 4.5; raw Z in brackets):
 | add | 20% | 2.5 [0.9] | 6.4 [1.1] | 242.7 [62.0] | 7.4 |
 | add | 100% | 2.2 [1.9] | 2.7 [1.2] | 88.8 [50.1] | 6.1 |
 
+Mean-based versus shape-aware attacker (|Z| at the achieved n; samples per class to reach 4.5):
+
+| policy | jitter | control | mean-based Z (predicted) | shape-aware Z (best crop) | n mean-based | n shape-aware |
+|---|---|---|---|---|---|---|
+| fixed | 0% | D1_200ns | 0.62 | 2.7 | 3.14e+06 | not reached |
+| fixed | 0% | D2_1us | 2.08 | 12.2 | 2.80e+05 | 8.20e+03 |
+| replace | 5% | D1_200ns | 0.54 | 2.5 | 4.15e+06 | not reached |
+| replace | 5% | D2_1us | 2.26 | 10.2 | 2.39e+05 | 1.17e+04 |
+| replace | 20% | D1_200ns | 0.37 | 2.5 | 9.00e+06 | not reached |
+| replace | 20% | D2_1us | 1.00 | 6.4 | 1.23e+06 | 2.94e+04 |
+| replace | 100% | D1_200ns | 0.36 | 1.3 | 9.26e+06 | not reached |
+| replace | 100% | D2_1us | 1.28 | 3.1 | 7.39e+05 | not reached |
+| add | 5% | D1_200ns | 0.44 | 2.4 | 6.34e+06 | not reached |
+| add | 5% | D2_1us | 1.86 | 10.1 | 3.48e+05 | 1.18e+04 |
+| add | 20% | D1_200ns | 0.43 | 2.5 | 6.59e+06 | not reached |
+| add | 20% | D2_1us | 1.56 | 6.4 | 4.98e+05 | 2.99e+04 |
+| add | 100% | D1_200ns | 0.28 | 2.2 | 1.58e+07 | not reached |
+| add | 100% | D2_1us | 1.23 | 2.7 | 8.06e+05 | not reached |
+
 ### spin
 
 | policy | jitter | blocks | n per class | added mean (us) | added p99 (us) | robust sd (us) | MDE raw (ns) | MDE best crop (ns) | sample x (crop) | samples for 23 ns leak | neg ctl Z | natural A-B Z |
@@ -50,6 +69,25 @@ Positive controls (|Z| of the best crop; crate line 4.5; raw Z in brackets):
 | add | 20% | 5.5 [1.8] | 12.8 [2.3] | 470.7 [135.6] | 284.5 |
 | add | 100% | 7.0 [-0.4] | 18.9 [0.6] | 98.2 [73.4] | 288.9 |
 
+Mean-based versus shape-aware attacker (|Z| at the achieved n; samples per class to reach 4.5):
+
+| policy | jitter | control | mean-based Z (predicted) | shape-aware Z (best crop) | n mean-based | n shape-aware |
+|---|---|---|---|---|---|---|
+| fixed | 0% | D1_200ns | 1.02 | 103.5 | 1.16e+06 | 1.13e+02 |
+| fixed | 0% | D2_1us | 3.87 | 433.3 | 8.06e+04 | 6.43e+00 |
+| replace | 5% | D1_200ns | 1.03 | 8.2 | 1.15e+06 | 1.83e+04 |
+| replace | 5% | D2_1us | 3.81 | 35.9 | 8.41e+04 | 9.44e+02 |
+| replace | 20% | D1_200ns | 0.74 | 7.4 | 2.22e+06 | 2.22e+04 |
+| replace | 20% | D2_1us | 2.82 | 17.3 | 1.53e+05 | 4.09e+03 |
+| replace | 100% | D1_200ns | 0.49 | 7.4 | 4.97e+06 | 2.22e+04 |
+| replace | 100% | D2_1us | 1.73 | 17.9 | 4.05e+05 | 3.80e+03 |
+| add | 5% | D1_200ns | 0.90 | 8.4 | 1.52e+06 | 1.71e+04 |
+| add | 5% | D2_1us | 3.38 | 39.0 | 1.07e+05 | 8.03e+02 |
+| add | 20% | D1_200ns | 0.81 | 5.5 | 1.86e+06 | 4.08e+04 |
+| add | 20% | D2_1us | 3.22 | 12.8 | 1.17e+05 | 7.39e+03 |
+| add | 100% | D1_200ns | 0.48 | 7.0 | 5.26e+06 | 2.48e+04 |
+| add | 100% | D2_1us | 1.58 | 18.9 | 4.87e+05 | 3.42e+03 |
+
 ### hybrid
 
 | policy | jitter | blocks | n per class | added mean (us) | added p99 (us) | robust sd (us) | MDE raw (ns) | MDE best crop (ns) | sample x (crop) | samples for 23 ns leak | neg ctl Z | natural A-B Z |
@@ -73,6 +111,25 @@ Positive controls (|Z| of the best crop; crate line 4.5; raw Z in brackets):
 | add | 5% | 7.1 [-0.3] | 36.5 [2.6] | 1589.1 [146.3] | 524.3 |
 | add | 20% | 14.7 [3.1] | 15.8 [5.3] | 466.1 [195.2] | 516.5 |
 | add | 100% | 10.5 [1.0] | 16.7 [2.9] | 98.4 [87.7] | 302.7 |
+
+Mean-based versus shape-aware attacker (|Z| at the achieved n; samples per class to reach 4.5):
+
+| policy | jitter | control | mean-based Z (predicted) | shape-aware Z (best crop) | n mean-based | n shape-aware |
+|---|---|---|---|---|---|---|
+| fixed | 0% | D1_200ns | 1.65 | 317.6 | 4.45e+05 | 1.21e+01 |
+| fixed | 0% | D2_1us | 4.56 | 680.9 | 5.85e+04 | 2.62e+00 |
+| replace | 5% | D1_200ns | 1.49 | 8.5 | 5.47e+05 | 1.69e+04 |
+| replace | 5% | D2_1us | 5.14 | 37.8 | 4.59e+04 | 8.49e+02 |
+| replace | 20% | D1_200ns | 0.45 | 5.4 | 6.10e+06 | 4.23e+04 |
+| replace | 20% | D2_1us | 2.09 | 13.5 | 2.78e+05 | 6.70e+03 |
+| replace | 100% | D1_200ns | 0.37 | 8.1 | 8.85e+06 | 1.85e+04 |
+| replace | 100% | D2_1us | 1.39 | 16.4 | 6.31e+05 | 4.55e+03 |
+| add | 5% | D1_200ns | 1.08 | 7.1 | 1.04e+06 | 2.42e+04 |
+| add | 5% | D2_1us | 3.57 | 36.5 | 9.46e+04 | 9.04e+02 |
+| add | 20% | D1_200ns | 1.18 | 14.7 | 8.73e+05 | 5.63e+03 |
+| add | 20% | D2_1us | 4.85 | 15.8 | 5.15e+04 | 4.86e+03 |
+| add | 100% | D1_200ns | 0.57 | 10.5 | 3.72e+06 | 1.11e+04 |
+| add | 100% | D2_1us | 1.88 | 16.7 | 3.43e+05 | 4.38e+03 |
 
 ### Negative control calibration (A against A2, every cell)
 

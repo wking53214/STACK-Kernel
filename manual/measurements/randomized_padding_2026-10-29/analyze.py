@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Combine the padding_jitter launches into the numbers used in the write-up.
 
-Usage: analyze.py <runs_dir> <summary.json> [tables.md]
+Usage: analyze.py <runs_dir> <summary.json> [tables.md] [realized_from_summary.json]
 
 Needs only numpy and the standard library. Reads every *.json launch file in
 <runs_dir> (the mode and block come from inside each file), combines the
@@ -218,6 +218,9 @@ def summarize_cell(key, blocks):
     tab = np.zeros_like(np.array(blocks[0]["level_class_counts"], dtype=float))
     for c in blocks:
         tab += np.array(c["level_class_counts"], dtype=float)
+    # Drop levels with too few draws for a chi-square test (expected count per
+    # cell below 5, as happens in the tails of the smooth draw).
+    tab = tab[:, tab.sum(0) >= 30]
     exp = tab.sum(1, keepdims=True) * tab.sum(0, keepdims=True) / tab.sum()
     chi = float(np.sum((tab - exp) ** 2 / exp))
     dof = (tab.shape[0] - 1) * (tab.shape[1] - 1)
@@ -238,10 +241,11 @@ def summarize_cell(key, blocks):
     return out
 
 
-def add_derived(summ):
+def add_derived(summ, realized_override=None):
     """Costs against the fixed cell of the same mode, noise multipliers, and
-    the realized size of each injected delay."""
-    # Realized delay of D1..D3: precision-weighted raw diff over every cell.
+    the realized size of each injected delay. The realized delay is the
+    precision-weighted raw diff over every cell, unless an earlier, larger
+    run's estimate is passed in (a small run's estimate is too noisy)."""
     realized = {}
     for x in X_NAMES[2:]:
         num = den = 0.0
@@ -251,6 +255,8 @@ def add_derived(summ):
             num += w * r["diff_ns"]
             den += w
         realized[x] = num / den
+    if realized_override:
+        realized = dict(realized_override)
     for (mode, policy, width), c in summ.items():
         base = summ.get((mode, "fixed", 0))
         if base is not None:
@@ -291,6 +297,26 @@ def add_derived(summ):
                 "measured_z": r["z"],
             }
         c["raw_z_prediction_check"] = pred
+        # Mean-based attacker (compares averages) versus shape-aware attacker
+        # (the crate's cropped tests): predicted |Z| from the mean shift and
+        # the raw standard error, against the measured best-crop |Z|, and the
+        # samples per class each would need to reach the 4.5 line, scaled by
+        # sqrt(n) from n_per_class. The shape-aware figure is given only when
+        # the line was actually reached (below it, the best-crop |Z| is
+        # inflated by choosing the best of several crops).
+        shape = {}
+        for x in X_NAMES[2:]:
+            r = c["pairs"][x]["raw"]
+            zm = realized[x] / r["se_ns"]
+            zb = c["pairs"][x]["best_crop_abs_z"]
+            shape[x] = {
+                "mean_based_z": zm,
+                "best_crop_z": zb,
+                "advantage": zb / zm if zm > 0 else None,
+                "n_mean_based": n_per_class * (LINE / zm) ** 2,
+                "n_shape_aware": n_per_class * (LINE / zb) ** 2 if zb >= LINE else None,
+            }
+        c["mean_vs_shape"] = shape
     return realized
 
 
@@ -319,8 +345,10 @@ def null_calibration(summ):
 
 def md_tables(summ, realized, null, label):
     lines = [f"## Tables ({label})", ""]
-    modes = ["sleep", "spin", "hybrid"]
-    order = [("fixed", 0), ("replace", 5), ("replace", 20), ("replace", 100), ("add", 5), ("add", 20), ("add", 100)]
+    pol_rank = {"fixed": 0, "replace": 1, "replace_smooth": 2, "add": 3}
+    keys = sorted({(k[1], k[2]) for k in summ}, key=lambda t: (pol_rank.get(t[0], 9), t[1]))
+    order = keys
+    modes = [m for m in ("sleep", "spin", "hybrid") if any(k[0] == m for k in summ)]
     lines.append(f"Realized size of the injected delays (inferred from all cells): "
                  + ", ".join(f"{k} = {v:.0f} ns" for k, v in realized.items()))
     lines.append("")
@@ -358,6 +386,21 @@ def md_tables(summ, realized, null, label):
             adj = c["pairs"]["D2_1us"]["adjusted_best_crop_abs_z"]
             lines.append(f"| {pol} | {w}% | " + " | ".join(cells) + f" | {adj:.1f} |")
         lines.append("")
+        lines.append("Mean-based versus shape-aware attacker (|Z| at the achieved n; samples per class to reach 4.5):")
+        lines.append("")
+        lines.append("| policy | jitter | control | mean-based Z (predicted) | shape-aware Z (best crop) | n mean-based | n shape-aware |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for pol, w in order:
+            c = summ.get((mode, pol, w))
+            if c is None:
+                continue
+            for x in ("D1_200ns", "D2_1us"):
+                m = c["mean_vs_shape"][x]
+                ns = f"{m['n_shape_aware']:.2e}" if m["n_shape_aware"] is not None else "not reached"
+                lines.append(
+                    f"| {pol} | {w}% | {x} | {m['mean_based_z']:.2f} | {m['best_crop_z']:.1f} | {m['n_mean_based']:.2e} | {ns} |"
+                )
+        lines.append("")
     lines += [
         "### Negative control calibration (A against A2, every cell)",
         "",
@@ -378,7 +421,7 @@ def scaling_check(cells):
     rows = []
     for key, blocks in cells.items():
         blocks = sorted(blocks, key=lambda b: b["block"])
-        if len(blocks) < 4:
+        if len(blocks) < 3:
             continue
         full = summarize_cell(key, blocks)
         part = summarize_cell(key, blocks[:2])
@@ -398,10 +441,11 @@ def scaling_check(cells):
     }
 
 
-def run(runs_dir, summary_path, tables_path):
+def run(runs_dir, summary_path, tables_path, realized_from=None):
     cells, hosts = load(runs_dir)
     summ = {key: summarize_cell(key, sorted(b, key=lambda x: x["block"])) for key, b in cells.items()}
-    realized = add_derived(summ)
+    override = json.loads(Path(realized_from).read_text())["realized_delay_ns"] if realized_from else None
+    realized = add_derived(summ, override)
     null = null_calibration(summ)
     scaling = scaling_check(cells)
     load1 = [c["load_before"]["load_avg"][0] for blocks in cells.values() for c in blocks if c["load_before"]["load_avg"]]
@@ -416,11 +460,15 @@ def run(runs_dir, summary_path, tables_path):
     Path(summary_path).write_text(json.dumps(result, indent=1, default=float))
     if tables_path:
         text = md_tables(summ, realized, null, "all blocks")
+        if scaling["median_ratio"] is not None:
+            text += (
+                "\n### sqrt(n) check\n\nMDE from the first two blocks over MDE from all blocks, divided by the sqrt(n) "
+                f"prediction: median {scaling['median_ratio']:.2f}, range {scaling['min_ratio']:.2f} to {scaling['max_ratio']:.2f} "
+                f"over {len(scaling['rows'])} cells.\n"
+            )
         text += (
-            "\n### sqrt(n) check\n\nMDE from the first two blocks over MDE from all blocks, divided by the sqrt(n) "
-            f"prediction: median {scaling['median_ratio']:.2f}, range {scaling['min_ratio']:.2f} to {scaling['max_ratio']:.2f} "
-            f"over {len(scaling['rows'])} cells.\n\nHost load average (1 minute) before each cell: max "
-            f"{result['host_load1_before_cells']['max']:.2f}, median {result['host_load1_before_cells']['median']:.2f}.\n"
+            f"\nHost load average (1 minute) before each cell: max {result['host_load1_before_cells']['max']:.2f}, "
+            f"median {result['host_load1_before_cells']['median']:.2f}.\n"
         )
         Path(tables_path).write_text(text)
 
@@ -429,4 +477,9 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
-    run(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    run(
+        sys.argv[1],
+        sys.argv[2],
+        sys.argv[3] if len(sys.argv) > 3 else None,
+        sys.argv[4] if len(sys.argv) > 4 else None,
+    )

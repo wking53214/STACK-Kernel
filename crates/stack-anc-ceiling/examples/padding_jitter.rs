@@ -74,8 +74,8 @@ const DEFAULT_MAX_CONCURRENT: usize = stack_anc_ceiling::config::DEFAULT_MAX_CON
 /// thread issuing back-to-back requests would fill the slots and be shed.
 const EXTRA_HARD_CEILING_BUCKETS: u32 = 1_024;
 const EXTRA_MAX_CONCURRENT: usize = 65_536;
-/// Equally likely jitter levels.
-const LEVELS: usize = 8;
+/// Default number of jitter levels (the main run used 8 equally likely levels).
+const DEFAULT_LEVELS: usize = 8;
 /// Class names and the known extra delay (ns) spun after release.
 const CLASSES: [(&str, u64); 6] = [
     ("A", 0),
@@ -111,6 +111,21 @@ struct Cell {
     policy: Policy,
     /// Jitter width J as a percent of the ceiling (0 for `fixed`).
     width_pct: u64,
+    /// Number of discrete jitter levels (pads built for this cell).
+    levels: usize,
+    /// Level distribution: false = uniform, true = smooth (mean of four
+    /// uniforms, a bell shape with no sharp edge).
+    smooth: bool,
+}
+
+impl Cell {
+    /// Policy name used in the output (`replace_smooth` for the smooth draw).
+    fn label(self) -> &'static str {
+        match (self.policy, self.smooth) {
+            (Policy::Replace, true) => "replace_smooth",
+            (p, _) => p.label(),
+        }
+    }
 }
 
 struct Pads {
@@ -168,9 +183,22 @@ fn pad_with(
     })?)
 }
 
-/// Nominal extra for a level, in nanoseconds: `J * (l + 1) / LEVELS`.
-fn extra_ns(width_ns: u64, level: usize) -> u64 {
-    width_ns * (level as u64 + 1) / LEVELS as u64
+/// Nominal extra for a level, in nanoseconds: `J * (l + 1) / levels`.
+fn extra_ns(width_ns: u64, level: usize, levels: usize) -> u64 {
+    width_ns * (level as u64 + 1) / levels as u64
+}
+
+/// Draw a level: uniform over `levels`, or (smooth) the mean of four
+/// uniform draws scaled to `levels`, which has no sharp edge at either end.
+fn draw_level(rng: &mut SplitMix64, levels: usize, smooth: bool) -> usize {
+    if !smooth {
+        return draw_below(rng, levels);
+    }
+    let mut sum = 0.0;
+    for _ in 0..4 {
+        sum += (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+    }
+    ((sum / 4.0 * levels as f64) as usize).min(levels - 1)
 }
 
 fn build_pads(cell: Cell, mode: WaitMode, ceiling: Duration, tail: Duration) -> Result<Pads, BoxErr> {
@@ -180,10 +208,10 @@ fn build_pads(cell: Cell, mode: WaitMode, ceiling: Duration, tail: Duration) -> 
     match cell.policy {
         Policy::Fixed => {}
         Policy::Replace => {
-            for l in 0..LEVELS {
+            for l in 0..cell.levels {
                 levels.push(pad_with(
                     mode,
-                    ceiling + Duration::from_nanos(extra_ns(width_ns, l)),
+                    ceiling + Duration::from_nanos(extra_ns(width_ns, l, cell.levels)),
                     tail,
                     DEFAULT_HARD_CEILING_BUCKETS,
                     DEFAULT_MAX_CONCURRENT,
@@ -191,10 +219,10 @@ fn build_pads(cell: Cell, mode: WaitMode, ceiling: Duration, tail: Duration) -> 
             }
         }
         Policy::Add => {
-            for l in 0..LEVELS {
+            for l in 0..cell.levels {
                 levels.push(pad_with(
                     mode,
-                    Duration::from_nanos(extra_ns(width_ns, l)),
+                    Duration::from_nanos(extra_ns(width_ns, l, cell.levels)),
                     tail,
                     EXTRA_HARD_CEILING_BUCKETS,
                     EXTRA_MAX_CONCURRENT,
@@ -252,7 +280,7 @@ fn draw_below(rng: &mut SplitMix64, n: usize) -> usize {
 
 struct Collected {
     class: Vec<u8>,
-    level: Vec<u8>,
+    level: Vec<u16>,
     ns: Vec<f64>,
     not_served: u64,
     trips: std::collections::BTreeMap<String, u64>,
@@ -265,13 +293,15 @@ fn collect(cell: Cell, pads: &Pads, n_total: usize, seed: u64) -> Collected {
     let mut crng = SplitMix64::new(seed);
     let mut jrng = SplitMix64::new(seed ^ 0x9e37_79b9_7f4a_7c15);
     let classes: Vec<u8> = (0..n_total).map(|_| draw_below(&mut crng, CLASSES.len()) as u8).collect();
-    let levels: Vec<u8> = (0..n_total).map(|_| draw_below(&mut jrng, LEVELS) as u8).collect();
+    let levels: Vec<u16> = (0..n_total)
+        .map(|_| draw_level(&mut jrng, cell.levels, cell.smooth) as u16)
+        .collect();
     let token_for = |c: u8| if c == 2 { b } else { a };
 
     let mut wrng = SplitMix64::new(seed ^ 0xd1b5_4a32_d192_ed03);
     for _ in 0..WARMUP {
         let c = draw_below(&mut wrng, CLASSES.len());
-        let l = draw_below(&mut wrng, LEVELS);
+        let l = draw_below(&mut wrng, cell.levels);
         let _ = black_box(run_one(cell, pads, &secret, &token_for(c as u8), l, CLASSES[c].1));
     }
 
@@ -407,7 +437,7 @@ fn cropped_list(a: &[f64], x: &[f64], rep: &stack_anc_harness::Report) -> Vec<Va
 fn pair_json(
     col: &Collected,
     x_class: usize,
-    nominal: &dyn Fn(u8) -> f64,
+    nominal: &dyn Fn(u16) -> f64,
     perms: usize,
     boots: usize,
     rng: &mut SplitMix64,
@@ -539,11 +569,38 @@ fn main() -> Result<(), BoxErr> {
     };
     let launch_seed = master ^ block.wrapping_mul(0xa076_1d64_78bd_642f) ^ mode_id.wrapping_mul(0xe703_7ed1_a0b4_28db);
 
-    let mut cells = vec![Cell { policy: Policy::Fixed, width_pct: 0 }];
-    for policy in [Policy::Replace, Policy::Add] {
-        for width_pct in [5, 20, 100] {
-            cells.push(Cell { policy, width_pct });
+    // "main": fixed plus replace and add at 5, 20 and 100 percent, uniform
+    // draw (the recorded main run, 8 levels). "supp": fixed plus replace at
+    // 20 and 100 percent with a uniform and a smooth draw (the supplementary
+    // run; use more levels, for example STACK_JITTER_LEVELS=256).
+    let which = std::env::var("STACK_JITTER_CELLS").unwrap_or_else(|_| "main".into());
+    let levels_env = to_usize(env_u64("STACK_JITTER_LEVELS", DEFAULT_LEVELS as u64, 2, 1_024)?)?;
+    let ceiling_ns = u64::try_from(ceiling.as_nanos())?;
+    let mk = |policy: Policy, width_pct: u64, smooth: bool| {
+        let width_ns = ceiling_ns * width_pct / 100;
+        // An `add` extra pad must have a ceiling of at least 1 us.
+        let levels = match policy {
+            Policy::Add => levels_env.min(usize::try_from(width_ns / 1_000).unwrap_or(2).max(2)),
+            _ => levels_env,
+        };
+        Cell { policy, width_pct, levels, smooth }
+    };
+    let mut cells = vec![mk(Policy::Fixed, 0, false)];
+    match which.as_str() {
+        "main" => {
+            for policy in [Policy::Replace, Policy::Add] {
+                for width_pct in [5, 20, 100] {
+                    cells.push(mk(policy, width_pct, false));
+                }
+            }
         }
+        "supp" => {
+            for width_pct in [20, 100] {
+                cells.push(mk(Policy::Replace, width_pct, false));
+                cells.push(mk(Policy::Replace, width_pct, true));
+            }
+        }
+        other => return Err(format!("STACK_JITTER_CELLS must be main or supp; got {other}").into()),
     }
     // Shuffle the cell order per launch so drift is not confounded with a cell.
     let mut orng = SplitMix64::new(launch_seed ^ 0x1234_5678_9abc_def0);
@@ -562,10 +619,10 @@ fn main() -> Result<(), BoxErr> {
         let load_before = load_snapshot();
         let col = collect(*cell, &pads, n_total, seed);
         let load_after = load_snapshot();
-        let nominal = |l: u8| -> f64 {
+        let nominal = |l: u16| -> f64 {
             match cell.policy {
                 Policy::Fixed => 0.0,
-                _ => extra_ns(width_ns, usize::from(l)) as f64,
+                _ => extra_ns(width_ns, usize::from(l), cell.levels) as f64,
             }
         };
         let mut prng = SplitMix64::new(seed ^ 0xfeed_beef_0bad_f00d);
@@ -574,7 +631,7 @@ fn main() -> Result<(), BoxErr> {
             pairs.push(pair_json(&col, x, &nominal, perms, boots, &mut prng)?);
         }
         // Independence of the jitter draw from the class: counts class x level.
-        let mut table = vec![vec![0u64; LEVELS]; CLASSES.len()];
+        let mut table = vec![vec![0u64; cell.levels]; CLASSES.len()];
         for i in 0..col.ns.len() {
             table[usize::from(col.class[i])][usize::from(col.level[i])] += 1;
         }
@@ -588,17 +645,18 @@ fn main() -> Result<(), BoxErr> {
         eprintln!(
             "block {block} {} {} {}%: n={} not_served={} wall={:.1}s",
             mode.label(),
-            cell.policy.label(),
+            cell.label(),
             cell.width_pct,
             col.ns.len(),
             col.not_served,
             col.wall_s
         );
         cell_out.push(json!({
-            "policy": cell.policy.label(),
+            "policy": cell.label(),
+            "dist": if cell.smooth { "smooth" } else { "uniform" },
             "width_pct": cell.width_pct,
             "width_ns": width_ns,
-            "levels": LEVELS,
+            "levels": cell.levels,
             "cell_seed": seed,
             "n_kept": col.ns.len(),
             "not_served": col.not_served,
