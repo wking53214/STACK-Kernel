@@ -74,7 +74,7 @@ proptest! {
 
     #[test]
     fn canonical_encoding_is_a_fixed_point(v in json_value()) {
-        let lim = TridentConfig::default().limits();
+        let lim = TridentConfig::unbound_audience().limits();
         let once = to_canonical_bytes(&v, &lim).unwrap();
         let parsed = parse_strict(&once, &lim).unwrap();
         prop_assert_eq!(&parsed, &v);

@@ -429,7 +429,7 @@ fn rt_sequence_does_not_regress_after_keyring_churn() {
 fn rt_one_sender_cannot_exhaust_replay_cache_for_others() {
     let cfg = TridentConfig {
         replay_cache_capacity: 64,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     };
     let fx = setup_with(cfg);
     for seq in 1..=64 {
@@ -450,7 +450,7 @@ fn rt_one_sender_cannot_exhaust_replay_cache_for_others() {
 fn rt_ring_larger_than_sender_table_is_refused_or_evicts() {
     let cfg = TridentConfig {
         max_tracked_senders: 1,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     };
     let clock = Arc::new(ManualClock::new(T0));
     let built = Trident::new(cfg.clone(), ring_of(&["a", "b"]), clock.clone());
@@ -506,13 +506,13 @@ fn rt_fail_closed_and_unit_confusion() {
     let r = fx.trident.verify(&secs);
     assert!(r.refusal().unwrap().has(ReasonCode::Stale), "{r:?}");
     // Empty ring.
-    let empty = Trident::new(TridentConfig::default(), KeyRing::new(4), fx.clock.clone()).unwrap();
+    let empty = Trident::new(TridentConfig::unbound_audience(), KeyRing::new(4), fx.clock.clone()).unwrap();
     fx.clock.advance(10_000);
     assert!(!empty.verify(&fx.sealed(2)).is_accepted());
     // Pre-1970 clock (SystemClock reads 0) and a saturated clock.
     for at in [0u64, u64::MAX] {
         let c = Arc::new(ManualClock::new(at));
-        let tr = Trident::new(TridentConfig::default(), ring_of(&["a"]), c.clone()).unwrap();
+        let tr = Trident::new(TridentConfig::unbound_audience(), ring_of(&["a"]), c.clone()).unwrap();
         let e = seal(draft(1, fx.now(), payload_for(1)), &fx.key_a, &fx.cfg.limits()).unwrap();
         let v = tr.verify(&e);
         assert!(!v.is_accepted(), "clock {at}: {v:?}");
@@ -755,7 +755,7 @@ fn rt_no_panic_from_arbitrary_bytes() {
         max_depth: stack_trident::config::MAX_DEPTH_CEILING,
         max_nodes: stack_trident::config::MAX_NODES_CEILING,
         max_envelope_bytes: stack_trident::config::MAX_ENVELOPE_BYTES_CEILING,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     };
     let deep = Trident::new(cfg, ring_of(&["a"]), fx.clock.clone()).unwrap();
     let bomb = "[".repeat(1_000_000);

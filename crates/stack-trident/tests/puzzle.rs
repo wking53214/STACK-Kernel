@@ -63,7 +63,7 @@ impl World {
         let mut ring = KeyRing::new(16);
         ring.insert(fixture_key("a")).unwrap();
         ring.insert(fixture_key("b")).unwrap();
-        let tcfg = TridentConfig::default();
+        let tcfg = TridentConfig::unbound_audience();
         let trident = Arc::new(Trident::new(tcfg.clone(), ring, clock.clone()).unwrap());
         clock.advance(tcfg.max_future_skew_ms + 1);
         let gate = PuzzleGate::new(cfg, trident, inspector, clock.clone()).unwrap();
@@ -535,7 +535,7 @@ fn the_holding_area_never_exceeds_its_byte_budget() {
 #[test]
 fn an_invalid_config_refuses_to_build_a_gate() {
     let clock = Arc::new(ManualClock::new(T0));
-    let trident = Arc::new(Trident::new(TridentConfig::default(), KeyRing::new(4), clock.clone()).unwrap());
+    let trident = Arc::new(Trident::new(TridentConfig::unbound_audience(), KeyRing::new(4), clock.clone()).unwrap());
     let inspector = Arc::new(DenyListInspector::new(vec![b"x".to_vec()]).unwrap());
     let bad = PuzzleConfig { max_pieces: 0, ..small_cfg() };
     let err = PuzzleGate::new(bad, trident, inspector, clock).unwrap_err();

@@ -645,7 +645,7 @@ mod tests {
         let key = SecretKey::from_bytes(vec![0x42; 32]).unwrap();
         let fp_hex = key.fingerprint().to_hex();
         ring.insert(SecretKey::from_bytes(vec![0x42; 32]).unwrap()).unwrap();
-        let trident = Arc::new(Trident::new(TridentConfig::default(), ring, clock.clone()).unwrap());
+        let trident = Arc::new(Trident::new(TridentConfig::unbound_audience(), ring, clock.clone()).unwrap());
         clock.advance(10_000);
 
         let tr = Arc::clone(&trident);
@@ -746,7 +746,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new(1_000_000));
         let cfg = TridentConfig {
             restored_high_water_ms: 2_000_000,
-            ..TridentConfig::default()
+            ..TridentConfig::unbound_audience()
         };
         let trident = Trident::new(cfg, KeyRing::new(1), clock.clone()).unwrap();
         assert_eq!(trident.state.lock().unwrap().epoch_floor_ms, 2_000_001);

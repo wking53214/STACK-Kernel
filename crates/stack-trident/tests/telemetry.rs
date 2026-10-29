@@ -206,7 +206,7 @@ fn unknown_and_known_senders_cost_the_same_hashing() {
 fn breaker_release_halt_and_reset_metrics_fire() {
     let fx = setup_with(TridentConfig {
         breaker_threshold: 1,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     let seen = record(|| {
         let mut env = fx.sealed(1);
@@ -248,7 +248,7 @@ fn breaker_release_halt_and_reset_metrics_fire() {
 fn untracked_breach_is_counted() {
     let fx = setup_with(TridentConfig {
         max_tracked_senders: 1,
-        ..TridentConfig::default()
+        ..TridentConfig::unbound_audience()
     });
     assert!(fx.trident.verify(&fx.sealed(1)).is_accepted());
     let seen = record(|| {

@@ -40,7 +40,7 @@ pub struct Fx {
 }
 
 pub fn setup() -> Fx {
-    setup_with(TridentConfig::default())
+    setup_with(TridentConfig::unbound_audience())
 }
 
 pub fn setup_with(cfg: TridentConfig) -> Fx {
@@ -122,7 +122,7 @@ pub fn remac(env: &mut HandoffEnvelope, key_bytes_label: &str) {
     let key = Sha256::digest(format!("stack-trident TEST FIXTURE key: {key_bytes_label}").as_bytes());
     let mut v = to_value(env);
     v.as_object_mut().unwrap().remove("mac");
-    let lim = TridentConfig::default().limits();
+    let lim = TridentConfig::unbound_audience().limits();
     let mut input = MAC_DOMAIN.to_vec();
     input.extend(to_canonical_bytes(&v, &lim).unwrap());
     let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&key).unwrap();
