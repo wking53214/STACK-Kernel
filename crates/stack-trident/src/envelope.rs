@@ -23,9 +23,10 @@ use serde_json::{Map, Value};
 use sha2::Sha256;
 
 use crate::canonical::{
-    decode_hex_lower, encode_value_counted, escaped_len, sha256_hex, to_hex, write_str, write_u64,
+    decode_hex_lower, encode_value_counted, escaped_len, to_hex, write_str, write_u64,
     CanonicalError, Limits, MAX_SAFE_INTEGER,
 };
+use crate::cns_digest;
 use crate::keys::SecretKey;
 use crate::vocab::{GateOutcome, GatePosition};
 
@@ -195,6 +196,7 @@ pub fn seal_for(
         return Err(SealError::Encoding(CanonicalError::TooLarge));
     }
     let payload_bytes = encode_payload(&draft.payload, limits)?;
+    let subject_digest = cns_digest::subject_digest(&draft.payload, limits)?;
     let mut env = HandoffEnvelope {
         version: ENVELOPE_VERSION,
         sender: key.fingerprint().to_hex(),
@@ -203,7 +205,7 @@ pub fn seal_for(
         nonce: draft.nonce.to_hex(),
         gate_position: draft.gate_position.as_str().to_owned(),
         gate_outcome: draft.gate_outcome.as_str().to_owned(),
-        subject_digest: sha256_hex(&payload_bytes),
+        subject_digest,
         payload: draft.payload,
         mac: String::new(),
     };

@@ -57,8 +57,8 @@
 //!      time. With an audience configured, an envelope sealed for another
 //!      receiver (see [`seal_for`]) fails here, even when both receivers
 //!      trust the same sender key.
-//!    * *Prong 2, binding.* SHA-256 over the canonical payload, compared
-//!      with `subject_digest`. This is the TRANSPLANTED check that
+//!    * *Prong 2, binding.* The CNS `subject_digest` of the payload
+//!      ([`cns_digest`]), compared with `subject_digest`. This is the TRANSPLANTED check that
 //!      `sentinel_os` (`twin_custody.verify_subject_binding`) applies to
 //!      ledger rows: a verdict moved onto content it was not issued for is
 //!      caught because the digest is recomputed, not read. This prong also
@@ -153,17 +153,14 @@
 //!
 //! ## Open questions
 //!
-//! 1. **Interop with CNS `subject_digest`.** `cns.gate.subject_digest` in
-//!    `cns/gate.py` in the CNS repository does not hash JSON. It hashes a
-//!    type-tagged, length-prefixed rendering, and it accepts floats. A
-//!    Python producer that fills `subject_digest` with the CNS function
-//!    will fail prong 2 on every envelope. Either the envelope specifies
-//!    the CNS rendering (and this crate ports it, including its float rule,
-//!    and its string lengths counted in code points), or the Python side
-//!    adds a JCS producer. The canonical encoding here has been checked
-//!    against Python's `json.dumps(sort_keys=True, separators=(",", ":"),
-//!    ensure_ascii=False)` only for keys inside the Basic Multilingual
-//!    Plane.
+//! 1. **Interop with CNS `subject_digest`.** Resolved: `subject_digest` is
+//!    the CNS function, ported in [`cns_digest`] and checked against the
+//!    CNS digest vectors. The MAC still covers the canonical JSON of the
+//!    whole envelope; only the payload binding changed. The port refuses
+//!    floats and integers beyond 2^53 - 1, which the Trident's grammar
+//!    never admits, so a payload the Trident can carry digests exactly as
+//!    Python digests it. Keys are ordered by code point (as CNS does),
+//!    not by UTF-16 unit (as the canonical JSON does).
 //! 2. Whether the reply should collapse `UnknownSender` and `MacMismatch`.
 //! 3. Freshness state lives in memory. The epoch floor closes the replay
 //!    window after an operator reset exactly (it is raised above the
@@ -184,6 +181,7 @@
 
 pub mod canonical;
 pub mod clock;
+pub mod cns_digest;
 pub mod config;
 pub mod envelope;
 pub mod keys;

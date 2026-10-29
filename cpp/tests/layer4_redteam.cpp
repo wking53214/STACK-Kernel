@@ -3,6 +3,9 @@
 #include <vector>
 #include <atomic>
 #include <string>
+#include <cerrno>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include "../include/stack_kernel.hpp"
 #include "../include/stack_kinetic_governor.hpp"
@@ -72,6 +75,7 @@ void test_defect1_sealed_visibility() {
     GovernedMinotaurHost<> host;
     std::atomic<bool> thread1_sealed{false};
     std::atomic<bool> thread2_saw_sealed{false};
+    std::atomic<bool> thread2_filtered{false};
 
     std::thread t1([&host, &thread1_sealed]() {
         auto res = host.InitializeAndSeal();
@@ -79,23 +83,30 @@ void test_defect1_sealed_visibility() {
         thread1_sealed.store(true, std::memory_order_release);
     });
 
-    std::thread t2([&host, &thread1_sealed, &thread2_saw_sealed]() {
+    std::thread t2([&host, &thread1_sealed, &thread2_saw_sealed, &thread2_filtered]() {
         while (!thread1_sealed.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
         auto res = host.InitializeAndSeal();
         if (res.has_value()) {
             thread2_saw_sealed.store(true, std::memory_order_release);
+            // getpid is not on the allowlist: a filtered thread gets ENOSYS.
+            errno = 0;
+            const long rc = ::syscall(SYS_getpid);
+            thread2_filtered.store(rc == -1 && errno == ENOSYS, std::memory_order_release);
         }
     });
 
     t1.join();
     t2.join();
 
-    if (thread2_saw_sealed.load()) {
-        test_pass();
-    } else {
+    if (!thread2_saw_sealed.load()) {
         test_fail("Thread 2 did not see sealed state");
+    } else if (!thread2_filtered.load()) {
+        // A filter attaches to one thread, so thread 2 must install its own.
+        test_fail("Thread 2 reported sealed but is not filtered");
+    } else {
+        test_pass();
     }
 }
 

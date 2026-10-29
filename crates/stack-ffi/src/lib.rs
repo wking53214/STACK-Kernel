@@ -149,6 +149,60 @@ mod tests {
         }
     }
 
+    /// A seccomp filter attaches to the thread that installs it. Every thread
+    /// that seals must be filtered, and a thread that never seals must not be,
+    /// so a Rust process that seals on one thread keeps working on the rest.
+    /// Runs in a child copy of this test binary for the same reason as above.
+    /// openat is not on the allowlist, so a filtered thread cannot open a file.
+    #[test]
+    fn test_each_thread_seals_itself_and_only_itself() {
+        const CHILD_ENV: &str = "STACK_FFI_THREAD_SEAL_CHILD";
+        const PROBE: &str = "/proc/self/stat";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            assert!(std::fs::File::open(PROBE).is_ok(), "unsealed thread must open files");
+            // The sealed closures do no allocation and no formatting; results come
+            // back through join and are checked on this unsealed thread.
+            let seal_and_probe = || {
+                let sealed = host_initialize_and_seal().is_ok();
+                let blocked = std::fs::File::open(PROBE).is_err();
+                (sealed, blocked)
+            };
+            let first = std::thread::spawn(seal_and_probe).join().expect("first thread");
+            let second = std::thread::spawn(seal_and_probe).join().expect("second thread");
+            assert_eq!(first, (true, true), "first thread must be sealed and filtered");
+            assert_eq!(second, (true, true), "second thread must be sealed and filtered");
+            // Not process wide: this thread can still open files and spawn threads.
+            assert!(std::fs::File::open(PROBE).is_ok(), "sealing must not reach other threads");
+            let third = std::thread::spawn(|| std::fs::File::open(PROBE).is_ok())
+                .join()
+                .expect("third thread");
+            assert!(third, "a thread that never sealed must stay unfiltered");
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut child = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "tests::test_each_thread_seals_itself_and_only_itself",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, "1")
+            .spawn()
+            .expect("spawn sealed child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll child") {
+                assert!(status.success(), "sealed child failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("sealed child did not exit within 60 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     #[test]
     fn test_capability_setting() {
         host_set_capabilities(0xFF, 0, 0, 0);

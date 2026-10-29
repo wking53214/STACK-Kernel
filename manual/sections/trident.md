@@ -116,14 +116,18 @@ There is no default key. A `KeyRing` starts empty and authenticates nothing unti
 
 The MAC can also bind the receiver. With `TridentConfig::audience` set, the MAC input names that receiver. An envelope sealed with `seal_for` for one receiver then fails prong 1 at any other, even one that trusts the same key.
 
-**Prong 2, binding.** The receiver hashes the canonical payload itself and compares the result with the claimed digest in constant time (src/trident.rs):
+**Prong 2, binding.** The receiver recomputes the CNS `subject_digest` of the payload itself and compares the result with the claimed digest in constant time (src/trident.rs):
 
 ```rust
-        let recomputed: [u8; 32] = Sha256::digest(&payload_bytes).into();
+        let recomputed = subject_digest_raw(&env.payload, &self.limits);
         match decode_hex_lower::<32>(&env.subject_digest) {
             None => reasons.push(ReasonCode::MalformedDigest),
             Some(claimed) => {
-                if !bool::from(claimed.ct_eq(&recomputed)) {
+                let bound = match recomputed {
+                    Ok(r) => bool::from(claimed.ct_eq(&r)),
+                    Err(_) => false,
+                };
+                if !bound {
                     reasons.push(ReasonCode::SubjectDigestMismatch);
                 }
             }
@@ -134,9 +138,9 @@ This is the TRANSPLANTED check from sentinel_os, applied to handoffs. A transpla
 
 Prong 2 also enforces the closed vocabularies. `version` must be 1, `gate_position` exactly `alpha` or `omega`, and `gate_outcome` exactly one of the three CNS spellings, with no case folding.
 
-**Python that exists.** No Python Trident exists. The nearest Python is `verify_subject_binding` in sentinel_os/sentinel_os/twin_custody.py, which recomputes a ledger row's CNS digest and compares it with the stored one. Its digest is not the Trident's: CNS `subject_digest` hashes a type-tagged rendering and accepts floats, while prong 2 hashes RFC 8785 JSON.
+**Python that exists.** No Python Trident exists. The nearest Python is `verify_subject_binding` in sentinel_os/sentinel_os/twin_custody.py, which recomputes a ledger row's CNS digest and compares it with the stored one. The Trident now uses that same digest (src/cns_digest.rs), so a Python producer that fills `subject_digest` with `cns.gate.subject_digest` passes prong 2.
 
-The practical consequence: a Python producer that fills `subject_digest` with the CNS function fails prong 2 on every envelope. Either the envelope adopts the CNS rendering, or the Python side gains an RFC 8785 producer. That choice is open and needs the owner's decision.
+The port follows the CNS rendering exactly for everything the Trident can carry: type-tagged, length-prefixed, strings counted in code points, object keys in code point order. It refuses floats and integers beyond 2^53 - 1, which the strict parser never admits anyway. tests/cns_digest.rs checks the port against the CNS digest vectors shared with the Sentinel witness, and against known answers for keys above U+FFFF, where code point order and the canonical JSON's UTF-16 order differ.
 
 **Prong 3, freshness.** `issued_at_unix_ms` must be no more than 60,000 ms older or 5,000 ms newer than the receiver's clock. The (sender, nonce) pair must not be in the replay cache. The `sequence` must exceed the sender's last accepted value.
 
@@ -360,7 +364,6 @@ Known limitations that remain:
 
 - **Symmetric keys.** HMAC keys are shared secrets, so any receiver holding a sender's key can forge as that sender. Only per-pair keys or signatures would stop that.
 - **In-memory state.** Replay cache, sequences and quarantines live in process memory. Quarantines are lost on restart, and several replicas need shared replay state or sender affinity.
-- **CNS digest interop.** A Python producer using CNS `subject_digest` fails prong 2 until one digest format is chosen.
 - **Ring membership leak.** `unknown_sender` versus `mac_mismatch` reveals whether a fingerprint is in the ring. Fingerprints are public identifiers, so this was accepted.
 - **Key zeroing.** `SecretKey` zeroes its bytes on drop as a best effort only, because the write cannot be volatile without `unsafe`.
 - **Timing evidence.** Equal work is shown by hashed-byte counts, not by a wall-clock measurement.
