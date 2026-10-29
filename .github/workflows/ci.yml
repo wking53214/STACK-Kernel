@@ -115,12 +115,15 @@ jobs:
   workspace:
     # Every crate outside the four ANC crates (those have the anc and
     # anc-wall-clock jobs below). The clippy step covers the whole workspace,
-    # ANC crates included, and runs on floating stable: a new Rust release can
-    # add lints and turn this step red with no change in this repository.
+    # ANC crates included. The toolchain is pinned so a new Rust release cannot turn
+    # this step red on its own. Before moving the pin to Rust 1.99, decide on three
+    # findings it reports: two `fetch_update` deprecations (stack-trident clock.rs,
+    # stack-anc-pipeline gate.rs; the replacement `try_update` is not in the 1.94
+    # rust-version) and a `chunks_exact` lint in stack-trident canonical.rs.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
