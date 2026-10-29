@@ -31,4 +31,30 @@ The Catch2 version of this test in `tests_all_components.cpp` already retries un
 
 ## What the fix has to keep
 
-Both original assertions stay. The fix removes the dependence on scheduling and adds a stronger end-state check. Results after the fix are in the next section once recorded.
+Both original assertions stay (`validation_count > 0` and `update_count > 0`). The fix removes the dependence on scheduling and adds stronger checks:
+
+* Each executor runs one transaction under the initial mask before the setter is released, so "executors made progress" no longer depends on scheduling.
+* The setter retries each change until it is applied (the same fix the Catch2 version already had), so all 25 flips land (`update_count == 25`) and the last one, `0xFF`, is the end state.
+* After the threads join, a transaction on a fresh domain must pass. That proves the final write landed.
+* A new test, `test_defect2_inflight_rule_is_deterministic`, checks the rule itself with no threads and no timing: a change made during a transaction is refused, and the same change after it is accepted.
+
+Both the final transaction and the new test run on their own threads: the seccomp filter stays on the thread that installs it, and a filtered main thread cannot start the threads the later tests need.
+
+## After the fix
+
+| Condition | Runs | Defect 2 failures | Whole binary not 7/7 |
+|---|---|---|---|
+| Quiet host | 300 | 0 | 0 |
+| Four busy loops competing for the four CPUs | 200 | 0 | 0 |
+
+(Before: 30 of 100.)
+
+## Does the test still catch the bug it is named for?
+
+Mutation check: with the in-flight guard removed from `SetActiveCapabilities()` in a copy of the header, the new deterministic test fails (`set during: 1`). The original concurrent test passed on that same broken code in 5 of 5 launches, so it could not have caught that bug. The new deterministic test is what gives this area real coverage.
+
+## What this does not show
+
+* No ThreadSanitizer result (see above), so the claim that the code has no data race rests on reading it and on the deterministic check, not on a tool.
+* Writer starvation is real by design: under sustained load `SetActiveCapabilities()` can keep returning `false`. Callers that must apply a change have to retry, as the fixed test now does. Nothing in the code changed.
+* The same "no retry" pattern may exist in other test files. Only this test was checked.

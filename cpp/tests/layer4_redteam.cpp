@@ -125,16 +125,27 @@ void test_defect2_concurrent_mutation() {
 
     std::atomic<int> validation_count{0};
     std::atomic<int> update_count{0};
+    std::atomic<int> warmed_up{0};
 
     constexpr int num_executor_threads = 2;
     constexpr int num_capability_setters = 1;
+    constexpr int num_flips = 25;
 
     std::vector<std::thread> threads;
 
     // Executor threads
     for (int i = 0; i < num_executor_threads; ++i) {
-        threads.emplace_back([&host, &validation_count, i]() {
+        threads.emplace_back([&host, &validation_count, &warmed_up, i]() {
             SIMDCapabilityToken token(i, CapabilityMask256(0x01, 0, 0, 0));
+            // One transaction under the initial mask before any setter runs, so
+            // "executors made progress" does not depend on scheduling.
+            auto first = host.ExecuteGovernedTransaction(
+                token, 5, 100'000ULL, 50'000ULL, []() {}
+            );
+            if (first.has_value()) {
+                validation_count++;
+            }
+            warmed_up++;
             for (int j = 0; j < 50; ++j) {
                 auto res = host.ExecuteGovernedTransaction(
                     token, 5, 100'000ULL, 50'000ULL, []() {}
@@ -148,12 +159,19 @@ void test_defect2_concurrent_mutation() {
 
     // Capability setter threads
     for (int i = 0; i < num_capability_setters; ++i) {
-        threads.emplace_back([&host, &update_count]() {
-            for (int j = 0; j < 25; ++j) {
+        threads.emplace_back([&host, &update_count, &warmed_up]() {
+            while (warmed_up.load() < num_executor_threads) {
+                std::this_thread::yield();
+            }
+            // A change is refused while any transaction is in flight (the
+            // documented rule), so retry until each one is applied. The last
+            // flip is 0xFF, so the end state does not depend on scheduling.
+            for (int j = 0; j < num_flips; ++j) {
                 CapabilityMask256 mask((j % 2 == 0) ? 0xFF : 0xAA, 0, 0, 0);
-                if (host.SetActiveCapabilities(mask)) {
-                    update_count++;
+                while (!host.SetActiveCapabilities(mask)) {
+                    std::this_thread::yield();
                 }
+                update_count++;
                 std::this_thread::yield();
             }
         });
@@ -161,10 +179,57 @@ void test_defect2_concurrent_mutation() {
 
     for (auto& t : threads) t.join();
 
-    if (validation_count.load() > 0 && update_count.load() > 0) {
+    // The final flip was 0xFF, so a transaction on a fresh domain must now pass.
+    // It runs on its own thread because the seccomp filter stays on the thread
+    // that installs it, and the later tests must still be able to start threads.
+    SIMDCapabilityToken final_token(100, CapabilityMask256(0x01, 0, 0, 0));
+    bool final_ok = false;
+    std::thread final_thread([&host, &final_token, &final_ok]() {
+        final_ok = host.ExecuteGovernedTransaction(
+            final_token, 5, 100'000ULL, 50'000ULL, []() {}
+        ).has_value();
+    });
+    final_thread.join();
+
+    if (validation_count.load() > 0 && update_count.load() == num_flips && final_ok) {
         test_pass();
     } else {
-        test_fail("Validation: " + std::to_string(validation_count.load()) + ", Updates: " + std::to_string(update_count.load()));
+        test_fail("Validation: " + std::to_string(validation_count.load()) + ", Updates: " + std::to_string(update_count.load()) +
+                  ", final transaction ok: " + std::to_string(final_ok ? 1 : 0));
+    }
+}
+
+// A change is refused while a transaction is in flight and accepted after it.
+// No threads and no timing, so this is the rule the test above relies on.
+void test_defect2_inflight_rule_is_deterministic() {
+    test_start("Defect 2: SetActiveCapabilities is refused during a transaction, accepted after");
+
+    GovernedMinotaurHost<> host;
+    if (!host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0))) {
+        test_fail("Failed to set initial capabilities");
+        return;
+    }
+    SIMDCapabilityToken token(7, CapabilityMask256(0x01, 0, 0, 0));
+    bool set_during = true;
+    bool tx_ok = false;
+    // The seccomp filter stays on the thread that installs it, so the
+    // transaction runs on its own thread and the later tests can still start threads.
+    std::thread worker([&]() {
+        auto r = host.ExecuteGovernedTransaction(
+            token, 5, 100'000ULL, 50'000ULL,
+            [&]() { set_during = host.SetActiveCapabilities(CapabilityMask256(0xAA, 0, 0, 0)); }
+        );
+        tx_ok = r.has_value();
+    });
+    worker.join();
+    const bool set_after = host.SetActiveCapabilities(CapabilityMask256(0xAA, 0, 0, 0));
+
+    if (tx_ok && !set_during && set_after) {
+        test_pass();
+    } else {
+        test_fail("Transaction ok: " + std::to_string(tx_ok ? 1 : 0) +
+                  ", set during: " + std::to_string(set_during ? 1 : 0) +
+                  ", set after: " + std::to_string(set_after ? 1 : 0));
     }
 }
 
@@ -274,6 +339,7 @@ int main() {
 
     std::cout << "\nDEFECT 2: Capability Mutation Race\n";
     test_defect2_concurrent_mutation();
+    test_defect2_inflight_rule_is_deterministic();
 
     std::cout << "\nDEFECT 3: BPF Filter Jump Offsets\n";
     test_defect3_filter_compilation();
