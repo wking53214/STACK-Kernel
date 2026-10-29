@@ -1,0 +1,44 @@
+driver start load=0.54 0.29 0.39 2/127 28849
+2026-10-29T16:55:14Z start block=5 mode=hybrid pin=taskset -c 3 prio=nice -n -5 load=0.54 0.29 0.39
+block 5 hybrid replace_smooth 20%: n=71999 not_served=1 wall=25.0s
+block 5 hybrid replace_smooth 100%: n=72000 not_served=0 wall=33.8s
+block 5 hybrid replace 20%: n=71999 not_served=1 wall=25.0s
+block 5 hybrid replace 100%: n=72000 not_served=0 wall=34.0s
+block 5 hybrid fixed 0%: n=72000 not_served=0 wall=22.6s
+2026-10-29T16:57:43Z done block=5 mode=hybrid load=0.34 0.30 0.37
+2026-10-29T16:57:43Z start block=5 mode=spin pin=taskset -c 3 prio=nice -n -5 load=0.34 0.30 0.37
+block 5 spin replace_smooth 20%: n=71999 not_served=1 wall=24.8s
+block 5 spin replace 100%: n=72000 not_served=0 wall=33.4s
+block 5 spin fixed 0%: n=72000 not_served=0 wall=22.5s
+block 5 spin replace_smooth 100%: n=72000 not_served=0 wall=33.4s
+block 5 spin replace 20%: n=72000 not_served=0 wall=24.8s
+2026-10-29T17:00:11Z done block=5 mode=spin load=0.94 0.58 0.47
+2026-10-29T17:00:11Z start block=6 mode=spin pin=taskset -c 3 prio=nice -n -5 load=0.94 0.58 0.47
+block 6 spin replace_smooth 100%: n=72000 not_served=0 wall=33.5s
+block 6 spin fixed 0%: n=72000 not_served=0 wall=22.5s
+block 6 spin replace 100%: n=72000 not_served=0 wall=33.5s
+block 6 spin replace_smooth 20%: n=72000 not_served=0 wall=24.8s
+block 6 spin replace 20%: n=72000 not_served=0 wall=24.7s
+2026-10-29T17:02:40Z done block=6 mode=spin load=1.00 0.75 0.56
+2026-10-29T17:02:40Z start block=6 mode=hybrid pin=taskset -c 3 prio=nice -n -5 load=1.00 0.75 0.56
+block 6 hybrid replace_smooth 20%: n=72000 not_served=0 wall=25.1s
+block 6 hybrid fixed 0%: n=72000 not_served=0 wall=22.5s
+block 6 hybrid replace 100%: n=72000 not_served=0 wall=34.2s
+block 6 hybrid replace 20%: n=72000 not_served=0 wall=25.2s
+block 6 hybrid replace_smooth 100%: n=72000 not_served=0 wall=34.2s
+2026-10-29T17:05:10Z done block=6 mode=hybrid load=0.25 0.51 0.49
+2026-10-29T17:05:10Z start block=7 mode=hybrid pin=taskset -c 3 prio=nice -n -5 load=0.25 0.51 0.49
+block 7 hybrid replace_smooth 100%: n=72000 not_served=0 wall=34.8s
+block 7 hybrid replace 20%: n=72000 not_served=0 wall=25.2s
+block 7 hybrid fixed 0%: n=72000 not_served=0 wall=22.5s
+block 7 hybrid replace 100%: n=71999 not_served=1 wall=34.0s
+block 7 hybrid replace_smooth 20%: n=72000 not_served=0 wall=25.1s
+2026-10-29T17:07:42Z done block=7 mode=hybrid load=0.30 0.46 0.47
+2026-10-29T17:07:42Z start block=7 mode=spin pin=taskset -c 3 prio=nice -n -5 load=0.30 0.46 0.47
+block 7 spin replace_smooth 100%: n=72000 not_served=0 wall=33.6s
+block 7 spin replace_smooth 20%: n=71999 not_served=1 wall=24.8s
+block 7 spin replace 20%: n=72000 not_served=0 wall=24.8s
+block 7 spin replace 100%: n=72000 not_served=0 wall=33.5s
+block 7 spin fixed 0%: n=72000 not_served=0 wall=22.5s
+2026-10-29T17:10:10Z done block=7 mode=spin load=0.95 0.68 0.56
+ALL_DONE
