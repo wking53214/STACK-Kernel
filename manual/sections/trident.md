@@ -327,6 +327,10 @@ groups:
         annotations: {summary: "p99 verification time above 50 ms. Needs an exporter that renders histogram buckets."}
 ```
 
+### Puzzle gate
+
+A prototype gate that holds pieces until a whole puzzle is present and inspected is described in [Trident puzzles](trident_puzzles.md). It sits in front of the Trident's output and is not wired into anything yet.
+
 ### Red-team results
 
 The red team wrote 22 attacks as tests in `tests/redteam.rs`. Against the first build, 13 broke and 9 held. After the fixes, all 22 pass.

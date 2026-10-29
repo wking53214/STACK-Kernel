@@ -151,6 +151,17 @@
 //! itself. An input over the size cap is logged by length only, because
 //! hashing it would be the unbounded work the cap exists to stop.
 //!
+//! ## The puzzle gate (prototype)
+//!
+//! A single verified envelope can still be one harmless piece of a hostile
+//! whole. [`puzzle::PuzzleGate`] wraps a [`Trident`] and releases nothing
+//! until every piece of a declared puzzle has arrived and the assembled whole
+//! has passed an [`puzzle::Inspector`]. Incomplete puzzles are destroyed after
+//! a lifetime that follows progress. Design, rules and open questions are in
+//! `manual/sections/trident_puzzles.md`. Inspection runs while the gate lock
+//! is held, so an inspector must be quick. Nothing outside this crate uses
+//! the gate yet.
+//!
 //! ## Open questions
 //!
 //! 1. **Interop with CNS `subject_digest`.** Resolved: `subject_digest` is
