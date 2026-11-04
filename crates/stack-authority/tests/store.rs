@@ -15,6 +15,7 @@ use common::{
 };
 use stack_authority::{
     AuthzError, Capability, CapabilityDigest, FileUseStore, ManualClock, UseError, UseKey, UseStore, LOG_HEADER,
+    RECORD_BYTES,
 };
 
 fn one_time_wire(id: &str, nonce: &str) -> Vec<u8> {
@@ -164,7 +165,8 @@ fn corruption_fails_closed_on_open() {
     junk.extend_from_slice(&[0xff; 40]);
     std::fs::write(&path, &junk).unwrap();
     assert_eq!(FileUseStore::open(&path, 16).map(|_| ()).unwrap_err(), UseError::Unavailable);
-    // A record with the right prev hash but an id length out of bounds.
+    // A torn record with the right prev hash but an id length out of
+    // bounds: not a prefix any writer produces, so corruption.
     let mut bad_len = good.clone();
     let head = {
         std::fs::write(&path, &good).unwrap();
@@ -172,8 +174,16 @@ fn corruption_fails_closed_on_open() {
         s.head().unwrap()
     };
     bad_len.extend_from_slice(&head);
-    bad_len.extend_from_slice(&[0xff, 0xff]);
+    bad_len.push(0);
     std::fs::write(&path, &bad_len).unwrap();
+    assert_eq!(FileUseStore::open(&path, 16).map(|_| ()).unwrap_err(), UseError::Unavailable);
+    // Editing the length byte of the last complete record cannot turn it
+    // into a torn tail: records have one length, so it is corruption and
+    // the recorded use is not forgotten.
+    let mut len_edit = good.clone();
+    let len_byte = LOG_HEADER.len() + RECORD_BYTES + 32;
+    len_edit[len_byte] += 1;
+    std::fs::write(&path, &len_edit).unwrap();
     assert_eq!(FileUseStore::open(&path, 16).map(|_| ()).unwrap_err(), UseError::Unavailable);
     // A wrong header.
     let mut wrong_header = good.clone();
@@ -185,7 +195,8 @@ fn corruption_fails_closed_on_open() {
     let store = FileUseStore::open(&path, 16).unwrap();
     drop(store);
     let header_len = LOG_HEADER.len();
-    let rec1_end = header_len + (32 + 2 + 3 + 32 + 1 + 8 + 8 + 32);
+    let rec1_end = header_len + RECORD_BYTES;
+    assert_eq!(good.len(), header_len + 2 * RECORD_BYTES);
     let mut swapped = good[..header_len].to_vec();
     swapped.extend_from_slice(&good[rec1_end..]);
     swapped.extend_from_slice(&good[header_len..rec1_end]);

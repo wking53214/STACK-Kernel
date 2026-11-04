@@ -8,8 +8,8 @@
 //! header   "stack-authority/use-log/1\n"          26 bytes
 //! record   prev_hash        32 bytes  hash of the previous record, or the
 //!                                     genesis hash for the first
-//!          cap_id_len       u16, 1..=128
-//!          cap_id           bytes
+//!          cap_id_len       u8, 1..=128
+//!          cap_id           128 bytes, zero padded
 //!          digest           32 bytes  capability digest
 //!          one_time         u8, 0 or 1
 //!          expires_at_ms    u64
@@ -18,12 +18,18 @@
 //!                                     field above, prev_hash included
 //! ```
 //!
+//! Every record is exactly [`RECORD_BYTES`] long. That is deliberate: a
+//! record's extent must not depend on any byte an editor could change,
+//! or altering a length field would turn the last complete record into
+//! the "torn" prefix of a longer one and erase it on open.
+//!
 //! Each record is written with one `write_all` followed by `sync_data`,
 //! and only then is the use reported as recorded. A crash in between can
-//! leave a torn tail: a proper prefix of a record whose readable fields
-//! are consistent (the right `prev_hash`, a length in bounds). On open a
-//! torn tail is tolerated and cut off at the next write; nothing before
-//! it is lost, and the use it would have recorded was never reported.
+//! leave a torn tail: fewer than [`RECORD_BYTES`] trailing bytes whose
+//! readable fields are consistent (the right `prev_hash`, a length in
+//! bounds). On open a torn tail is tolerated and cut off at the next
+//! write; nothing before it is lost, and the use it would have recorded
+//! was never reported.
 //!
 //! Anything else that does not verify, a wrong header, a record whose
 //! `prev_hash` is not the chain head, a hash that does not match, a
@@ -65,9 +71,12 @@ pub const LOG_HEADER: &[u8] = b"stack-authority/use-log/1\n";
 pub const RECORD_DOMAIN: &[u8] = b"stack-authority/use-record/1\n";
 /// Largest log the store will read on open, in bytes.
 pub const MAX_LOG_BYTES: u64 = 256 * 1024 * 1024;
+/// Length of every record.
+pub const RECORD_BYTES: usize = PREV_HASH_LEN + BODY_LEN + 32;
 
 const PREV_HASH_LEN: usize = 32;
-const FIXED_AFTER_ID: usize = 32 + 1 + 8 + 8 + 32;
+/// id_len, padded id, digest, one_time, expires_at_ms, recorded_at_ms.
+const BODY_LEN: usize = 1 + MAX_ID_BYTES + 32 + 1 + 8 + 8;
 
 fn genesis() -> [u8; 32] {
     let mut h = Sha256::new();
@@ -119,40 +128,47 @@ enum Parsed {
     Corrupt,
 }
 
+fn id_len_ok(b: u8) -> bool {
+    b >= 1 && usize::from(b) <= MAX_ID_BYTES
+}
+
 fn parse_record(bytes: &[u8], head: &[u8; 32]) -> Parsed {
     // A torn tail is a proper prefix of a record that would have been
     // well formed: its readable bytes must agree with what a writer
     // would have put there.
-    let prefix_len = bytes.len().min(PREV_HASH_LEN);
-    if bytes.get(..prefix_len) != head.get(..prefix_len) {
-        return Parsed::Corrupt;
-    }
-    let Some(len_bytes) = bytes.get(PREV_HASH_LEN..PREV_HASH_LEN + 2) else {
+    let Some(record) = bytes.get(..RECORD_BYTES) else {
+        let prefix_len = bytes.len().min(PREV_HASH_LEN);
+        if bytes.get(..prefix_len) != head.get(..prefix_len) {
+            return Parsed::Corrupt;
+        }
+        if bytes.get(PREV_HASH_LEN).is_some_and(|b| !id_len_ok(*b)) {
+            return Parsed::Corrupt;
+        }
         return Parsed::Torn;
     };
-    let Ok(len_arr) = <[u8; 2]>::try_from(len_bytes) else {
+    let body_end = PREV_HASH_LEN + BODY_LEN;
+    let (Some(prev), Some(body), Some(stored_hash)) = (
+        record.get(..PREV_HASH_LEN),
+        record.get(PREV_HASH_LEN..body_end),
+        record.get(body_end..RECORD_BYTES),
+    ) else {
         return Parsed::Corrupt;
     };
-    let id_len = usize::from(u16::from_be_bytes(len_arr));
-    if id_len == 0 || id_len > MAX_ID_BYTES {
+    if prev != head || record_hash(head, body) != stored_hash {
         return Parsed::Corrupt;
     }
-    let total = PREV_HASH_LEN + 2 + id_len + FIXED_AFTER_ID;
-    let Some(record) = bytes.get(..total) else {
-        return Parsed::Torn;
-    };
-    let body_end = total - 32;
-    let (Some(body), Some(stored_hash)) = (record.get(PREV_HASH_LEN..body_end), record.get(body_end..total)) else {
+    let (Some(id_len), Some(id_field), Some(rest)) = (body.first(), body.get(1..1 + MAX_ID_BYTES), body.get(1 + MAX_ID_BYTES..)) else {
         return Parsed::Corrupt;
     };
-    if record_hash(head, body) != stored_hash {
+    if !id_len_ok(*id_len) {
         return Parsed::Corrupt;
     }
-    let id_start = 2;
-    let id_end = id_start + id_len;
-    let (Some(id_raw), Some(rest)) = (body.get(id_start..id_end), body.get(id_end..)) else {
+    let (Some(id_raw), Some(padding)) = (id_field.get(..usize::from(*id_len)), id_field.get(usize::from(*id_len)..)) else {
         return Parsed::Corrupt;
     };
+    if padding.iter().any(|b| *b != 0) {
+        return Parsed::Corrupt;
+    }
     let Ok(cap_id) = std::str::from_utf8(id_raw) else {
         return Parsed::Corrupt;
     };
@@ -173,7 +189,7 @@ fn parse_record(bytes: &[u8], head: &[u8; 32]) -> Parsed {
         digest: CapabilityDigest::from_digest32(Digest32::from_bytes(digest_arr)),
         expires_at_ms: u64::from_be_bytes(expires_arr),
         hash,
-        len: total,
+        len: RECORD_BYTES,
     }
 }
 
@@ -291,16 +307,23 @@ impl FileUseStore {
     }
 
     fn append(inner: &mut Inner, key: &UseKey<'_>, one_time: bool, expires_at_ms: u64, now_ms: u64) -> std::io::Result<()> {
-        let mut body = Vec::with_capacity(2 + key.cap_id.len() + FIXED_AFTER_ID);
-        let id_len = u16::try_from(key.cap_id.len()).map_err(|_| std::io::Error::other("id length"))?;
-        body.extend_from_slice(&id_len.to_be_bytes());
+        let mut body = Vec::with_capacity(BODY_LEN);
+        let id_len = u8::try_from(key.cap_id.len()).map_err(|_| std::io::Error::other("id length"))?;
+        if !id_len_ok(id_len) {
+            return Err(std::io::Error::other("id length"));
+        }
+        body.push(id_len);
         body.extend_from_slice(key.cap_id.as_bytes());
+        body.resize(1 + MAX_ID_BYTES, 0);
         body.extend_from_slice(key.digest.as_bytes());
         body.push(u8::from(one_time));
         body.extend_from_slice(&expires_at_ms.to_be_bytes());
         body.extend_from_slice(&now_ms.to_be_bytes());
+        if body.len() != BODY_LEN {
+            return Err(std::io::Error::other("record length"));
+        }
         let hash = record_hash(&inner.head, &body);
-        let mut record = Vec::with_capacity(PREV_HASH_LEN + body.len() + 32);
+        let mut record = Vec::with_capacity(RECORD_BYTES);
         record.extend_from_slice(&inner.head);
         record.extend_from_slice(&body);
         record.extend_from_slice(&hash);
