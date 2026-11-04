@@ -28,6 +28,14 @@
 //! Everything the Trident can carry renders byte-for-byte as Python renders
 //! it; the shared vectors in `tests/cns_digest.rs` check that.
 //!
+//! Depth: [`subject_digest`] called directly accepts `limits.max_depth`
+//! levels of nesting, the top-level object being level 1. An envelope
+//! payload gets one level less, because the envelope object is level 1 and
+//! the payload is encoded under the same limits before this runs. The
+//! declared sub-domain (`restricted_v1`, at most 31 levels at the default
+//! `max_depth` of 32) is the envelope rule; `docs/cns-digest-contract.md`
+//! states it and the tests pin both numbers.
+//!
 //! This digest binds the payload to the verdict. It is separate from the
 //! canonical JSON in [`crate::canonical`], which the MAC still covers: the MAC
 //! authenticates the exact wire bytes, and the digest names the content in the
@@ -57,11 +65,43 @@ pub fn subject_digest_raw(content: &Value, limits: &Limits) -> Result<[u8; 32], 
     Ok(hasher.finalize().into())
 }
 
-fn put(h: &mut Sha256, s: &str) {
-    h.update(s.as_bytes());
+/// The exact CNS rendering (`cns.gate._canonical`) that [`subject_digest`]
+/// hashes, as a string, under the same limits and with the same refusals.
+/// For comparing rendering bytes with other implementations; the digest
+/// path never builds this string.
+pub fn canonical_rendering(content: &Value, limits: &Limits) -> Result<String, CanonicalError> {
+    let mut out = String::new();
+    render(content, 1, limits.max_depth, &mut out)?;
+    Ok(out)
 }
 
-fn render(v: &Value, depth: usize, max_depth: usize, h: &mut Sha256) -> Result<(), CanonicalError> {
+/// Where a rendering goes: into the hash, or into a string.
+trait Sink {
+    fn put(&mut self, s: &str);
+}
+
+impl Sink for Sha256 {
+    fn put(&mut self, s: &str) {
+        self.update(s.as_bytes());
+    }
+}
+
+impl Sink for String {
+    fn put(&mut self, s: &str) {
+        self.push_str(s);
+    }
+}
+
+fn put<S: Sink>(h: &mut S, s: &str) {
+    h.put(s);
+}
+
+fn render<S: Sink>(
+    v: &Value,
+    depth: usize,
+    max_depth: usize,
+    h: &mut S,
+) -> Result<(), CanonicalError> {
     match v {
         Value::Null => put(h, "n:"),
         Value::Bool(true) => put(h, "b:1"),
@@ -119,7 +159,7 @@ fn render(v: &Value, depth: usize, max_depth: usize, h: &mut Sha256) -> Result<(
     Ok(())
 }
 
-fn render_str(s: &str, h: &mut Sha256) {
+fn render_str<S: Sink>(s: &str, h: &mut S) {
     // Python's len() counts code points, not bytes.
     put(h, "s:");
     put(h, &s.chars().count().to_string());
