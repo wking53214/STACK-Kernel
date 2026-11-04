@@ -28,23 +28,31 @@
 //!
 //! Step 1: the capability type, its one wire encoding, the strict parser
 //! and the digest. Step 2: the trust set, the revocation list and strict
-//! signature verification. Authorization and the use store follow in
-//! later steps.
+//! signature verification. Step 3: the [`Authority`], its ordered checks
+//! (see [`authority`]), the [`AuthorizedAction`] it alone can mint, the
+//! [`UseStore`] trait and the non-durable [`MemoryUseStore`]. The durable
+//! file store follows in step 4.
 
 #![forbid(unsafe_code)]
 
+pub mod authority;
 pub mod capability;
+pub mod clock;
 pub mod digest;
 pub mod scope;
+pub mod store;
 pub mod trust;
 
+pub use authority::{ActionRequest, AuthorizedAction, Authority, AuthorityConfig, AuthzError, ConfigError};
 pub use capability::{
     Capability, CapabilityDigest, Field, ParseError, SignedCapability, DIGEST_DOMAIN, DOMAIN_TAG, KEY_ID_BYTES,
     MAX_ID_BYTES, MAX_OPERATIONS, MAX_OPERATION_BYTES, MAX_POLICY_REF_BYTES, MAX_RESOURCES, MAX_WIRE_BYTES,
-    NONCE_BYTES, SIGNATURE_BYTES,
+    MIN_WIRE_BYTES, NONCE_BYTES, SIGNATURE_BYTES,
 };
+pub use clock::{Clock, ManualClock, SystemClock};
 pub use digest::Digest32;
 pub use scope::{validate_path, PathError, ResourceScope, ScopeKind, MAX_PATH_BYTES};
+pub use store::{MemoryUseStore, UseError, UseKey, UseStore};
 pub use trust::{
     AnchorStatus, BadSignature, KeyId, PublicKey, Purpose, ResolveError, RevocationList, TrustAnchor, TrustError,
     TrustSet, KEY_ID_DOMAIN,

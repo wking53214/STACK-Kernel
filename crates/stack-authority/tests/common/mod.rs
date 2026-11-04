@@ -10,8 +10,8 @@
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use stack_authority::{
-    Capability, Digest32, KeyId, PublicKey, Purpose, ResourceScope, ScopeKind, TrustAnchor, TrustSet, KEY_ID_BYTES,
-    NONCE_BYTES,
+    ActionRequest, Authority, AuthorityConfig, Capability, Digest32, KeyId, MemoryUseStore, PublicKey, Purpose,
+    ResourceScope, RevocationList, ScopeKind, TrustAnchor, TrustSet, KEY_ID_BYTES, NONCE_BYTES,
 };
 
 /// Start of test time (a fixed Unix ms value).
@@ -72,6 +72,46 @@ pub fn issue(cap: &Capability, key_label: &str) -> Vec<u8> {
 /// The baseline capability signed by `issuer-1`.
 pub fn baseline_wire() -> Vec<u8> {
     issue(&baseline_capability(), "issuer-1")
+}
+
+/// A request that the baseline capability grants: `read` on `/data/a`
+/// about the fixture subject under the fixture decision.
+pub fn baseline_request() -> ActionRequest {
+    ActionRequest {
+        subject_digest: fixture_digest("subject"),
+        decision_root: fixture_digest("decision"),
+        operation: "read".into(),
+        resource: "/data/a".into(),
+    }
+}
+
+/// Production configuration for the `kernel-a` verifier.
+pub fn production_config() -> AuthorityConfig {
+    AuthorityConfig::new("kernel-a")
+}
+
+/// The `kernel-a` configuration with the durable-store requirement
+/// switched off, for tests that use [`MemoryUseStore`].
+pub fn memory_store_config() -> AuthorityConfig {
+    AuthorityConfig {
+        require_durable_use_store: false,
+        ..production_config()
+    }
+}
+
+/// A verifier for `kernel-a` trusting `issuer-1`, with no revocations.
+pub fn authority_with(config: AuthorityConfig) -> Authority {
+    Authority::new(config, baseline_trust_set(), RevocationList::new(1024)).unwrap()
+}
+
+/// [`authority_with`] under [`memory_store_config`].
+pub fn memory_authority() -> Authority {
+    authority_with(memory_store_config())
+}
+
+/// A fresh in-memory use store.
+pub fn memory_store() -> MemoryUseStore {
+    MemoryUseStore::new(1024)
 }
 
 /// A deterministic 32-byte value from a label, for digests and ids.

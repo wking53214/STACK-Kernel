@@ -96,6 +96,24 @@ pub const MAX_WIRE_BYTES: usize = DOMAIN_TAG.len()
     + KEY_ID_BYTES
     + SIGNATURE_BYTES;
 
+/// The shortest wire form the format can express: one-byte identifiers,
+/// one one-byte operation, one one-byte path, an empty policy reference.
+pub const MIN_WIRE_BYTES: usize = DOMAIN_TAG.len()
+    + 3 * (2 + 1)
+    + 32
+    + 32
+    + 2
+    + (2 + 1)
+    + 2
+    + (1 + 2 + 1)
+    + 8
+    + 8
+    + 1
+    + 2
+    + NONCE_BYTES
+    + KEY_ID_BYTES
+    + SIGNATURE_BYTES;
+
 /// Which field an error is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
