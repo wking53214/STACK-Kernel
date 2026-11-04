@@ -1,0 +1,845 @@
+#pragma once
+
+/**
+ * STACK KERNEL: Supervised execution in a child process.
+ *
+ * WHY THIS EXISTS
+ *
+ * The in-process path (GovernedMinotaurHost::ExecuteGovernedTransaction)
+ * runs the payload on the caller's thread under a CPU-time timer whose
+ * handler only sets a flag. It cannot stop a payload that never returns,
+ * never notices a payload blocked in a syscall (no CPU time passes), and
+ * its allowlist lets the payload disarm the timer. That path is a
+ * cooperative deadline, not isolation (D-02).
+ *
+ * SupervisedExecutor runs the payload in a forked child process and
+ * supervises it from the parent with a wall-clock deadline that ends in
+ * SIGKILL. A payload cannot block, catch or ignore SIGKILL, so the
+ * deadline holds for a spinning payload, a blocked payload, a payload that
+ * changes its signal dispositions or mask, and a payload that deadlocks.
+ *
+ * WHAT THE CHILD IS GIVEN
+ *
+ *   - its own process group (setpgid), so the kill reaches anything the
+ *     payload managed to spawn (it should not be able to: see the filter);
+ *   - PR_SET_PDEATHSIG = SIGKILL, so it dies if the supervising thread dies;
+ *   - default signal dispositions and an empty signal mask, so handlers
+ *     inherited from the parent (a test framework's, for example) cannot
+ *     run inside the sandbox;
+ *   - stdin, stdout and stderr on /dev/null, the result pipe, and at most
+ *     one caller-chosen read-only descriptor (Limits::inherit_fd); every
+ *     other descriptor is closed;
+ *   - rlimits: CORE 0, CPU (derived from the deadline unless given), AS
+ *     (if given), FSIZE, NPROC 0, NOFILE just above the highest kept fd;
+ *   - PR_SET_NO_NEW_PRIVS and a strict seccomp filter: architecture check,
+ *     then an allowlist of what a computing payload needs (memory,
+ *     clocks, futex, signal bookkeeping so abort() works, read on fd 0 and
+ *     the inherited fd, write on fds 1, 2 and the result pipe, exit).
+ *     Everything else is SECCOMP_RET_KILL_PROCESS, which ends the child
+ *     with SIGSYS and is classified as SeccompViolation by the parent.
+ *
+ * WHAT THE PARENT GUARANTEES
+ *
+ *   - The deadline is measured on CLOCK_MONOTONIC from before the fork.
+ *     When it passes, the child's process group and the child are sent
+ *     SIGKILL and the result is TimedOut, even if the child exited in the
+ *     same instant with a complete result.
+ *   - Completed is reported only when all of the following hold: the
+ *     deadline had not passed when the exit was observed, the child
+ *     exited with status 0, and a complete, well-formed result frame with
+ *     a matching checksum arrived with nothing after it. Any other
+ *     combination is one of the failure outcomes; ambiguity never becomes
+ *     success.
+ *   - The child is always reaped and both parent-side descriptors are
+ *     always closed, on every path. There is no heap allocation in the
+ *     parent; the result goes into the caller's buffer.
+ *
+ * WHAT IT DOES NOT DO (read cpp/CONTAINMENT.md)
+ *
+ *   - No namespaces, no cgroups, no user switch, no chroot: the child
+ *     shares the parent's address space contents (it is a fork), its
+ *     uid, its filesystem view and its network namespace. The seccomp
+ *     filter is what keeps the payload from reaching them; a kernel
+ *     bug in seccomp or in an allowed syscall is outside this model.
+ *   - fork() in a multithreaded parent copies only the calling thread.
+ *     Locks held by other threads at that instant stay held in the child
+ *     forever. glibc protects malloc, but a payload that touches another
+ *     lock can deadlock. The deadline is the backstop: a deadlocked
+ *     child is killed and reported TimedOut, never Completed.
+ *   - Resource limits are best effort: RLIMIT_AS makes allocation fail
+ *     inside the child (which usually ends in abort, so Crashed) and
+ *     RLIMIT_CPU ends in SIGXCPU (ResourceLimit); neither is observed by
+ *     the parent as a limit event in its own right.
+ *   - The payload runs on its own stack (makecontext) whose bottom frame
+ *     ends the unwind chain. An exception that escapes the payload cannot
+ *     reach the frames the child inherited from the parent (a test
+ *     framework's handlers, for instance) and so cannot run parent code
+ *     inside the sandbox; it ends in std::terminate, abort and Crashed.
+ *   - The result frame checksum (FNV-1a 64) detects truncation and
+ *     interleaving on the pipe. It is not a MAC: the payload itself
+ *     writes to the result descriptor, so the bytes are the payload's
+ *     claim, not an attestation.
+ *   - x86_64 and aarch64 only. Linux 5.3+ for pidfd_open (older kernels
+ *     fall back to waitpid polling at 5 ms granularity), 5.9+ for
+ *     close_range (older kernels close descriptors one by one).
+ */
+
+#include <cerrno>
+#include <csignal>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <ctime>
+#include <type_traits>
+#include <utility>
+
+#include <fcntl.h>
+#include <poll.h>
+#include <ucontext.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+
+namespace stack::supervised {
+
+enum class Outcome : uint8_t {
+    Completed = 0,        // exit 0, complete valid frame, deadline not passed
+    TimedOut = 1,         // wall-clock deadline passed; child killed
+    Crashed = 2,          // child ended by a signal other than SIGSYS/SIGXCPU/SIGXFSZ
+    SeccompViolation = 3, // child ended by SIGSYS (filter kill)
+    ExitedNonZero = 4,    // child exited with a non-zero status
+    ResultMissing = 5,    // exit 0 but no complete, valid result frame
+    ResultOversized = 6,  // frame announced more bytes than max_output_bytes
+    ResourceLimit = 7,    // child ended by SIGXCPU or SIGXFSZ
+    SpawnFailed = 8,      // pipe/fork failed, or the child could not set up its sandbox
+    SupervisorError = 9,  // poll/waitpid failure in the parent
+    InvalidLimits = 10    // Limits rejected before anything was spawned
+};
+
+/** Upper bound on a deadline: one hour. Larger values are InvalidLimits. */
+inline constexpr uint64_t kMaxWallClockDeadlineNs = 3'600'000'000'000ULL;
+/** Upper bound on a result: 1 MiB. Larger max_output_bytes is InvalidLimits. */
+inline constexpr std::size_t kMaxOutputBytes = 1u << 20;
+
+struct Limits {
+    /** Required, 1 .. kMaxWallClockDeadlineNs. */
+    uint64_t wall_clock_deadline_ns = 0;
+    /** RLIMIT_CPU soft limit in seconds; 0 derives ceil(deadline) + 1. */
+    uint64_t cpu_seconds = 0;
+    /** RLIMIT_AS in bytes; 0 leaves the inherited limit. */
+    uint64_t address_space_bytes = 0;
+    /** Largest result accepted, <= kMaxOutputBytes and <= the caller's buffer. */
+    uint64_t max_output_bytes = 4096;
+    /** RLIMIT_FSIZE in bytes; 0 forbids writing to regular files. Pipes are unaffected. */
+    uint64_t file_size_bytes = 0;
+    /** RLIMIT_NOFILE; 0 derives (highest kept descriptor + 1), which is also the floor. */
+    uint32_t nofile = 0;
+    /** One descriptor (>= 3) kept open in the child for the payload to read, or -1. */
+    int inherit_fd = -1;
+};
+
+struct ExecutionReport {
+    Outcome outcome = Outcome::SupervisorError;
+    /** Wall-clock time from before the fork to after the reap. */
+    uint64_t elapsed_ns = 0;
+    /** Exit status when the child exited; the setup code (120..127) on SpawnFailed from the child. */
+    int exit_code = -1;
+    /** Terminating signal when the child was signaled, else 0. */
+    int signal_number = 0;
+    /** errno of the failing parent-side call on SpawnFailed / SupervisorError, else 0. */
+    int error_number = 0;
+    /** 0 when nothing was forked. */
+    pid_t child_pid = 0;
+    /** True when the deadline passed before the exit was observed. */
+    bool deadline_fired = false;
+    /** Bytes placed in the caller's buffer; meaningful only on Completed. */
+    uint64_t result_length = 0;
+};
+
+/** Payload entry used by the child: writes up to capacity bytes to out and returns the count. */
+using PayloadThunk = std::size_t (*)(void* context, uint8_t* out, std::size_t capacity);
+
+class SupervisedExecutor {
+public:
+    /**
+     * Runs payload(out, capacity) in a supervised child. payload may return
+     * std::size_t (bytes written) or void (no result bytes). The result is
+     * copied into result[0..result_capacity) and its length reported.
+     */
+    template <typename Payload>
+    [[nodiscard]] static ExecutionReport Run(const Limits& limits, Payload&& payload,
+                                             uint8_t* result, std::size_t result_capacity) noexcept {
+        using P = std::remove_reference_t<Payload>;
+        PayloadThunk thunk = [](void* context, uint8_t* out, std::size_t capacity) -> std::size_t {
+            P& fn = *static_cast<P*>(context);
+            if constexpr (std::is_void_v<decltype(fn(out, capacity))>) {
+                fn(out, capacity);
+                return 0;
+            } else {
+                return static_cast<std::size_t>(fn(out, capacity));
+            }
+        };
+        return RunThunk(limits, thunk, static_cast<void*>(&payload), result, result_capacity);
+    }
+
+    /** Type-erased form for C callers (the FFI). */
+    [[nodiscard]] static ExecutionReport RunThunk(const Limits& limits, PayloadThunk payload, void* context,
+                                                  uint8_t* result, std::size_t result_capacity) noexcept {
+        ExecutionReport report{};
+        if (!LimitsAreValid(limits, result, result_capacity)) {
+            report.outcome = Outcome::InvalidLimits;
+            return report;
+        }
+        const uint64_t t0 = MonotonicNs();
+        const uint64_t deadline = t0 + limits.wall_clock_deadline_ns;
+
+        int pipe_fds[2] = {-1, -1};
+        if (::pipe2(pipe_fds, O_CLOEXEC) != 0) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+        FdGuard pipe_r{pipe_fds[0]};
+        FdGuard pipe_w{pipe_fds[1]};
+        // The child puts /dev/null on 0, 1 and 2; the pipe must not sit there.
+        if (!pipe_r.RaiseAbove(2) || !pipe_w.RaiseAbove(2)) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+
+        const pid_t parent_pid = ::getpid();
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+        if (pid == 0) {
+            ::close(pipe_r.fd);
+            ChildMain(limits, payload, context, pipe_w.fd, parent_pid);  // never returns
+        }
+
+        // Parent.
+        report.child_pid = pid;
+        pipe_w.Close();
+        (void)::setpgid(pid, pid);  // the child does the same; whichever runs first wins
+        (void)::fcntl(pipe_r.fd, F_SETFL, O_NONBLOCK);
+        FdGuard pidfd{PidfdOpen(pid)};
+
+        FrameParser parser{result, result_capacity, static_cast<std::size_t>(limits.max_output_bytes)};
+        int status = 0;
+        bool exited = false;
+        bool reaped = false;
+        bool pipe_eof = false;
+        bool poll_failed = false;
+        int poll_errno = 0;
+
+        while (!exited) {
+            const uint64_t now = MonotonicNs();
+            if (now >= deadline) {
+                report.deadline_fired = true;
+                break;
+            }
+            const uint64_t remaining_ns = deadline - now;
+            int timeout_ms = static_cast<int>((remaining_ns + 999'999ULL) / 1'000'000ULL);
+            if (pidfd.fd < 0 && timeout_ms > 5) timeout_ms = 5;  // waitpid polling fallback
+            if (timeout_ms < 1) timeout_ms = 1;
+
+            pollfd fds[2];
+            nfds_t n = 0;
+            if (!pipe_eof) {
+                fds[n].fd = pipe_r.fd;
+                fds[n].events = POLLIN;
+                fds[n].revents = 0;
+                ++n;
+            }
+            if (pidfd.fd >= 0) {
+                fds[n].fd = pidfd.fd;
+                fds[n].events = POLLIN;
+                fds[n].revents = 0;
+                ++n;
+            }
+            const int pr = ::poll(fds, n, timeout_ms);
+            if (pr < 0) {
+                if (errno == EINTR) continue;
+                poll_failed = true;
+                poll_errno = errno;
+                break;
+            }
+            for (nfds_t i = 0; i < n; ++i) {
+                if (fds[i].revents == 0) continue;
+                if (fds[i].fd == pipe_r.fd) {
+                    if (!DrainPipe(pipe_r.fd, parser, pipe_eof)) {
+                        poll_failed = true;
+                        poll_errno = errno;
+                    }
+                    if (parser.state == FrameParser::State::Oversized) {
+                        // Nothing more is accepted; stop the child now.
+                        KillChild(pid);
+                    }
+                } else if (pidfd.fd >= 0 && fds[i].fd == pidfd.fd) {
+                    exited = true;
+                }
+            }
+            if (poll_failed) break;
+            if (!exited && pidfd.fd < 0) {
+                const pid_t w = ::waitpid(pid, &status, WNOHANG);
+                if (w == pid) {
+                    exited = true;
+                    reaped = true;
+                } else if (w < 0 && errno != EINTR) {
+                    poll_failed = true;
+                    poll_errno = errno;
+                    break;
+                }
+            }
+            if (exited && MonotonicNs() >= deadline) {
+                // Exit observed only after the deadline: strict, never success.
+                report.deadline_fired = true;
+            }
+        }
+
+        if (report.deadline_fired || poll_failed) {
+            KillChild(pid);
+        }
+        // Always reap. With the waitpid fallback the child may be reaped already.
+        if (!reaped) {
+            for (;;) {
+                const pid_t w = ::waitpid(pid, &status, 0);
+                if (w == pid) break;
+                if (w < 0 && errno == EINTR) continue;
+                report.outcome = Outcome::SupervisorError;
+                report.error_number = errno;
+                report.elapsed_ns = MonotonicNs() - t0;
+                return report;
+            }
+        }
+        // Whatever the child wrote before dying is in the pipe; take it, bounded.
+        if (!pipe_eof) DrainPipeAfterExit(pipe_r.fd, parser, pipe_eof);
+
+        report.elapsed_ns = MonotonicNs() - t0;
+        Classify(report, status, parser, poll_failed, poll_errno);
+        return report;
+    }
+
+    [[nodiscard]] static bool LimitsAreValid(const Limits& limits, const uint8_t* result,
+                                             std::size_t result_capacity) noexcept {
+        if (limits.wall_clock_deadline_ns == 0 || limits.wall_clock_deadline_ns > kMaxWallClockDeadlineNs) return false;
+        if (limits.max_output_bytes > kMaxOutputBytes) return false;
+        if (limits.max_output_bytes > result_capacity) return false;
+        if (result == nullptr && limits.max_output_bytes > 0) return false;
+        if (limits.inherit_fd < -1 || (limits.inherit_fd >= 0 && limits.inherit_fd < 3)) return false;
+        return true;
+    }
+
+private:
+    // ------------------------------------------------------------------
+    // Result frame: magic "STKR", u32 length, bytes, u64 FNV-1a of bytes.
+    // ------------------------------------------------------------------
+    static constexpr uint32_t kFrameMagic = 0x524B5453u;  // "STKR" little-endian
+    static constexpr uint64_t kFnvOffset = 0xcbf29ce484222325ULL;
+    static constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
+
+    struct FrameParser {
+        enum class State : uint8_t { Header, Body, Trailer, Done, Invalid, Oversized };
+        uint8_t* out;
+        std::size_t out_capacity;
+        std::size_t max_len;
+        State state = State::Header;
+        uint8_t head[8]{};
+        std::size_t head_n = 0;
+        uint32_t body_len = 0;
+        std::size_t body_n = 0;
+        uint8_t trailer[8]{};
+        std::size_t trailer_n = 0;
+        uint64_t hash = kFnvOffset;
+
+        void Feed(const uint8_t* p, std::size_t n) noexcept {
+            while (n > 0) {
+                switch (state) {
+                case State::Header: {
+                    head[head_n++] = *p++;
+                    --n;
+                    if (head_n == 8) {
+                        uint32_t magic = 0;
+                        std::memcpy(&magic, head, 4);
+                        std::memcpy(&body_len, head + 4, 4);
+                        if (magic != kFrameMagic) { state = State::Invalid; return; }
+                        if (body_len > max_len || body_len > out_capacity) { state = State::Oversized; return; }
+                        state = body_len == 0 ? State::Trailer : State::Body;
+                    }
+                    break;
+                }
+                case State::Body: {
+                    std::size_t take = body_len - body_n;
+                    if (take > n) take = n;
+                    std::memcpy(out + body_n, p, take);
+                    for (std::size_t i = 0; i < take; ++i) {
+                        hash ^= p[i];
+                        hash *= kFnvPrime;
+                    }
+                    body_n += take;
+                    p += take;
+                    n -= take;
+                    if (body_n == body_len) state = State::Trailer;
+                    break;
+                }
+                case State::Trailer: {
+                    trailer[trailer_n++] = *p++;
+                    --n;
+                    if (trailer_n == 8) {
+                        uint64_t claimed = 0;
+                        std::memcpy(&claimed, trailer, 8);
+                        state = claimed == hash ? State::Done : State::Invalid;
+                    }
+                    break;
+                }
+                case State::Done:
+                    state = State::Invalid;  // trailing bytes: not a clean frame
+                    return;
+                case State::Invalid:
+                case State::Oversized:
+                    return;
+                }
+            }
+        }
+    };
+
+    struct FdGuard {
+        int fd;
+        explicit FdGuard(int f) noexcept : fd(f) {}
+        FdGuard(const FdGuard&) = delete;
+        FdGuard& operator=(const FdGuard&) = delete;
+        ~FdGuard() noexcept { Close(); }
+        void Close() noexcept {
+            if (fd >= 0) { ::close(fd); fd = -1; }
+        }
+        [[nodiscard]] bool RaiseAbove(int floor) noexcept {
+            if (fd > floor) return true;
+            const int moved = ::fcntl(fd, F_DUPFD_CLOEXEC, floor + 1);
+            if (moved < 0) return false;
+            ::close(fd);
+            fd = moved;
+            return true;
+        }
+    };
+
+    // Child setup failures, reported to the parent as SpawnFailed with this exit code.
+    enum ChildExit : int {
+        kExitParentGone = 120,
+        kExitSignalReset = 121,
+        kExitDescriptors = 122,
+        kExitRlimits = 123,
+        kExitSeccomp = 124,
+        kExitChildMemory = 125,     // output buffer or payload stack could not be mapped
+        kExitResultOverflow = 126,  // payload claimed more than kMaxOutputBytes
+        kExitResultWrite = 127
+    };
+
+    [[nodiscard]] static uint64_t MonotonicNs() noexcept {
+        timespec ts{};
+        ::clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL + static_cast<uint64_t>(ts.tv_nsec);
+    }
+
+    [[nodiscard]] static int PidfdOpen(pid_t pid) noexcept {
+#ifdef __NR_pidfd_open
+        const long r = ::syscall(__NR_pidfd_open, pid, 0);
+        return r < 0 ? -1 : static_cast<int>(r);
+#else
+        (void)pid;
+        return -1;
+#endif
+    }
+
+    static void KillChild(pid_t pid) noexcept {
+        (void)::kill(-pid, SIGKILL);
+        (void)::kill(pid, SIGKILL);
+    }
+
+    // Reads what is available now. Returns false on a hard read error.
+    [[nodiscard]] static bool DrainPipe(int fd, FrameParser& parser, bool& eof) noexcept {
+        uint8_t chunk[4096];
+        for (;;) {
+            const ssize_t r = ::read(fd, chunk, sizeof chunk);
+            if (r > 0) {
+                parser.Feed(chunk, static_cast<std::size_t>(r));
+                continue;
+            }
+            if (r == 0) { eof = true; return true; }
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN) return true;
+            eof = true;
+            return false;
+        }
+    }
+
+    // After the child is gone its write end is closed by the kernel, so the
+    // pipe drains to EOF. A sibling child forked concurrently by another
+    // thread can hold a copy of the write end for the microseconds before
+    // it closes its inherited descriptors, so the wait is bounded.
+    static void DrainPipeAfterExit(int fd, FrameParser& parser, bool& eof) noexcept {
+        for (int rounds = 0; rounds < 50 && !eof; ++rounds) {
+            if (!DrainPipe(fd, parser, eof)) return;
+            if (eof) return;
+            pollfd p{fd, POLLIN, 0};
+            const int pr = ::poll(&p, 1, 20);
+            if (pr == 0) return;
+            if (pr < 0 && errno != EINTR) return;
+        }
+    }
+
+    static void Classify(ExecutionReport& report, int status, const FrameParser& parser,
+                         bool poll_failed, int poll_errno) noexcept {
+        if (WIFSIGNALED(status)) report.signal_number = WTERMSIG(status);
+        if (WIFEXITED(status)) report.exit_code = WEXITSTATUS(status);
+
+        if (report.deadline_fired) { report.outcome = Outcome::TimedOut; return; }
+        if (poll_failed) {
+            report.outcome = Outcome::SupervisorError;
+            report.error_number = poll_errno;
+            return;
+        }
+        if (parser.state == FrameParser::State::Oversized) { report.outcome = Outcome::ResultOversized; return; }
+        if (WIFSIGNALED(status)) {
+            const int sig = WTERMSIG(status);
+            if (sig == SIGSYS) report.outcome = Outcome::SeccompViolation;
+            else if (sig == SIGXCPU || sig == SIGXFSZ) report.outcome = Outcome::ResourceLimit;
+            else report.outcome = Outcome::Crashed;
+            return;
+        }
+        if (!WIFEXITED(status)) { report.outcome = Outcome::SupervisorError; return; }
+        const int code = WEXITSTATUS(status);
+        if (code >= kExitParentGone && code <= kExitResultWrite) { report.outcome = Outcome::SpawnFailed; return; }
+        if (code != 0) { report.outcome = Outcome::ExitedNonZero; return; }
+        if (parser.state == FrameParser::State::Done) {
+            report.outcome = Outcome::Completed;
+            report.result_length = parser.body_len;
+            return;
+        }
+        report.outcome = Outcome::ResultMissing;
+    }
+
+    // ------------------------------------------------------------------
+    // Child side. Only raw syscalls and the payload run here; no heap use
+    // before the payload, no C++ teardown (every exit is _exit).
+    // ------------------------------------------------------------------
+    [[noreturn]] static void ChildMain(const Limits& limits, PayloadThunk payload, void* context,
+                                       int result_fd, pid_t parent_pid) noexcept {
+        (void)::setpgid(0, 0);
+        (void)::prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+        if (::getppid() != parent_pid) ::_exit(kExitParentGone);
+
+        if (!ResetSignals()) ::_exit(kExitSignalReset);
+
+        // Output buffer and payload stack before the address-space limit so
+        // the limit cannot take them away. Lazily backed: unused pages cost
+        // nothing. The stack has a guard page below it.
+        const std::size_t out_bytes = kMaxOutputBytes;
+        void* out_map = ::mmap(nullptr, out_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (out_map == MAP_FAILED) ::_exit(kExitChildMemory);
+        auto* out = static_cast<uint8_t*>(out_map);
+        void* stack_map = ::mmap(nullptr, kPayloadStackBytes + kGuardBytes, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
+        if (stack_map == MAP_FAILED) ::_exit(kExitChildMemory);
+        if (::mprotect(stack_map, kGuardBytes, PROT_NONE) != 0) ::_exit(kExitChildMemory);
+
+        ucontext_t main_context{};
+        ucontext_t payload_context{};
+        if (::getcontext(&payload_context) != 0) ::_exit(kExitChildMemory);
+        payload_context.uc_stack.ss_sp = static_cast<uint8_t*>(stack_map) + kGuardBytes;
+        payload_context.uc_stack.ss_size = kPayloadStackBytes;
+        payload_context.uc_link = &main_context;
+        ::makecontext(&payload_context, &PayloadTrampoline, 0);
+
+        if (!SanitizeDescriptors(result_fd, limits.inherit_fd)) ::_exit(kExitDescriptors);
+        if (!ApplyRlimits(limits, result_fd)) ::_exit(kExitRlimits);
+        if (!InstallFilter(result_fd, limits.inherit_fd, ::getpid())) ::_exit(kExitSeccomp);
+
+        // The child is a private copy, so these process-wide slots are ours.
+        child_payload_ = payload;
+        child_context_ = context;
+        child_out_ = out;
+        child_capacity_ = static_cast<std::size_t>(limits.max_output_bytes);
+        child_len_ = 0;
+        if (::swapcontext(&main_context, &payload_context) != 0) ::_exit(kExitChildMemory);
+
+        const std::size_t len = child_len_;
+        if (len > out_bytes) ::_exit(kExitResultOverflow);
+        if (!WriteFrame(result_fd, out, len)) ::_exit(kExitResultWrite);
+        ::_exit(0);
+    }
+
+    static constexpr std::size_t kPayloadStackBytes = 8u << 20;
+    static constexpr std::size_t kGuardBytes = 1u << 16;
+
+    static inline PayloadThunk child_payload_ = nullptr;
+    static inline void* child_context_ = nullptr;
+    static inline uint8_t* child_out_ = nullptr;
+    static inline std::size_t child_capacity_ = 0;
+    static inline std::size_t child_len_ = 0;
+
+    // Runs on the payload stack. Returning resumes main_context via uc_link.
+    static void PayloadTrampoline() noexcept {
+        child_len_ = child_payload_(child_context_, child_out_, child_capacity_);
+    }
+
+    [[nodiscard]] static bool ResetSignals() noexcept {
+        struct sigaction dfl{};
+        dfl.sa_handler = SIG_DFL;
+        ::sigemptyset(&dfl.sa_mask);
+        for (int sig = 1; sig < NSIG; ++sig) {
+            if (sig == SIGKILL || sig == SIGSTOP) continue;
+            if (sig >= SIGRTMIN && sig <= SIGRTMAX) {
+                // glibc reserves the lowest real-time signals; a failure there is not ours.
+                (void)::sigaction(sig, &dfl, nullptr);
+                continue;
+            }
+            if (::sigaction(sig, &dfl, nullptr) != 0 && errno != EINVAL) return false;
+        }
+        sigset_t none;
+        ::sigemptyset(&none);
+        return ::sigprocmask(SIG_SETMASK, &none, nullptr) == 0;
+    }
+
+    [[nodiscard]] static bool SanitizeDescriptors(int result_fd, int inherit_fd) noexcept {
+        const int devnull = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (devnull < 0) return false;
+        for (int fd = 0; fd <= 2; ++fd) {
+            if (::dup2(devnull, fd) != fd) return false;
+        }
+        if (devnull > 2) ::close(devnull);
+        // Close everything except 0..2, result_fd and inherit_fd.
+        int keep[2] = {result_fd, inherit_fd};
+        if (keep[0] > keep[1]) { const int t = keep[0]; keep[0] = keep[1]; keep[1] = t; }
+        int lo = 3;
+        for (int k : keep) {
+            if (k < 3) continue;
+            if (k > lo) CloseRange(lo, k - 1);
+            lo = k + 1;
+        }
+        CloseRange(lo, ~0);
+        return true;
+    }
+
+    static void CloseRange(int first, int last) noexcept {
+        if (first > last) return;
+#ifdef __NR_close_range
+        if (::syscall(__NR_close_range, static_cast<unsigned>(first), static_cast<unsigned>(last), 0) == 0) return;
+#endif
+        rlimit nofile{};
+        long limit = 65536;
+        if (::getrlimit(RLIMIT_NOFILE, &nofile) == 0 && nofile.rlim_cur != RLIM_INFINITY &&
+            static_cast<long>(nofile.rlim_cur) < limit) {
+            limit = static_cast<long>(nofile.rlim_cur);
+        }
+        const long stop = (last == ~0 || static_cast<long>(last) >= limit) ? limit - 1 : last;
+        for (long fd = first; fd <= stop; ++fd) (void)::close(static_cast<int>(fd));
+    }
+
+    [[nodiscard]] static bool ApplyRlimits(const Limits& limits, int result_fd) noexcept {
+        rlimit lim{};
+        lim.rlim_cur = 0;
+        lim.rlim_max = 0;
+        if (::setrlimit(RLIMIT_CORE, &lim) != 0) return false;
+        // NPROC is not enforced for a privileged uid; the filter denies clone anyway.
+        (void)::setrlimit(RLIMIT_NPROC, &lim);
+
+        uint64_t cpu = limits.cpu_seconds;
+        if (cpu == 0) cpu = (limits.wall_clock_deadline_ns + 999'999'999ULL) / 1'000'000'000ULL + 1;
+        lim.rlim_cur = cpu;
+        lim.rlim_max = cpu + 1;
+        if (::setrlimit(RLIMIT_CPU, &lim) != 0) return false;
+
+        lim.rlim_cur = limits.file_size_bytes;
+        lim.rlim_max = limits.file_size_bytes;
+        if (::setrlimit(RLIMIT_FSIZE, &lim) != 0) return false;
+
+        if (limits.address_space_bytes > 0) {
+            lim.rlim_cur = limits.address_space_bytes;
+            lim.rlim_max = limits.address_space_bytes;
+            if (::setrlimit(RLIMIT_AS, &lim) != 0) return false;
+        }
+
+        int highest = result_fd > 2 ? result_fd : 2;
+        if (limits.inherit_fd > highest) highest = limits.inherit_fd;
+        uint64_t nofile = static_cast<uint64_t>(highest) + 1;
+        if (limits.nofile > nofile) nofile = limits.nofile;
+        lim.rlim_cur = nofile;
+        lim.rlim_max = nofile;
+        return ::setrlimit(RLIMIT_NOFILE, &lim) == 0;
+    }
+
+    // ------------------------------------------------------------------
+    // Seccomp filter. Built at runtime because the result descriptor, the
+    // inherited descriptor and the child's pid are only known then. Jump
+    // targets are symbolic until Finish() appends the two return blocks.
+    // ------------------------------------------------------------------
+    struct FilterBuilder {
+        static constexpr std::size_t kMaxInsns = 96;
+        static constexpr uint8_t kToAllow = 0xFE;
+        static constexpr uint8_t kToKill = 0xFD;
+        sock_filter insns[kMaxInsns]{};
+        std::size_t len = 0;
+        bool overflow = false;
+
+        void Stmt(uint16_t code, uint32_t k) noexcept {
+            if (len >= kMaxInsns) { overflow = true; return; }
+            insns[len++] = BPF_STMT(code, k);
+        }
+        void Jump(uint16_t code, uint32_t k, uint8_t jt, uint8_t jf) noexcept {
+            if (len >= kMaxInsns) { overflow = true; return; }
+            insns[len++] = BPF_JUMP(code, k, jt, jf);
+        }
+        void LoadNr() noexcept { Stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)); }
+        void LoadArg(unsigned i) noexcept {
+            Stmt(BPF_LD | BPF_W | BPF_ABS, static_cast<uint32_t>(offsetof(struct seccomp_data, args) + i * sizeof(uint64_t)));
+        }
+        void AllowNr(long nr) noexcept { Jump(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(nr), kToAllow, 0); }
+
+        // Resolves symbolic targets and appends: [len] kill, [len+1] allow.
+        [[nodiscard]] bool Finish() noexcept {
+            if (overflow || len + 2 > kMaxInsns) return false;
+            const std::size_t kill_at = len;
+            const std::size_t allow_at = len + 1;
+            for (std::size_t i = 0; i < len; ++i) {
+                if (BPF_CLASS(insns[i].code) != BPF_JMP) continue;
+                if (!Resolve(insns[i].jt, i, kill_at, allow_at)) return false;
+                if (!Resolve(insns[i].jf, i, kill_at, allow_at)) return false;
+            }
+            Stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+            Stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+            return !overflow;
+        }
+        [[nodiscard]] static bool Resolve(uint8_t& slot, std::size_t at, std::size_t kill_at, std::size_t allow_at) noexcept {
+            std::size_t target = 0;
+            if (slot == kToAllow) target = allow_at;
+            else if (slot == kToKill) target = kill_at;
+            else return true;
+            const std::size_t distance = target - (at + 1);
+            if (distance > 255) return false;
+            slot = static_cast<uint8_t>(distance);
+            return true;
+        }
+    };
+
+    [[nodiscard]] static bool InstallFilter(int result_fd, int inherit_fd, pid_t self) noexcept {
+        if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return false;
+#if defined(__x86_64__)
+        constexpr uint32_t kArch = AUDIT_ARCH_X86_64;
+#elif defined(__aarch64__)
+        constexpr uint32_t kArch = AUDIT_ARCH_AARCH64;
+#else
+#error "SupervisedExecutor: no seccomp table for this architecture"
+#endif
+        FilterBuilder b;
+        b.Stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, kArch, 0, FilterBuilder::kToKill);
+        b.LoadNr();
+#if defined(__x86_64__)
+        // The x32 ABI shares the table with bit 30 set; never allow it.
+        b.Jump(BPF_JMP | BPF_JSET | BPF_K, 0x40000000u, FilterBuilder::kToKill, 0);
+#endif
+        // read: only fd 0 (/dev/null) and the inherited descriptor.
+        {
+            const uint8_t block = inherit_fd >= 0 ? 4 : 3;
+            b.Jump(BPF_JMP | BPF_JEQ | BPF_K, __NR_read, 0, block);
+            b.LoadArg(0);
+            b.Jump(BPF_JMP | BPF_JEQ | BPF_K, 0, FilterBuilder::kToAllow, 0);
+            if (inherit_fd >= 0) {
+                b.Jump(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(inherit_fd), FilterBuilder::kToAllow, 0);
+            }
+            b.Stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+        }
+        // write: fds 1 and 2 (/dev/null) and the result pipe.
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, __NR_write, 0, 5);
+        b.LoadArg(0);
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, 1, FilterBuilder::kToAllow, 0);
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, 2, FilterBuilder::kToAllow, 0);
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(result_fd), FilterBuilder::kToAllow, 0);
+        b.Stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+        // tgkill: only at itself (abort() needs it).
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, __NR_tgkill, 0, 3);
+        b.LoadArg(0);
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(self), FilterBuilder::kToAllow, 0);
+        b.Stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+        // mmap: anonymous, never executable.
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, __NR_mmap, 0, 5);
+        b.LoadArg(2);
+        b.Jump(BPF_JMP | BPF_JSET | BPF_K, PROT_EXEC, FilterBuilder::kToKill, 0);
+        b.LoadArg(3);
+        b.Jump(BPF_JMP | BPF_JSET | BPF_K, MAP_ANONYMOUS, FilterBuilder::kToAllow, 0);
+        b.Stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+        // mprotect: never executable.
+        b.Jump(BPF_JMP | BPF_JEQ | BPF_K, __NR_mprotect, 0, 2);
+        b.LoadArg(2);
+        b.Jump(BPF_JMP | BPF_JSET | BPF_K, PROT_EXEC, FilterBuilder::kToKill, FilterBuilder::kToAllow);
+        // Unconditional allows: what a computing payload needs.
+        b.AllowNr(__NR_exit_group);
+        b.AllowNr(__NR_exit);
+        b.AllowNr(__NR_brk);
+        b.AllowNr(__NR_munmap);
+        b.AllowNr(__NR_mremap);
+        b.AllowNr(__NR_madvise);
+        b.AllowNr(__NR_futex);
+        b.AllowNr(__NR_clock_gettime);
+        b.AllowNr(__NR_clock_nanosleep);
+#ifdef __NR_nanosleep
+        b.AllowNr(__NR_nanosleep);
+#endif
+        b.AllowNr(__NR_sched_yield);
+        b.AllowNr(__NR_getpid);
+        b.AllowNr(__NR_gettid);
+        b.AllowNr(__NR_getrandom);
+        b.AllowNr(__NR_rt_sigaction);
+        b.AllowNr(__NR_rt_sigprocmask);
+        b.AllowNr(__NR_rt_sigreturn);
+        if (!b.Finish()) return false;
+
+        sock_fprog prog{};
+        prog.len = static_cast<unsigned short>(b.len);
+        prog.filter = b.insns;
+        return ::prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0) == 0;
+    }
+
+    [[nodiscard]] static bool WriteAll(int fd, const uint8_t* p, std::size_t n) noexcept {
+        while (n > 0) {
+            const ssize_t w = ::write(fd, p, n);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                return false;
+            }
+            p += w;
+            n -= static_cast<std::size_t>(w);
+        }
+        return true;
+    }
+
+    [[nodiscard]] static bool WriteFrame(int fd, const uint8_t* body, std::size_t len) noexcept {
+        uint8_t head[8];
+        const uint32_t magic = kFrameMagic;
+        const uint32_t len32 = static_cast<uint32_t>(len);
+        std::memcpy(head, &magic, 4);
+        std::memcpy(head + 4, &len32, 4);
+        uint64_t hash = kFnvOffset;
+        for (std::size_t i = 0; i < len; ++i) {
+            hash ^= body[i];
+            hash *= kFnvPrime;
+        }
+        uint8_t trailer[8];
+        std::memcpy(trailer, &hash, 8);
+        return WriteAll(fd, head, 8) && WriteAll(fd, body, len) && WriteAll(fd, trailer, 8);
+    }
+};
+
+}  // namespace stack::supervised

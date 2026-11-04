@@ -92,7 +92,7 @@ void test_uint64_prevents_wraparound() {
     // We verify the type is correct by checking the size and range
 
     uint64_t gen = arena.CurrentGeneration();
-    constexpr uint64_t uint32_max = std::numeric_limits<uint32_t>::max();
+    [[maybe_unused]] constexpr uint64_t uint32_max = std::numeric_limits<uint32_t>::max();
 
     // The return type must be uint64_t, not uint32_t
     if (sizeof(gen) == sizeof(uint64_t)) {

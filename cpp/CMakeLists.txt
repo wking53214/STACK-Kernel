@@ -23,6 +23,31 @@ target_link_libraries(stack_tests PRIVATE Catch2::Catch2WithMain stack_containme
 add_executable(stack_production_hardened tests/tests_production_hardened.cpp)
 target_link_libraries(stack_production_hardened PRIVATE Catch2::Catch2WithMain stack_containment atomic)
 
+# Supervised execution: every hostile payload runs in a killed-at-deadline child.
+add_executable(stack_supervised_exec_tests tests/supervised_exec_tests.cpp)
+target_link_libraries(stack_supervised_exec_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
+
 enable_testing()
 add_test(NAME STACKTests COMMAND stack_tests)
 add_test(NAME STACKProductionHardened COMMAND stack_production_hardened)
+add_test(NAME STACKSupervisedExec COMMAND stack_supervised_exec_tests)
+set_tests_properties(STACKSupervisedExec PROPERTIES TIMEOUT 300)
+
+# Red-team programs: plain main() executables that exit non-zero on failure.
+# Built with the same -Werror flags as everything else.
+set(STACK_REDTEAM_TESTS
+    layer2_redteam
+    layer4_redteam
+    layer5_redteam
+    layer6_redteam
+    layer6_wraparound_redteam
+    layer8_redteam
+    p3_audit_trail_signing_redteam
+    p3_per_domain_rate_limiting_redteam
+)
+foreach(redteam IN LISTS STACK_REDTEAM_TESTS)
+    add_executable(${redteam} tests/${redteam}.cpp)
+    target_link_libraries(${redteam} PRIVATE stack_containment atomic pthread)
+    add_test(NAME STACKRedteam_${redteam} COMMAND ${redteam})
+    set_tests_properties(STACKRedteam_${redteam} PROPERTIES TIMEOUT 300)
+endforeach()
