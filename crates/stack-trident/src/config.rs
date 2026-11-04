@@ -130,6 +130,16 @@ pub struct TridentConfig {
     pub breaker_window_ms: u64,
     /// Which breaches count. Default [`BreakerAttribution::AuthenticatedOnly`].
     pub breaker_attribution: BreakerAttribution,
+    /// DANGEROUS operator override. At start, a durable replay store whose
+    /// high-water mark is ahead of the wall clock by more than
+    /// `max_future_skew_ms` means the clock went backwards since the
+    /// previous run, and the Trident refuses to start. With this set it
+    /// starts anyway, logs a warning, and keeps refusing every envelope
+    /// issued at or before the stored high-water mark until the clock has
+    /// caught up (the epoch floor is unchanged by this flag). Default
+    /// false. Set it only for a deliberate recovery after a clock
+    /// correction, never in a config that is left in place.
+    pub dangerously_allow_clock_behind_store: bool,
 }
 
 impl Default for TridentConfig {
@@ -149,6 +159,7 @@ impl Default for TridentConfig {
             breaker_threshold: 5,
             breaker_window_ms: 60_000,
             breaker_attribution: BreakerAttribution::AuthenticatedOnly,
+            dangerously_allow_clock_behind_store: false,
         }
     }
 }
@@ -255,6 +266,11 @@ impl TridentConfig {
         if self.enforce_startup_epoch && self.restored_high_water_ms == 0 {
             tracing::warn!(
                 "stack.trident restart replay guard assumes the wall clock did not go backwards: restored_high_water_ms is 0"
+            );
+        }
+        if self.dangerously_allow_clock_behind_store {
+            tracing::warn!(
+                "stack.trident dangerously_allow_clock_behind_store is set: a clock behind the replay store will not stop the verifier from starting"
             );
         }
         Ok(())

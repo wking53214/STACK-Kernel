@@ -119,6 +119,11 @@ impl Fingerprint {
         decode_hex_lower::<32>(s).map(Self)
     }
 
+    /// Wraps the raw 32 bytes (as read back from a store).
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// The 64-character lowercase hex form.
     pub fn to_hex(&self) -> String {
         to_hex(&self.0)

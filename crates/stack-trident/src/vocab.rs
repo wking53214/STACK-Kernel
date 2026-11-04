@@ -129,7 +129,8 @@ pub enum Check {
     Binding,
     /// Prong 3: clock skew, replay cache, sequence order.
     Freshness,
-    /// The receiver ran out of a bounded resource. Not the sender's fault.
+    /// The receiver ran out of a bounded resource, or its durable replay
+    /// state could not be written. Not the sender's fault.
     Capacity,
 }
 
@@ -230,11 +231,15 @@ pub enum ReasonCode {
     ReplayCacheFull,
     /// The per-sender state table is full.
     SenderTableFull,
+    /// The durable replay store refused the commit, so the acceptance
+    /// could not be made to survive a restart. Nothing changed; retry
+    /// once storage recovers.
+    StateUnavailable,
 }
 
 impl ReasonCode {
     /// Every reason code, in declaration order.
-    pub const ALL: [ReasonCode; 28] = [
+    pub const ALL: [ReasonCode; 29] = [
         Self::EnvelopeTooLarge,
         Self::TooDeep,
         Self::TooManyNodes,
@@ -263,6 +268,7 @@ impl ReasonCode {
         Self::SequenceNotIncreasing,
         Self::ReplayCacheFull,
         Self::SenderTableFull,
+        Self::StateUnavailable,
     ];
 
     /// Metric label and log spelling.
@@ -296,6 +302,7 @@ impl ReasonCode {
             Self::SequenceNotIncreasing => "sequence_not_increasing",
             Self::ReplayCacheFull => "replay_cache_full",
             Self::SenderTableFull => "sender_table_full",
+            Self::StateUnavailable => "state_unavailable",
         }
     }
 
@@ -326,7 +333,7 @@ impl ReasonCode {
             | Self::MalformedNonce
             | Self::Replay
             | Self::SequenceNotIncreasing => Check::Freshness,
-            Self::ReplayCacheFull | Self::SenderTableFull => Check::Capacity,
+            Self::ReplayCacheFull | Self::SenderTableFull | Self::StateUnavailable => Check::Capacity,
         }
     }
 
@@ -368,7 +375,8 @@ impl ReasonCode {
             | Self::MalformedNonce
             | Self::SequenceNotIncreasing
             | Self::ReplayCacheFull
-            | Self::SenderTableFull => GateOutcome::Retry,
+            | Self::SenderTableFull
+            | Self::StateUnavailable => GateOutcome::Retry,
         }
     }
 }

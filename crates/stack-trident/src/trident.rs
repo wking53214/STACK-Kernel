@@ -17,6 +17,7 @@ use crate::config::{BreakerAttribution, ConfigError, TridentConfig};
 use crate::envelope::{encode_payload_counted, hmac_sha256, HandoffEnvelope, Nonce, ENVELOPE_OWN_NODES, ENVELOPE_VERSION};
 use crate::keys::{Fingerprint, KeyRing};
 use crate::state::{ReplayCache, SenderTable, State};
+use crate::store::{AcceptRecord, MemoryStore, ReplayStore, StoreError};
 use crate::telemetry::{self as t, gauge_value, HaltCause};
 use crate::vocab::{GateOutcome, GatePosition, ReasonCode, Resolution};
 use crate::verdict::{Verdict, VerifiedHandoff};
@@ -26,6 +27,49 @@ use crate::verdict::{Verdict, VerifiedHandoff};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("the trident is halted; an operator reset is required")]
 pub struct HaltedError;
+
+/// Why [`Trident::new_with_store`] refused to start. Every variant is a
+/// fail-closed decision: the verifier does not run on a weaker posture
+/// than its configuration and its stored state promise.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StartError {
+    /// The config is outside its documented ranges or profile rules.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// The replay store could not be loaded: locked by another verifier,
+    /// unreadable, corrupt or truncated.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// The wall clock is behind the store's high-water mark by more than
+    /// `max_future_skew_ms`: it went backwards since the previous run.
+    /// `TridentConfig::dangerously_allow_clock_behind_store` overrides.
+    #[error("wall clock {now_ms} ms is behind the replay store's high-water mark {high_water_ms} ms by more than max_future_skew_ms; the clock went backwards (dangerously_allow_clock_behind_store overrides)")]
+    ClockBehindStore {
+        /// The store's high-water mark.
+        high_water_ms: u64,
+        /// The clock at start.
+        now_ms: u64,
+    },
+    /// A durable store's high-water mark is behind the external mark the
+    /// operator supplied as `restored_high_water_ms`: the store is older
+    /// than the last state the operator knows of (an old snapshot was
+    /// restored, or the file was replaced).
+    #[error("replay store high-water mark {store_ms} ms is behind the external mark {external_ms} ms (restored_high_water_ms): the store is older than the last known state")]
+    StoreBehindExternalMark {
+        /// The store's high-water mark.
+        store_ms: u64,
+        /// `TridentConfig::restored_high_water_ms`.
+        external_ms: u64,
+    },
+    /// The store holds more senders with live state (quarantined, or
+    /// accepted within the replay retention window) than
+    /// `max_tracked_senders` can hold.
+    #[error("replay store holds more live senders than max_tracked_senders ({capacity}) can hold")]
+    TooManySenders {
+        /// `TridentConfig::max_tracked_senders`.
+        capacity: usize,
+    },
+}
 
 /// The receiver. Verifies [`HandoffEnvelope`]s against a caller-supplied
 /// [`KeyRing`] and keeps the bounded freshness and breaker state.
@@ -64,19 +108,112 @@ impl Trident {
     /// previous process can be replayed into this one. Without a restored
     /// high-water mark that relies on the clock not having gone backwards
     /// since the previous process stopped.
+    ///
+    /// Replay state lives in a [`MemoryStore`]: nothing survives the
+    /// process. Use [`Trident::new_with_store`] with a durable store for
+    /// anything beyond development.
     pub fn new(config: TridentConfig, keyring: KeyRing, clock: Arc<dyn Clock>) -> Result<Self, ConfigError> {
+        match Self::new_with_store(config, keyring, clock, Box::new(MemoryStore::new())) {
+            Ok(t) => Ok(t),
+            Err(StartError::Config(e)) => Err(e),
+            // A MemoryStore loads nothing, so no other variant can occur;
+            // if one ever does, refuse rather than guess.
+            Err(other) => {
+                tracing::error!(error = %other, "stack.trident refused to start");
+                Err(ConfigError {
+                    field: "replay_store",
+                    value: 0,
+                    min: 1,
+                    max: 1,
+                })
+            }
+        }
+    }
+
+    /// Builds a Trident on `store`, which it loads first. Fails closed on
+    /// a bad config, a store that is locked, unreadable, corrupt or
+    /// truncated, a clock behind the store (see
+    /// `TridentConfig::dangerously_allow_clock_behind_store`), or a durable
+    /// store older than `restored_high_water_ms`.
+    ///
+    /// Every acceptance is committed to `store` before it is committed in
+    /// memory and before the verdict is returned; a commit the store
+    /// refuses makes the envelope `StateUnavailable` (RETRY, reject) and
+    /// changes nothing.
+    pub fn new_with_store(
+        config: TridentConfig,
+        keyring: KeyRing,
+        clock: Arc<dyn Clock>,
+        mut store: Box<dyn ReplayStore>,
+    ) -> Result<Self, StartError> {
         config.validate()?;
-        let high_water_ms = config.restored_high_water_ms;
+        let restored = store.load()?;
+        let now = clock.now_unix_ms();
+        if store.is_durable() {
+            if restored.high_water_ms < config.restored_high_water_ms {
+                return Err(StartError::StoreBehindExternalMark {
+                    store_ms: restored.high_water_ms,
+                    external_ms: config.restored_high_water_ms,
+                });
+            }
+            if restored.high_water_ms > now.saturating_add(config.max_future_skew_ms) {
+                if !config.dangerously_allow_clock_behind_store {
+                    return Err(StartError::ClockBehindStore {
+                        high_water_ms: restored.high_water_ms,
+                        now_ms: now,
+                    });
+                }
+                tracing::warn!(
+                    high_water_ms = restored.high_water_ms,
+                    now_ms = now,
+                    "stack.trident DANGEROUS: starting with the wall clock behind the replay store because dangerously_allow_clock_behind_store is set; every envelope issued at or before the high-water mark stays refused"
+                );
+            }
+        }
+        let high_water_ms = restored.high_water_ms.max(config.restored_high_water_ms);
         let epoch_floor_ms = Self::epoch_floor(&config, clock.as_ref(), 0, high_water_ms);
+        let mut replay = ReplayCache::new(config.replay_cache_capacity);
+        // Restored in expiry order so that in-order expiry keeps working.
+        // Every nonce still inside its window is kept, even beyond the
+        // cache capacity: correctness first, and the next accept trims.
+        for n in restored.nonces.iter().filter(|n| n.expires_at_unix_ms > now) {
+            replay.insert(n.sender, n.nonce, n.expires_at_unix_ms);
+        }
+        let mut senders = SenderTable::new(
+            config.max_tracked_senders,
+            config.replay_retention_ms(),
+            config.breaker_window_ms,
+        );
+        let too_many = StartError::TooManySenders {
+            capacity: config.max_tracked_senders,
+        };
+        for (fp, since) in &restored.quarantined {
+            senders.get_or_insert(*fp, now).ok_or_else(|| too_many.clone())?.quarantined_since = Some(*since);
+        }
+        // Most recent first, so that when the table is full it is the idle
+        // senders (whose envelopes are all stale) that are left out.
+        let mut by_recency = restored.senders.clone();
+        by_recency.sort_by_key(|s| std::cmp::Reverse(s.last_accepted_at_unix_ms));
+        for s in &by_recency {
+            let entry = senders.get_or_insert(s.sender, now).ok_or_else(|| too_many.clone())?;
+            entry.last_sequence = Some(s.last_sequence);
+            entry.last_accepted_at = Some(s.last_accepted_at_unix_ms);
+        }
+        if store.is_durable() {
+            tracing::info!(
+                high_water_ms,
+                senders = by_recency.len(),
+                live_nonces = replay.len(),
+                quarantined = restored.quarantined.len(),
+                "stack.trident restored replay state from the durable store"
+            );
+        }
         let state = State {
-            replay: ReplayCache::new(config.replay_cache_capacity),
-            senders: SenderTable::new(
-                config.max_tracked_senders,
-                config.replay_retention_ms(),
-                config.breaker_window_ms,
-            ),
+            replay,
+            senders,
             epoch_floor_ms,
             high_water_ms,
+            store,
         };
         Ok(Self {
             limits: config.limits(),
@@ -86,6 +223,13 @@ impl Trident {
             state: Mutex::new(state),
             halted: AtomicBool::new(false),
         })
+    }
+
+    /// Counts and logs a refused store write. The caller decides what the
+    /// refusal means (an envelope refused, a mark not persisted).
+    fn store_failed(what: &'static str, e: &StoreError) {
+        counter!(t::STORE_FAILURES_TOTAL).increment(1);
+        tracing::error!(what, error = %e, "stack.trident durable replay store write failed");
     }
 
     /// [`Trident::new`] with the system wall clock.
@@ -427,29 +571,54 @@ impl Trident {
                     room = true;
                 }
             }
+            let fresh_entry = st.senders.get(&f).is_none();
             if !room {
                 reasons.push(ReasonCode::ReplayCacheFull);
-            } else if let Some(sender_state) = st.senders.get_or_insert(f, now) {
-                sender_state.last_sequence = Some(env.sequence);
-                sender_state.last_accepted_at = Some(now);
-                st.high_water_ms = st.high_water_ms.max(env.issued_at_unix_ms);
+            } else if st.senders.get_or_insert(f, now).is_none() {
+                reasons.push(ReasonCode::SenderTableFull);
+            } else {
+                // Durable first, still under the lock: the acceptance is
+                // made to survive a restart before memory learns of it and
+                // before the caller does. A refused commit changes nothing.
                 let expires_at = now.saturating_add(self.config.replay_retention_ms());
-                st.replay.insert(f, n, expires_at);
-                gauge!(t::REPLAY_CACHE_ENTRIES).set(gauge_value(st.replay.len()));
-                drop(st);
-                let env = env.into_owned();
-                return Verdict::Accepted(Box::new(VerifiedHandoff {
+                let record = AcceptRecord {
                     sender: f,
                     sequence: env.sequence,
-                    issued_at_unix_ms: env.issued_at_unix_ms,
                     nonce: n,
-                    gate_position: position,
-                    gate_outcome,
-                    subject_digest: env.subject_digest,
-                    payload: env.payload,
-                }));
-            } else {
-                reasons.push(ReasonCode::SenderTableFull);
+                    issued_at_unix_ms: env.issued_at_unix_ms,
+                    accepted_at_unix_ms: now,
+                    nonce_expires_at_unix_ms: expires_at,
+                };
+                match st.store.commit(&record) {
+                    Err(e) => {
+                        Self::store_failed("accept", &e);
+                        if fresh_entry {
+                            st.senders.remove(&f);
+                        }
+                        reasons.push(ReasonCode::StateUnavailable);
+                    }
+                    Ok(()) => {
+                        if let Some(sender_state) = st.senders.get_mut(&f) {
+                            sender_state.last_sequence = Some(env.sequence);
+                            sender_state.last_accepted_at = Some(now);
+                        }
+                        st.high_water_ms = st.high_water_ms.max(env.issued_at_unix_ms);
+                        st.replay.insert(f, n, expires_at);
+                        gauge!(t::REPLAY_CACHE_ENTRIES).set(gauge_value(st.replay.len()));
+                        drop(st);
+                        let env = env.into_owned();
+                        return Verdict::Accepted(Box::new(VerifiedHandoff {
+                            sender: f,
+                            sequence: env.sequence,
+                            issued_at_unix_ms: env.issued_at_unix_ms,
+                            nonce: n,
+                            gate_position: position,
+                            gate_outcome,
+                            subject_digest: env.subject_digest,
+                            payload: env.payload,
+                        }));
+                    }
+                }
             }
         }
 
@@ -468,6 +637,7 @@ impl Trident {
         if let (true, Some(f)) = (counts, fp) {
             let window = self.config.breaker_window_ms;
             let threshold = self.config.breaker_threshold;
+            let st = &mut *st;
             match st.senders.get_or_insert(f, now) {
                 Some(s) => {
                     if s.record_breach(now, window, threshold) {
@@ -483,6 +653,11 @@ impl Trident {
                             window_ms = window,
                             "stack.trident sender quarantined by breaker"
                         );
+                        // Best effort: the quarantine stands in memory
+                        // either way; only its survival of a restart is lost.
+                        if let Err(e) = st.store.record_quarantine(&f, now) {
+                            Self::store_failed("quarantine", &e);
+                        }
                     }
                 }
                 None => counter!(t::BREAKER_UNTRACKED_TOTAL).increment(1),
@@ -531,6 +706,11 @@ impl Trident {
             counter!(t::QUARANTINE_RELEASES_TOTAL).increment(1);
             gauge!(t::QUARANTINED_SENDERS).set(gauge_value(st.senders.quarantined_count()));
             tracing::info!(sender = %fp, "stack.trident quarantine released by operator");
+            // If this mark is lost the quarantine returns on restart: the
+            // restrictive outcome, so the release itself is not undone.
+            if let Err(e) = st.store.record_release(fp) {
+                Self::store_failed("release", &e);
+            }
         }
         Ok(released)
     }

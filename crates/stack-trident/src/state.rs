@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::envelope::Nonce;
 use crate::keys::{Fingerprint, KeyRing};
+use crate::store::ReplayStore;
 
 /// One sender's remembered nonces, in acceptance order.
 #[derive(Debug, Default)]
@@ -224,6 +225,16 @@ impl SenderTable {
         self.map.get(fp)
     }
 
+    pub(crate) fn get_mut(&mut self, fp: &Fingerprint) -> Option<&mut SenderState> {
+        self.map.get_mut(fp)
+    }
+
+    /// Forgets `fp` entirely. Used to undo an entry created for a commit
+    /// that the durable store then refused.
+    pub(crate) fn remove(&mut self, fp: &Fingerprint) {
+        self.map.remove(fp);
+    }
+
     /// Whether `fp` has, or could be given without eviction, an entry.
     pub(crate) fn can_track(&self, fp: &Fingerprint) -> bool {
         self.map.contains_key(fp) || self.map.len() < self.capacity
@@ -307,9 +318,14 @@ pub(crate) struct State {
     pub(crate) senders: SenderTable,
     /// Envelopes issued before this instant are refused. Never lowered.
     pub(crate) epoch_floor_ms: u64,
-    /// Highest `issued_at_unix_ms` ever accepted (or restored from config).
-    /// Survives operator resets, which raise the floor above it.
+    /// Highest `issued_at_unix_ms` ever accepted (or restored from config
+    /// or the store). Survives operator resets, which raise the floor
+    /// above it.
     pub(crate) high_water_ms: u64,
+    /// The durable replay store. Lives under the same lock as the cache
+    /// and the sender table so a commit to it and the in-memory commit
+    /// that follows are one critical section.
+    pub(crate) store: Box<dyn ReplayStore>,
 }
 
 #[cfg(test)]

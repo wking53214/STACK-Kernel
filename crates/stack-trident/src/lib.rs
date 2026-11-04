@@ -202,6 +202,7 @@ pub mod envelope;
 pub mod keys;
 pub mod puzzle;
 mod state;
+pub mod store;
 pub mod telemetry;
 mod trident;
 pub mod verdict;
@@ -215,6 +216,7 @@ pub use envelope::{
     FIELD_NAMES, MAC_AUDIENCE_DOMAIN, MAC_DOMAIN, MAX_AUDIENCE_BYTES,
 };
 pub use keys::{Fingerprint, KeyError, KeyRing, SecretKey};
-pub use trident::{HaltedError, Trident};
+pub use store::{AcceptRecord, FileStore, FileStoreOptions, MemoryStore, ReplayStore, RestoredState, StoreError};
+pub use trident::{HaltedError, StartError, Trident};
 pub use verdict::{Refusal, Verdict, VerifiedHandoff};
 pub use vocab::{Check, GateOutcome, GatePosition, ReasonCode, Resolution};
