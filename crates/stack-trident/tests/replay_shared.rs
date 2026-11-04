@@ -306,3 +306,37 @@ fn a_sequence_lowered_after_an_operator_reset_is_refused_by_the_store() {
     assert_eq!(v.reasons(), &[ReasonCode::SequenceNotIncreasing], "{v:?}");
     assert!(fx.trident.verify(&fx.sealed(6)).is_accepted());
 }
+
+// ---------------------------------------------------------------------------
+// Step 3: duplicate sequence and duplicate nonce across two verifiers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_duplicate_sequence_across_two_verifiers_is_refused() {
+    let (clock, store, a, b) = pair();
+    assert!(a.verify(&sealed(5, &clock)).is_accepted());
+    clock.advance(1);
+    // Fresh nonce, fresh time, the same sequence: only the store knows.
+    let same = sealed_at(&fixture_key("a"), 5, nonce_for(50), clock.now_unix_ms());
+    assert_eq!(b.verify(&same).reasons(), &[ReasonCode::SequenceNotIncreasing]);
+    let lower = sealed_at(&fixture_key("a"), 4, nonce_for(40), clock.now_unix_ms());
+    assert_eq!(b.verify(&lower).reasons(), &[ReasonCode::SequenceNotIncreasing]);
+    assert_eq!(store.accepted(), 1);
+    // Sender B is independent of sender A.
+    assert!(b.verify(&sealed_at(&fixture_key("b"), 5, nonce_for(5), clock.now_unix_ms())).is_accepted());
+}
+
+#[test]
+fn a_duplicate_nonce_across_two_verifiers_is_refused() {
+    let (clock, store, a, b) = pair();
+    assert!(a.verify(&sealed(1, &clock)).is_accepted());
+    clock.advance(1);
+    // Higher sequence, fresh time, the nonce A already consumed.
+    let reused = sealed_at(&fixture_key("a"), 2, nonce_for(1), clock.now_unix_ms());
+    assert_eq!(b.verify(&reused).reasons(), &[ReasonCode::Replay]);
+    // And back the other way: what B accepts, A refuses.
+    assert!(b.verify(&sealed(3, &clock)).is_accepted());
+    let reused = sealed_at(&fixture_key("a"), 4, nonce_for(3), clock.now_unix_ms());
+    assert_eq!(a.verify(&reused).reasons(), &[ReasonCode::Replay]);
+    assert_eq!(store.accepted(), 2);
+}

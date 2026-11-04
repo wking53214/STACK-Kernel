@@ -262,6 +262,7 @@ impl Trident {
             epoch_floor_ms,
             high_water_ms,
             store,
+            unpersisted_quarantines: Vec::new(),
         };
         Ok(Self {
             limits: config.limits(),
@@ -742,6 +743,7 @@ impl Trident {
             }
             BreakerAttribution::ClaimedSender => still_trusted && outcome == GateOutcome::TerminalBreach,
         };
+        let mut halt_for_store = false;
         if let (true, Some(f)) = (counts, fp) {
             let window = self.config.breaker_window_ms;
             let threshold = self.config.breaker_threshold;
@@ -761,10 +763,17 @@ impl Trident {
                             window_ms = window,
                             "stack.trident sender quarantined by breaker"
                         );
-                        // Best effort: the quarantine stands in memory
-                        // either way; only its survival of a restart is lost.
+                        // The quarantine stands in memory either way. Under
+                        // Development a lost mark only loses its survival
+                        // of a restart. Under Production that is not
+                        // acceptable: the verifier halts (fail closed)
+                        // until an operator reset persists the mark.
                         if let Err(e) = st.store.record_quarantine(&f, now) {
                             Self::store_failed("quarantine", &e);
+                            if self.config.profile == DeploymentProfile::Production {
+                                st.unpersisted_quarantines.push((f, now));
+                                halt_for_store = true;
+                            }
                         }
                     }
                 }
@@ -772,6 +781,11 @@ impl Trident {
             }
         }
         gauge!(t::REPLAY_CACHE_ENTRIES).set(gauge_value(st.replay.len()));
+        if halt_for_store {
+            // Still under the state lock, so no later verification can
+            // commit before the halt is visible.
+            self.enter_halt(HaltCause::StoreFailure);
+        }
         drop(st);
         Verdict::refuse(reasons, resolution)
     }
@@ -810,6 +824,9 @@ impl Trident {
         let _span = tracing::info_span!(t::SPAN_RELEASE, sender = %fp).entered();
         let mut st = self.lock_state().ok_or(HaltedError)?;
         let released = st.senders.release(fp);
+        // A released sender's unpersisted quarantine no longer needs
+        // persisting.
+        st.unpersisted_quarantines.retain(|(q, _)| q != fp);
         if released {
             counter!(t::QUARANTINE_RELEASES_TOTAL).increment(1);
             gauge!(t::QUARANTINED_SENDERS).set(gauge_value(st.senders.quarantined_count()));
@@ -863,7 +880,12 @@ impl Trident {
     /// of its old value, `now + max_future_skew_ms` and one past the
     /// highest `issued_at_unix_ms` ever accepted. So nothing accepted
     /// before the reset can be replayed after it, even if the clock has
-    /// gone backwards in between. The floor never goes down.
+    /// gone backwards in between. The floor never goes down. The floor is
+    /// also offered to the store ([`ReplayStore::raise_epoch_floor`]).
+    ///
+    /// Under the Production profile, a quarantine mark the store failed to
+    /// persist is retried first; if any still fails, the Trident stays
+    /// halted (see [`Trident::is_halted`]).
     pub fn operator_reset(&self) {
         let _span = tracing::info_span!(t::SPAN_RESET).entered();
         self.state.clear_poison();
@@ -886,9 +908,31 @@ impl Trident {
         }
         gauge!(t::REPLAY_CACHE_ENTRIES).set(0.0);
         gauge!(t::QUARANTINED_SENDERS).set(gauge_value(st.senders.quarantined_count()));
+        // Production: retry every quarantine mark the store failed to
+        // persist. Any that still fails keeps the Trident halted.
+        let pending = std::mem::take(&mut st.unpersisted_quarantines);
+        let mut still_pending = Vec::new();
+        for (fp, since) in pending {
+            if !st.senders.is_quarantined(&fp) {
+                continue;
+            }
+            if let Err(e) = st.store.record_quarantine(&fp, since) {
+                Self::store_failed("quarantine", &e);
+                still_pending.push((fp, since));
+            }
+        }
+        let stuck = still_pending.len();
+        st.unpersisted_quarantines = still_pending;
         drop(st);
-        self.halted.store(false, Ordering::SeqCst);
         counter!(t::OPERATOR_RESETS_TOTAL).increment(1);
+        if stuck > 0 {
+            tracing::error!(
+                unpersisted_quarantines = stuck,
+                "stack.trident stays halted: quarantine marks still cannot be persisted"
+            );
+            return;
+        }
+        self.halted.store(false, Ordering::SeqCst);
         tracing::warn!(epoch_floor_ms = floor, "stack.trident reset by operator");
     }
 

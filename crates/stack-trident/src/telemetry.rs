@@ -26,7 +26,7 @@ pub const QUARANTINED_SENDERS: &str = "stack_trident_quarantined_senders";
 /// Gauge. Entries in the replay cache. No labels.
 pub const REPLAY_CACHE_ENTRIES: &str = "stack_trident_replay_cache_entries";
 /// Counter. Transitions into the halted state. Label: `cause` (poisoned,
-/// operator).
+/// operator, store_failure).
 pub const HALTS_TOTAL: &str = "stack_trident_halts_total";
 /// Counter. Operator resets. No labels.
 pub const OPERATOR_RESETS_TOTAL: &str = "stack_trident_operator_resets_total";
@@ -74,6 +74,9 @@ pub(crate) enum HaltCause {
     Poisoned,
     /// An operator called `operator_halt`.
     Operator,
+    /// Under the Production profile, a quarantine mark the durable store
+    /// failed to persist.
+    StoreFailure,
 }
 
 impl HaltCause {
@@ -81,6 +84,7 @@ impl HaltCause {
         match self {
             Self::Poisoned => "poisoned",
             Self::Operator => "operator",
+            Self::StoreFailure => "store_failure",
         }
     }
 }

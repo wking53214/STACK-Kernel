@@ -326,6 +326,10 @@ pub(crate) struct State {
     /// and the sender table so a commit to it and the in-memory commit
     /// that follows are one critical section.
     pub(crate) store: Box<dyn ReplayStore>,
+    /// Production only: quarantines (sender, since) the store failed to
+    /// persist. While any is pending the Trident stays halted; an operator
+    /// reset retries them.
+    pub(crate) unpersisted_quarantines: Vec<(Fingerprint, u64)>,
 }
 
 #[cfg(test)]
