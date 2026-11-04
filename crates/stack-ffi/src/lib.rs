@@ -7,6 +7,8 @@
 #![allow(non_camel_case_types)]
 
 extern "C" {
+    pub fn stack_host_initialize() -> i32;
+    pub fn stack_host_seal_current_thread() -> i32;
     pub fn stack_host_initialize_and_seal() -> i32;
     pub fn stack_host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> i32;
     pub fn stack_execute_governed_transaction(
@@ -70,11 +72,39 @@ pub struct SupervisedReportFfi {
     pub reserved: [u8; 3],
 }
 
-/// Safe wrapper for host initialization
+/// Process initialization only (I-02): constructs the host once, registers the
+/// deadline signal handler and creates this thread's deadline timer. Does not
+/// seal the calling thread. Idempotent; a failure is latched for the life of
+/// the process and every later call reports it.
+pub fn host_initialize() -> Result<(), HostError> {
+    unsafe {
+        match stack_host_initialize() {
+            0 => Ok(()),
+            _ => Err(HostError::InitializationFailed),
+        }
+    }
+}
+
+/// Seals the calling thread (I-02): its deadline timer and the seccomp
+/// allowlist. Irreversible; idempotent for a sealed thread. A thread must be
+/// sealed before it can run `execute_governed_transaction`.
+pub fn host_seal_current_thread() -> Result<(), SealError> {
+    unsafe {
+        match stack_host_seal_current_thread() {
+            0 => Ok(()),
+            -1 => Err(SealError::NotInitialized),
+            -2 => Err(SealError::SealFailed),
+            _ => Err(SealError::InitializationFailed),
+        }
+    }
+}
+
+/// Initializes the process and seals the calling thread, in that order.
 pub fn host_initialize_and_seal() -> Result<(), HostError> {
     unsafe {
         match stack_host_initialize_and_seal() {
             0 => Ok(()),
+            -2 => Err(HostError::SealFailed),
             _ => Err(HostError::InitializationFailed),
         }
     }
@@ -83,12 +113,15 @@ pub fn host_initialize_and_seal() -> Result<(), HostError> {
 /// Safe wrapper for setting active capabilities.
 ///
 /// A change is refused while a transaction is in flight, so a caller that must
-/// apply it retries on `TransactionInFlight`.
+/// apply it retries on `TransactionInFlight`. It needs a completed
+/// initialization: `NotInitialized` before (or during) it, and
+/// `InitializationFailed` for good once it has failed.
 pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> Result<(), CapabilityError> {
     unsafe {
         match stack_host_set_capabilities(m0, m1, m2, m3) {
             0 => Ok(()),
             -2 => Err(CapabilityError::TransactionInFlight),
+            -3 => Err(CapabilityError::InitializationFailed),
             _ => Err(CapabilityError::NotInitialized),
         }
     }
@@ -123,6 +156,8 @@ pub fn execute_governed_transaction(
             -8 => Err(TransactionError::DebtCeiling),
             -9 => Err(TransactionError::InvalidHardTimeout),
             -10 => Err(TransactionError::TimerArmFailed),
+            -11 => Err(TransactionError::ThreadNotSealed),
+            -12 => Err(TransactionError::InitializationFailed),
             _ => Err(TransactionError::ExecutionFailed),
         }
     }
@@ -406,17 +441,33 @@ pub fn host_audit_read_slot(index: u64) -> Option<HostAuditRecord> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostError {
+    /// The one-time process initialization failed; latched for this process.
+    InitializationFailed,
+    /// Initialization succeeded but this thread could not be sealed (I-02).
+    SealFailed,
+}
+
+/// Failure of `host_seal_current_thread` (I-02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealError {
+    /// `host_initialize` has not completed.
+    NotInitialized,
+    /// This thread's timer or filter could not be set up; it is unchanged.
+    SealFailed,
+    /// Initialization failed; latched for this process.
     InitializationFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityError {
-    /// The host has not been initialized yet.
+    /// The host has not been initialized yet (or is still being initialized).
     NotInitialized,
     /// A governed transaction is in flight; the mask was not changed.
     TransactionInFlight,
+    /// Initialization failed; latched. The mask was not changed (I-02).
+    InitializationFailed,
 }
 
 /// Failure of the in-process governed transaction. `ExecutionFailed` keeps
@@ -439,6 +490,11 @@ pub enum TransactionError {
     InvalidHardTimeout,
     /// The deadline timer could not be armed; nothing ran.
     TimerArmFailed,
+    /// The calling thread is not sealed (I-02): call `host_seal_current_thread`
+    /// first. Nothing ran and the thread was not sealed as a side effect.
+    ThreadNotSealed,
+    /// Initialization failed; latched for this process. Nothing ran.
+    InitializationFailed,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -825,6 +881,72 @@ mod tests {
             return;
         }
         run_in_child("tests::test_failed_transaction_leaves_no_success_audit_record_through_the_ffi", CHILD_ENV);
+    }
+
+    /// I-02 (decision B): a transaction on a thread that has not sealed
+    /// itself is refused with ThreadNotSealed and the thread is left as it
+    /// was (it can still open files, which a sealed thread cannot). A
+    /// capability update needs initialization, not a seal.
+    #[test]
+    fn test_unsealed_thread_is_refused_and_not_sealed_as_a_side_effect() {
+        const CHILD_ENV: &str = "STACK_FFI_UNSEALED_CHILD";
+        const PROBE: &str = "/proc/self/stat";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            assert_eq!(host_initialize(), Ok(()));
+            assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+            let runs_before = host_payload_count();
+            assert_eq!(txn(1, 0x01, 1), Err(TransactionError::ThreadNotSealed));
+            assert_eq!(host_payload_count(), runs_before, "a refused transaction runs no payload");
+            assert!(std::fs::File::open(PROBE).is_ok(), "the refused thread must stay unsealed");
+            // Sealing is explicit, per thread, and then the transaction runs.
+            let (sealed, result, blocked) = std::thread::spawn(|| {
+                let sealed = host_seal_current_thread();
+                let result = txn(1, 0x01, 1);
+                let blocked = std::fs::File::open(PROBE).is_err();
+                (sealed, result, blocked)
+            })
+            .join()
+            .expect("sealed thread");
+            assert_eq!(sealed, Ok(()));
+            assert_eq!(result, Ok(()));
+            assert!(blocked, "the thread that asked to be sealed is filtered");
+            assert_eq!(host_payload_count(), runs_before + 1);
+            assert!(std::fs::File::open(PROBE).is_ok(), "sealing another thread does not reach this one");
+            return;
+        }
+        run_in_child("tests::test_unsealed_thread_is_refused_and_not_sealed_as_a_side_effect", CHILD_ENV);
+    }
+
+    /// I-02: initialization is idempotent and safe to race; a seal is
+    /// idempotent on its thread.
+    #[test]
+    fn test_initialization_is_idempotent_and_concurrent_callers_agree() {
+        const CHILD_ENV: &str = "STACK_FFI_IDEMPOTENT_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+            let workers: std::vec::Vec<_> = (0..16)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        host_initialize()
+                    })
+                })
+                .collect();
+            for w in workers {
+                assert_eq!(w.join().expect("worker"), Ok(()));
+            }
+            for _ in 0..100 {
+                assert_eq!(host_initialize(), Ok(()));
+            }
+            let seals = on_sealed_thread(|| {
+                (0..100).filter(|_| host_seal_current_thread() == Ok(())).count()
+                    + (0..100).filter(|_| host_initialize_and_seal() == Ok(())).count()
+            });
+            assert_eq!(seals, 200);
+            return;
+        }
+        run_in_child("tests::test_initialization_is_idempotent_and_concurrent_callers_agree", CHILD_ENV);
     }
 
     const SUPERVISED_DEADLINE_NS: u64 = 300_000_000;

@@ -41,6 +41,35 @@ set_tests_properties(STACKSupervisedExec PROPERTIES TIMEOUT 300)
 add_test(NAME STACKFfiHost COMMAND stack_ffi_tests)
 set_tests_properties(STACKFfiHost PROPERTIES TIMEOUT 300)
 
+# FFI initialization red team (I-02): the wrapper's one-time initialization
+# under 64 concurrent first callers, failure injection, and the no-implicit-
+# seal rule. STACK_FFI_TESTING adds two counters to the wrapper; the shipped
+# build (build.rs) never defines it.
+add_executable(ffi_init_redteam tests/ffi_init_redteam.cpp ${STACK_FFI_WRAPPER})
+target_compile_definitions(ffi_init_redteam PRIVATE STACK_FFI_TESTING=1)
+target_link_libraries(ffi_init_redteam PRIVATE stack_containment atomic pthread)
+add_test(NAME STACKRedteam_ffi_init COMMAND ffi_init_redteam)
+set_tests_properties(STACKRedteam_ffi_init PROPERTIES TIMEOUT 300)
+
+# The same program under ThreadSanitizer. A thread under the real seccomp
+# allowlist cannot mmap, which the sanitizer runtime needs, so this build
+# links an interposer that makes PR_SET_SECCOMP a no-op (STACK_FFI_NO_SECCOMP
+# tells the program to skip its "thread is filtered" checks). This run checks
+# the wrapper's synchronization, not the filter. ThreadSanitizer exits 66 on
+# any report, which fails the test.
+option(STACK_FFI_TSAN "Build and register the ThreadSanitizer run of the FFI init red team" ON)
+if(STACK_FFI_TSAN)
+    add_executable(ffi_init_redteam_tsan
+        tests/ffi_init_redteam.cpp tests/ffi_no_seccomp_interpose.cpp ${STACK_FFI_WRAPPER})
+    target_compile_definitions(ffi_init_redteam_tsan PRIVATE STACK_FFI_TESTING=1 STACK_FFI_NO_SECCOMP=1)
+    target_compile_options(ffi_init_redteam_tsan PRIVATE -fsanitize=thread -g -O1)
+    target_link_options(ffi_init_redteam_tsan PRIVATE -fsanitize=thread)
+    target_link_libraries(ffi_init_redteam_tsan PRIVATE stack_containment atomic pthread)
+    add_test(NAME STACKTsan_ffi_init COMMAND ffi_init_redteam_tsan)
+    set_tests_properties(STACKTsan_ffi_init PROPERTIES TIMEOUT 600
+        ENVIRONMENT "TSAN_OPTIONS=halt_on_error=0:exitcode=66")
+endif()
+
 # Red-team programs: plain main() executables that exit non-zero on failure.
 # Built with the same -Werror flags as everything else.
 set(STACK_REDTEAM_TESTS

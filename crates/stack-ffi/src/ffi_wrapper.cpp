@@ -3,6 +3,7 @@
 #include <cstring>
 #include <ctime>
 #include <atomic>
+#include <thread>
 #include <x86intrin.h>
 #include <fcntl.h>
 #include <sys/syscall.h>
@@ -82,47 +83,168 @@ static uint64_t CalibrateTicksPerToken() noexcept {
     return ticks_per_token == 0 ? 1 : ticks_per_token;
 }
 
+// ---------------------------------------------------------------------------
+// Process initialization (I-02, R2-K-02/03/04; decision B).
+//
+// Two things used to be one call: the process-wide host (one object, one
+// signal handler, one calibration) and the per-thread seal (a deadline timer
+// and a seccomp filter on the calling thread). They are now separate:
+//
+//   stack_host_initialize()           process initialization, once
+//   stack_host_seal_current_thread()  this thread's timer and filter
+//   stack_host_initialize_and_seal()  both, kept for existing callers
+//
+// Initialization is a state machine on g_init_state:
+//
+//   Uninitialized --CAS--> InProgress --> Ready
+//                                     \-> Failed  (latched for the process)
+//
+// Exactly one thread wins the CAS and does the work; every other caller
+// either sees Ready or Failed at once or waits (yielding) while the winner
+// is in progress and then sees the winner's result. The host pointer is
+// written by the winner before its release store of Ready and read after an
+// acquire load of Ready, so no thread observes a partial host, and the host
+// is constructed exactly once. The old code wrote g_host from every
+// initializing thread with no ordering (two ThreadSanitizer data races).
+//
+// Failed is latched: once the one-time work has failed, every later call
+// to any entry point reports it (initialize -1, set_capabilities -3,
+// seal -3, execute -12) and nothing is retried. There is no recovery path
+// in this process; the caller restarts. The work that can fail is the
+// signal handler registration and the creation of the initializing
+// thread's deadline timer, which doubles as the check that deadline timers
+// can be created at all; the host construction (calibration) cannot fail.
+//
+// A transaction no longer seals its calling thread as a side effect
+// (R2-K-04): a thread that has not called stack_host_seal_current_thread()
+// (or stack_host_initialize_and_seal()) gets -11 and is left exactly as it
+// was. Sealing is irreversible, so it has to be asked for.
+//
+// Nothing in this file throws: it is compiled with -fno-exceptions, uses
+// no std::mutex (whose lock can report an error only by throwing) and no
+// allocation, so no exception can reach the C ABI.
+// ---------------------------------------------------------------------------
+enum : int {
+    kInitUninitialized = 0,
+    kInitInProgress = 1,
+    kInitReady = 2,
+    kInitFailed = 3
+};
+
+static std::atomic<int> g_init_state{kInitUninitialized};
+
+#if defined(STACK_FFI_TESTING)
+// Test-only instrumentation for the initialization tests (cpp/tests/
+// ffi_init_redteam.cpp). Never defined in the shipped build (build.rs does
+// not define STACK_FFI_TESTING); the symbols below do not exist there.
+static std::atomic<uint64_t> g_testing_init_work_runs{0};
+static std::atomic<uint64_t> g_testing_host_constructions{0};
+struct FfiHostInstance : FfiHost {
+    explicit FfiHostInstance(uint64_t ticks_per_token) noexcept : FfiHost(ticks_per_token) {
+        g_testing_host_constructions.fetch_add(1, std::memory_order_relaxed);
+    }
+};
+#else
+using FfiHostInstance = FfiHost;
+#endif
+
 // Global instances
 static FfiHost* g_host = nullptr;
-static std::atomic<bool> g_initialized(false);
 static isolation::StaticArenaBuffer<65536> g_arena;
 static telemetry::SeccompAuditRing<1024> g_audit_ring;
 // Number of times the built-in governed payload has run (I-01: a completed
 // transaction must have run it; a refused one must not have).
 static std::atomic<uint64_t> g_payload_runs{0};
 
+// The one-time process work. Runs on exactly one thread, the one that moved
+// the state to InProgress. The order matters: the two steps that can fail
+// come first, so a failure constructs no host.
+static bool RunProcessInitialization() noexcept {
+#if defined(STACK_FFI_TESTING)
+    g_testing_init_work_runs.fetch_add(1, std::memory_order_relaxed);
+#endif
+    if (!governor::HardenedPosixPreemptionGuard::RegisterSignalHandler().has_value()) return false;
+    // The initializing thread's deadline timer. Besides serving this thread
+    // later, it proves that timer_create works in this process.
+    if (!governor::HardenedPosixPreemptionGuard::InitializeThreadTimer().has_value()) return false;
+    // Constructed exactly once: only the winning thread reaches this line,
+    // and only once per process. The calibration spins for 10 ms.
+    static FfiHostInstance host_instance(CalibrateTicksPerToken());
+    g_host = &host_instance;
+    return true;
+}
+
+// Drives the state machine. Returns 0 when the process is Ready, -1 when
+// initialization has failed (now or earlier).
+static int EnsureProcessInitialized() noexcept {
+    int state = g_init_state.load(std::memory_order_acquire);
+    if (state == kInitReady) return 0;
+    if (state == kInitFailed) return -1;
+
+    int expected = kInitUninitialized;
+    if (g_init_state.compare_exchange_strong(expected, kInitInProgress,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire)) {
+        const bool ok = RunProcessInitialization();
+        g_init_state.store(ok ? kInitReady : kInitFailed, std::memory_order_release);
+        return ok ? 0 : -1;
+    }
+    // Another thread won, or finished between the load and the CAS. Wait for
+    // its result. No caller here is sealed (sealing needs Ready first), so
+    // yielding is allowed.
+    while ((state = g_init_state.load(std::memory_order_acquire)) == kInitInProgress) {
+        std::this_thread::yield();
+    }
+    return state == kInitReady ? 0 : -1;
+}
+
 extern "C" {
 
-// Initialize host and seal with SECCOMP
-// The host is process wide but the seccomp filter is per thread, so every
-// calling thread seals itself; a thread that is already sealed returns at once.
+// Process initialization only: constructs the host (once), registers the
+// deadline signal handler and creates this thread's deadline timer. Does
+// not seal the calling thread. Idempotent: every later call returns the
+// latched outcome.
+//    0  initialized (now or earlier)
+//   -1  initialization failed (latched for the life of the process)
+int stack_host_initialize() {
+    return EnsureProcessInitialized();
+}
+
+// Seals the calling thread: creates its deadline timer and installs the
+// seccomp allowlist on it. Irreversible. Idempotent for a sealed thread.
+//    0  this thread is sealed (now or earlier)
+//   -1  the host is not initialized (call stack_host_initialize first)
+//   -2  this thread could not be sealed (timer or filter); it is left
+//       unsealed and unchanged, and the host stays usable from other threads
+//   -3  initialization failed (latched)
+int stack_host_seal_current_thread() {
+    const int state = g_init_state.load(std::memory_order_acquire);
+    if (state == kInitFailed) return -3;
+    if (state != kInitReady) return -1;
+    if (host::SeccompFilterEngine::IsInstalledOnThisThread()) return 0;
+    return g_host->InitializeAndSeal().has_value() ? 0 : -2;
+}
+
+// Initialize the process and seal the calling thread, in that order.
+//    0  initialized and this thread sealed
+//   -1  initialization failed (latched; was "timer initialization failed",
+//       which is now part of initialization)
+//   -2  initialized, but this thread could not be sealed (unchanged meaning)
 int stack_host_initialize_and_seal() {
-    // Allocate host instance. The calibrated refill rate is measured once,
-    // under the compiler's one-time initialization of this static.
-    static FfiHost host_instance(CalibrateTicksPerToken());
-    if (!g_initialized.load()) g_host = &host_instance;
-    
-    // Initialize the hardened POSIX timer for this thread
-    auto timer_result = governor::HardenedPosixPreemptionGuard::InitializeThreadTimer();
-    if (!timer_result.has_value()) {
-        return -1; // Timer initialization failed
-    }
-    
-    // Initialize and seal with SECCOMP
-    auto seal_result = g_host->InitializeAndSeal();
-    if (!seal_result.has_value()) {
-        return -2; // Sealing failed
-    }
-    
-    g_initialized.store(true);
-    return 0;
+    if (EnsureProcessInitialized() != 0) return -1;
+    return stack_host_seal_current_thread() == 0 ? 0 : -2;
 }
 
 // Set active capabilities mask (256-bit SIMD)
-// Returns 0 when the mask was applied, -1 when the host is not initialized, and
-// -2 when the change was refused because a transaction is in flight (retry).
+// Returns 0 when the mask was applied, -1 when the host is not initialized
+// (not yet, or another thread is still initializing it), -2 when the change
+// was refused because a transaction is in flight (retry), and -3 when
+// initialization has failed (latched): a mask is never applied to a host
+// that did not finish initializing (R2-K-03).
 int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t m3) {
-    if (!g_host) return -1;
+    const int state = g_init_state.load(std::memory_order_acquire);
+    if (state == kInitFailed) return -3;
+    if (state != kInitReady) return -1;
 
     host::CapabilityMask256 caps(m0, m1, m2, m3);
     return g_host->SetActiveCapabilities(caps) ? 0 : -2;
@@ -143,6 +265,10 @@ int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t 
 //   -8  compute debt ceiling exceeded
 //   -9  hard_timeout_nanoseconds was 0 (refused, nothing ran)
 //  -10  the deadline timer could not be armed (nothing ran)
+//  -11  the calling thread is not sealed (I-02, decision B): call
+//       stack_host_seal_current_thread first. Nothing ran, nothing was
+//       consumed, and the thread was not sealed as a side effect.
+//  -12  initialization failed (latched); nothing ran
 // This is the in-process path: cooperative deadline, not isolation. A
 // payload that must be stopped goes through stack_supervised_run.
 int stack_execute_governed_transaction(
@@ -152,8 +278,12 @@ int stack_execute_governed_transaction(
     uint64_t deadline_budget_ticks,
     uint64_t hard_timeout_nanoseconds)
 {
-    if (!g_host) return -1;
-    if (!g_initialized.load()) return -1;
+    const int state = g_init_state.load(std::memory_order_acquire);
+    if (state == kInitFailed) return -12;
+    if (state != kInitReady) return -1;
+    // Decision B: no implicit seal. The host's own ExecuteGovernedTransaction
+    // would seal an unsealed caller; it is never reached from here unsealed.
+    if (!host::SeccompFilterEngine::IsInstalledOnThisThread()) return -11;
 
     // Build capability token with context
     host::CapabilityMask256 required_mask(required_capability_bits, 0, 0, 0);
@@ -321,7 +451,7 @@ int stack_host_audit_read_slot(
     uint32_t* out_tokens)
 {
     if (!out_event_type || !out_timestamp || !out_context_id || !out_tokens) return -1;
-    if (!g_host) return -1;
+    if (g_init_state.load(std::memory_order_acquire) != kInitReady) return -1;
 
     telemetry::AuditEventRecord event{};
     if (!g_host->AuditRing().ReadSlot(index, event)) return -1;
@@ -332,6 +462,17 @@ int stack_host_audit_read_slot(
     *out_tokens = event.tokens_consumed;
     return 0;
 }
+
+#if defined(STACK_FFI_TESTING)
+// Test-only counters (see the STACK_FFI_TESTING note above). Absent from the
+// shipped build.
+uint64_t stack_ffi_testing_init_work_runs() {
+    return g_testing_init_work_runs.load(std::memory_order_acquire);
+}
+uint64_t stack_ffi_testing_host_constructions() {
+    return g_testing_host_constructions.load(std::memory_order_acquire);
+}
+#endif
 
 // Audit ring: push event
 void stack_audit_push(uint8_t event_type, uint64_t context_id, uint32_t tokens) {

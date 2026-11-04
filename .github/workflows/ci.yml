@@ -200,9 +200,12 @@ jobs:
   cpp:
     # The C++ containment headers under cpp/: the Catch2 suites, the
     # supervised-executor tests (hostile payloads killed at a deadline in a
-    # child process) and the eight red-team programs, built with the
-    # project's own flags (-Werror) and run under ctest. Ubuntu 24.04 ships
-    # g++ 13, cmake 3.28 and Catch2 3.4, the versions this was developed on.
+    # child process), the FFI host tests (the shipped crates/stack-ffi wrapper
+    # compiled in), the nine red-team programs, and the ThreadSanitizer run of
+    # the FFI initialization red team (ctest STACKTsan_ffi_init; libtsan comes
+    # with g++), built with the project's own flags (-Werror) and run under
+    # ctest. Ubuntu 24.04 ships g++ 13, cmake 3.28 and Catch2 3.4, the
+    # versions this was developed on.
     # Known: the pre-existing stack_tests case "Capability Mutation Race
     # Fix" (tests_all_components.cpp) is scheduling dependent and fails on
     # an unchanged tree in roughly one run in five; see cpp/CONTAINMENT.md.
