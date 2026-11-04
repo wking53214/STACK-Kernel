@@ -1103,6 +1103,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "stack-admission"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "serde_json",
+ "sha2",
+ "stack-authority",
+ "stack-ffi",
+ "stack-receipt",
+ "stack-trident",
+ "thiserror",
+]
+
+[[package]]
 name = "stack-anc-adaptive"
 version = "0.1.0"
 dependencies = [
