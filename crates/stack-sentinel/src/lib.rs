@@ -176,6 +176,7 @@ pub mod cns;
 pub mod config;
 pub mod error;
 pub mod pyjson;
+pub mod scope;
 pub mod telemetry;
 pub mod verdict;
 pub mod verify;
@@ -188,6 +189,7 @@ pub use canonical::{canonical_form, hashed_columns, recompute_current_hash, Reco
 pub use cns::subject_digest;
 pub use config::VerifierConfig;
 pub use error::VerifyError;
+pub use scope::{Limitation, Scope, ScopedReport};
 pub use verdict::{AnchorSummary, Finding, GateOutcome, Reason, Report, Resolution, Verdict};
 pub use verify::{
     deep_verify_row, deep_verify_row_with, parse_export, verify_rows, verify_rows_with, ChainWalk, LedgerRow, Verifier,

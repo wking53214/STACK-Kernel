@@ -15,6 +15,7 @@ use crate::cns::subject_digest;
 use crate::config::VerifierConfig;
 use crate::error::VerifyError;
 use crate::pyjson::{parse_object_keeping, write_value, Object, Separators, Value};
+use crate::scope::{hashed_column_names, limitations, Scope, ScopedReport};
 use crate::telemetry;
 use crate::verdict::{Finding, GateOutcome, Reason, Report};
 
@@ -495,6 +496,14 @@ impl Verifier {
     /// by its length alone: it is not hashed, and its span and log record
     /// only its length.
     pub fn verify_export(&self, export: &[u8], anchor: Option<&[u8]>) -> Result<Report, VerifyError> {
+        self.verify_export_scoped(export, anchor).map(|s| s.report)
+    }
+
+    /// [`Verifier::verify_export`], with the [`Scope`] of its verdict: which
+    /// columns the hash covered, which it did not, and the limitation codes
+    /// (see [`crate::scope`]). The report is the one `verify_export` returns;
+    /// the telemetry is the same.
+    pub fn verify_export_scoped(&self, export: &[u8], anchor: Option<&[u8]>) -> Result<ScopedReport, VerifyError> {
         let started = Instant::now();
         let span = tracing::info_span!(
             "stack.sentinel.verify_export",
@@ -519,7 +528,7 @@ impl Verifier {
             self.verify_inner(export, anchor, export_sha256)
         };
         match &result {
-            Ok(report) => {
+            Ok(ScopedReport { report, .. }) => {
                 span.record("verdict", report.verdict().as_str());
                 span.record("outcome", report.gate_outcome().as_str());
                 if let Some(a) = &report.anchor {
@@ -557,20 +566,35 @@ impl Verifier {
         result
     }
 
-    fn verify_inner(&self, export: &[u8], anchor: Option<&[u8]>, export_sha256: String) -> Result<Report, VerifyError> {
+    fn verify_inner(
+        &self,
+        export: &[u8],
+        anchor: Option<&[u8]>,
+        export_sha256: String,
+    ) -> Result<ScopedReport, VerifyError> {
         let rows = parse_export(export, &self.config)?;
         let rows_total = rows.len();
         let (unhashed, other_unhashed) = unhashed_columns(&rows);
-        let report = |finding, also, escalation, rows_checked, anchor| Report {
-            finding,
-            also,
-            escalation,
-            rows_checked,
-            rows_total,
-            export_sha256: export_sha256.clone(),
-            anchor,
-            unhashed_columns: unhashed.clone(),
-            other_unhashed_columns: other_unhashed,
+        let hashed = hashed_column_names(&rows);
+        let report = |finding, also, escalation, rows_checked, anchor| {
+            let report = Report {
+                finding,
+                also,
+                escalation,
+                rows_checked,
+                rows_total,
+                export_sha256: export_sha256.clone(),
+                anchor,
+                unhashed_columns: unhashed.clone(),
+                other_unhashed_columns: other_unhashed,
+            };
+            let scope = Scope {
+                hashed_columns: hashed.clone(),
+                unhashed_columns: unhashed.clone(),
+                other_unhashed_columns: other_unhashed,
+                limitations: limitations(&report, !unhashed.is_empty() || other_unhashed),
+            };
+            ScopedReport { report, scope }
         };
         let early = |reason, detail: String| {
             let f = Finding {
