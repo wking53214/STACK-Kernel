@@ -221,8 +221,7 @@ impl FileUseStore {
         let mut index = HashMap::new();
         let mut head = genesis();
         let mut records = 0usize;
-        let valid_len: usize;
-        if bytes.len() < LOG_HEADER.len() {
+        let valid_len = if bytes.len() < LOG_HEADER.len() {
             // Empty, or a torn header: start the log.
             if LOG_HEADER.get(..bytes.len()) != Some(bytes.as_slice()) {
                 return Err(UseError::Unavailable);
@@ -231,7 +230,7 @@ impl FileUseStore {
             file.seek(SeekFrom::Start(0)).map_err(|_| UseError::Unavailable)?;
             file.write_all(LOG_HEADER).map_err(|_| UseError::Unavailable)?;
             file.sync_data().map_err(|_| UseError::Unavailable)?;
-            valid_len = LOG_HEADER.len();
+            LOG_HEADER.len()
         } else {
             if bytes.get(..LOG_HEADER.len()) != Some(LOG_HEADER) {
                 return Err(UseError::Unavailable);
@@ -264,8 +263,8 @@ impl FileUseStore {
                     Parsed::Corrupt => return Err(UseError::Unavailable),
                 }
             }
-            valid_len = pos;
-        }
+            pos
+        };
         Ok(Self {
             path,
             capacity,
