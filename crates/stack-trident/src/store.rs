@@ -254,6 +254,9 @@ const MAX_BODY_LEN: usize = 256;
 /// Bytes a record adds beyond its body: the length prefix, the previous
 /// chain hash and this record's hash.
 const RECORD_OVERHEAD: usize = 4 + 32 + 32;
+/// Longest record on disk. One crash can leave at most this many
+/// unacknowledged bytes past the committed length.
+const MAX_RECORD_LEN: u64 = (RECORD_OVERHEAD + MAX_BODY_LEN) as u64;
 /// Bytes of an acceptance record on disk, for tests that need to find
 /// record boundaries.
 pub const ACCEPT_RECORD_LEN: usize = RECORD_OVERHEAD + 1 + 32 + 8 + 16 + 8 + 8 + 8;
@@ -327,6 +330,24 @@ impl Slot {
             None
         }
     }
+
+    fn state(bytes: Option<&[u8]>) -> SlotState {
+        match bytes {
+            Some(b) if b.iter().all(|x| *x == 0) => SlotState::Empty,
+            Some(b) => Self::decode(b).map_or(SlotState::Invalid, SlotState::Valid),
+            None => SlotState::Invalid,
+        }
+    }
+}
+
+/// What a header slot holds. `Empty` (all zero) is legitimate only in the
+/// genesis shape: the other slot valid at generation 0. Anywhere else an
+/// empty slot is as suspect as an unreadable one.
+#[derive(Debug, Clone, Copy)]
+enum SlotState {
+    Valid(Slot),
+    Empty,
+    Invalid,
 }
 
 fn genesis_head() -> [u8; 32] {
@@ -636,9 +657,13 @@ impl FileStore {
         Ok(())
     }
 
-    /// Reads the magic and both slots; returns the newest valid slot and
-    /// the file length.
-    fn read_header(file: &mut File) -> Result<(Slot, u64), StoreError> {
+    /// Reads the magic and both slots; returns the newest valid slot, the
+    /// file length, and whether the pair of slots is one that a clean
+    /// history leaves (both valid, or genesis: one valid at generation 0
+    /// and the other empty). A pair that is not is explained only by a
+    /// torn slot write, which leaves a complete record in the tail;
+    /// `load` refuses it otherwise.
+    fn read_header(file: &mut File) -> Result<(Slot, u64, bool), StoreError> {
         let len = file.metadata().map_err(|e| StoreError::io("stat", &e))?.len();
         if len < HEADER_LEN {
             return Err(StoreError::Corrupt {
@@ -655,26 +680,28 @@ impl FileStore {
                 detail: "not a stack-trident replay log",
             });
         }
-        let a = header.get(SLOT_A as usize..SLOT_B as usize).and_then(Slot::decode);
-        let b = header.get(SLOT_B as usize..HEADER_LEN as usize).and_then(Slot::decode);
-        let slot = match (a, b) {
-            (Some(a), Some(b)) => {
+        let a = Slot::state(header.get(SLOT_A as usize..SLOT_B as usize));
+        let b = Slot::state(header.get(SLOT_B as usize..HEADER_LEN as usize));
+        let (slot, clean) = match (a, b) {
+            (SlotState::Valid(a), SlotState::Valid(b)) => {
                 if a.generation >= b.generation {
-                    a
+                    (a, true)
                 } else {
-                    b
+                    (b, true)
                 }
             }
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            (None, None) => {
+            (SlotState::Valid(a), SlotState::Empty) => (a, a.generation == 0),
+            (SlotState::Empty, SlotState::Valid(b)) => (b, b.generation == 0),
+            (SlotState::Valid(a), SlotState::Invalid) => (a, false),
+            (SlotState::Invalid, SlotState::Valid(b)) => (b, false),
+            _ => {
                 return Err(StoreError::Corrupt {
                     offset: SLOT_A,
                     detail: "no valid header slot",
                 })
             }
         };
-        Ok((slot, len))
+        Ok((slot, len, clean))
     }
 
     /// Reads and verifies the chain from the end of the header to
@@ -690,55 +717,11 @@ impl FileStore {
         let mut records = Vec::new();
         let mut running = genesis_head();
         let mut pos = 0usize;
-        let at = |pos: usize| HEADER_LEN.saturating_add(u64::try_from(pos).unwrap_or(u64::MAX));
         while pos < bytes.len() {
-            let len_bytes = bytes.get(pos..pos.saturating_add(4)).ok_or(StoreError::Corrupt {
-                offset: at(pos),
-                detail: "record length cut off inside the committed region",
-            })?;
-            let len = usize::try_from(u32::from_be_bytes(len_bytes.try_into().unwrap_or([0; 4]))).unwrap_or(usize::MAX);
-            if len == 0 || len > MAX_BODY_LEN {
-                return Err(StoreError::Corrupt {
-                    offset: at(pos),
-                    detail: "record length out of range",
-                });
-            }
-            let body_start = pos.saturating_add(4);
-            let body_end = body_start.saturating_add(len);
-            let hash_end = body_end.saturating_add(64);
-            let (body, prev, stored) = match (
-                bytes.get(body_start..body_end),
-                bytes.get(body_end..body_end.saturating_add(32)),
-                bytes.get(body_end.saturating_add(32)..hash_end),
-            ) {
-                (Some(b), Some(p), Some(h)) => (b, p, h),
-                _ => {
-                    return Err(StoreError::Corrupt {
-                        offset: at(pos),
-                        detail: "record cut off inside the committed region",
-                    })
-                }
-            };
-            if prev != running {
-                return Err(StoreError::Corrupt {
-                    offset: at(pos),
-                    detail: "record does not chain to the previous one",
-                });
-            }
-            let hash = record_hash(body, &running);
-            if stored != hash {
-                return Err(StoreError::Corrupt {
-                    offset: at(pos),
-                    detail: "record hash mismatch",
-                });
-            }
-            let record = Record::decode(body).ok_or(StoreError::Corrupt {
-                offset: at(pos),
-                detail: "record body does not decode",
-            })?;
+            let (record, hash, next) = Self::parse_record(&bytes, pos, &running, HEADER_LEN)?;
             records.push(record);
             running = hash;
-            pos = hash_end;
+            pos = next;
         }
         if &running != expected_head {
             return Err(StoreError::Corrupt {
@@ -747,6 +730,115 @@ impl FileStore {
             });
         }
         Ok(records)
+    }
+
+    /// Parses and verifies the record at `pos` in `bytes`, which must chain
+    /// to `running`. Returns the record, its hash (the new chain head) and
+    /// the position after it. `base` is the file offset of `bytes[0]`, for
+    /// error reporting.
+    fn parse_record(
+        bytes: &[u8],
+        pos: usize,
+        running: &[u8; 32],
+        base: u64,
+    ) -> Result<(Record, [u8; 32], usize), StoreError> {
+        let at = base.saturating_add(u64::try_from(pos).unwrap_or(u64::MAX));
+        let len_bytes = bytes.get(pos..pos.saturating_add(4)).ok_or(StoreError::Corrupt {
+            offset: at,
+            detail: "record length cut off",
+        })?;
+        let len = usize::try_from(u32::from_be_bytes(len_bytes.try_into().unwrap_or([0; 4]))).unwrap_or(usize::MAX);
+        if len == 0 || len > MAX_BODY_LEN {
+            return Err(StoreError::Corrupt {
+                offset: at,
+                detail: "record length out of range",
+            });
+        }
+        let body_start = pos.saturating_add(4);
+        let body_end = body_start.saturating_add(len);
+        let hash_end = body_end.saturating_add(64);
+        let (body, prev, stored) = match (
+            bytes.get(body_start..body_end),
+            bytes.get(body_end..body_end.saturating_add(32)),
+            bytes.get(body_end.saturating_add(32)..hash_end),
+        ) {
+            (Some(b), Some(p), Some(h)) => (b, p, h),
+            _ => {
+                return Err(StoreError::Corrupt {
+                    offset: at,
+                    detail: "record cut off",
+                })
+            }
+        };
+        if prev != running {
+            return Err(StoreError::Corrupt {
+                offset: at,
+                detail: "record does not chain to the previous one",
+            });
+        }
+        let hash = record_hash(body, running);
+        if stored != hash {
+            return Err(StoreError::Corrupt {
+                offset: at,
+                detail: "record hash mismatch",
+            });
+        }
+        let record = Record::decode(body).ok_or(StoreError::Corrupt {
+            offset: at,
+            detail: "record body does not decode",
+        })?;
+        Ok((record, hash, hash_end))
+    }
+
+    /// Judges the bytes past the committed length. A crash between the
+    /// record sync and the header-slot write leaves exactly one complete,
+    /// chain-valid record there: it is adopted, because refusing that
+    /// envelope as a replay is the restrictive outcome and the previous
+    /// process may have acknowledged it. Anything else that one crash can
+    /// leave (a partial or garbled record) is discarded as never
+    /// acknowledged. More bytes than one record can hold is not something a
+    /// crash produces and is reported as corruption.
+    fn judge_tail(
+        file: &mut File,
+        path: &Path,
+        committed_len: u64,
+        len: u64,
+        head: &[u8; 32],
+    ) -> Result<Option<(Record, [u8; 32], u64)>, StoreError> {
+        let tail_len = len.saturating_sub(committed_len);
+        if tail_len == 0 {
+            return Ok(None);
+        }
+        if tail_len > MAX_RECORD_LEN {
+            return Err(StoreError::Corrupt {
+                offset: committed_len,
+                detail: "more unacknowledged bytes than one record can hold",
+            });
+        }
+        let mut tail = vec![0u8; usize::try_from(tail_len).unwrap_or(0)];
+        file.seek(SeekFrom::Start(committed_len)).map_err(|e| StoreError::io("seek", &e))?;
+        file.read_exact(&mut tail).map_err(|e| StoreError::io("read tail", &e))?;
+        match Self::parse_record(&tail, 0, head, committed_len) {
+            Ok((record, hash, next)) if next == tail.len() => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "stack.trident replay store has a complete but unacknowledged last record (torn header write); adopting it"
+                );
+                Ok(Some((record, hash, len)))
+            }
+            Ok(_) => Err(StoreError::Corrupt {
+                offset: committed_len,
+                detail: "bytes follow the unacknowledged last record",
+            }),
+            Err(_) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    unacknowledged_bytes = tail_len,
+                    "stack.trident replay store has a torn last record (never acknowledged); discarding it"
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// Appends one record and acknowledges it. On any error the in-memory
@@ -888,13 +980,18 @@ impl FileStore {
             committed_len,
             head,
         };
+        // Both slots carry the same generation so that the pair is clean.
         let slot_bytes = slot.encode();
-        let slot_range = SLOT_B as usize..HEADER_LEN as usize;
+        let slot_range = SLOT_A as usize..HEADER_LEN as usize;
         match bytes.get_mut(slot_range) {
-            Some(dst) => dst.copy_from_slice(&slot_bytes),
+            Some(dst) => {
+                let (first, second) = dst.split_at_mut(SLOT_LEN as usize);
+                first.copy_from_slice(&slot_bytes);
+                second.copy_from_slice(&slot_bytes);
+            }
             None => {
                 return Err(StoreError::Corrupt {
-                    offset: SLOT_B,
+                    offset: SLOT_A,
                     detail: "header buffer too short",
                 })
             }
@@ -908,20 +1005,29 @@ impl FileStore {
 
 impl ReplayStore for FileStore {
     fn load(&mut self) -> Result<RestoredState, StoreError> {
-        let (slot, len) = Self::read_header(&mut self.file)?;
+        let (slot, len, clean) = Self::read_header(&mut self.file)?;
         if slot.committed_len > len {
             return Err(StoreError::Truncated {
                 committed_len: slot.committed_len,
                 actual_len: len,
             });
         }
-        let records = Self::read_chain(&mut self.file, slot.committed_len, &slot.head)?;
-        if len > slot.committed_len {
-            tracing::warn!(
-                path = %self.path.display(),
-                unacknowledged_bytes = len - slot.committed_len,
-                "stack.trident replay store has an unacknowledged tail (torn write); discarding it"
-            );
+        let mut records = Self::read_chain(&mut self.file, slot.committed_len, &slot.head)?;
+        let (mut committed_len, mut head) = (slot.committed_len, slot.head);
+        let adopted = Self::judge_tail(&mut self.file, &self.path, committed_len, len, &head)?;
+        if !clean && adopted.is_none() {
+            // An unreadable slot with no complete trailing record to
+            // explain it is not a torn slot write: it is damage, and
+            // reading the older slot would silently forget acceptances.
+            return Err(StoreError::Corrupt {
+                offset: SLOT_A,
+                detail: "a header slot is unreadable and no torn slot write explains it",
+            });
+        }
+        if let Some((record, hash, new_len)) = adopted {
+            records.push(record);
+            committed_len = new_len;
+            head = hash;
         }
         let mut fold = Fold::default();
         for r in records {
@@ -929,10 +1035,10 @@ impl ReplayStore for FileStore {
         }
         let state = fold.finish();
         self.generation = slot.generation;
-        self.committed_len = slot.committed_len;
-        self.head = slot.head;
+        self.committed_len = committed_len;
+        self.head = head;
         self.high_water_ms = state.high_water_ms;
-        self.dirty_tail = len > slot.committed_len;
+        self.dirty_tail = len > committed_len;
         self.loaded = true;
         self.next_compact_at = self.options.compact_after_bytes;
         Ok(state)

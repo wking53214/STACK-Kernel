@@ -21,8 +21,8 @@ use metrics_util::MetricKind;
 use serde_json::{json, Map, Value};
 use stack_trident::telemetry as t;
 use stack_trident::{
-    seal, seal_for, Clock, EnvelopeDraft, GateOutcome, GatePosition, HandoffEnvelope, KeyRing, ManualClock, Nonce,
-    ReasonCode, Trident, TridentConfig, Verdict,
+    seal, seal_for, Clock, EnvelopeDraft, GateOutcome, GatePosition, HandoffEnvelope, KeyMeta, KeyPurpose, KeyRing,
+    KeyStatus, ManualClock, Nonce, ReasonCode, Trident, TridentConfig, Verdict,
 };
 
 // ---------------------------------------------------------------------------
@@ -305,13 +305,63 @@ fn rt_toctou_keyring_revocation_stops_in_flight_acceptance() {
     );
 }
 
+/// A key revoked by `replace_keyring` while a genuine envelope under it is
+/// between the prong 1 MAC check and the commit must not be accepted: the
+/// key's status is judged under the commit lock, against the ring in
+/// force, not against the snapshot the MAC was checked with.
+#[test]
+fn rt_toctou_key_revoked_between_prong_checks_is_refused() {
+    let meta = || KeyMeta::new("issuer:test-fixture", KeyPurpose::Handoff, 0, None).unwrap();
+    let ring_with = |status: KeyStatus| {
+        let mut ring = KeyRing::new(16);
+        ring.insert_with_meta(fixture_key("a"), meta().with_status(status)).unwrap();
+        ring.insert_with_meta(fixture_key("b"), meta()).unwrap();
+        ring
+    };
+    let clock = Arc::new(ManualClock::new(T0));
+    let cfg = TridentConfig::unbound_audience();
+    let trident = Trident::new(cfg.clone(), ring_with(KeyStatus::Active), clock.clone()).unwrap();
+    clock.advance(cfg.max_future_skew_ms + 1);
+    let valid = seal(draft(1, clock.now_unix_ms(), payload_for(1)), &fixture_key("a"), &cfg.limits()).unwrap();
+    // Sanity: under the active ring this envelope would be accepted.
+    let v = verify_with_interleave(&trident, &valid, || {
+        trident.replace_keyring(ring_with(KeyStatus::Revoked)).unwrap();
+    });
+    assert!(
+        !v.is_accepted(),
+        "an envelope under a key revoked before its commit was accepted: {v:?}"
+    );
+    assert_eq!(v.reasons(), &[ReasonCode::KeyRevoked], "{v:?}");
+    // The same race with expiry: the window is judged at commit time.
+    let trident = Trident::new(cfg.clone(), ring_with(KeyStatus::Active), clock.clone()).unwrap();
+    clock.advance(cfg.max_future_skew_ms + 1);
+    let valid = seal(draft(1, clock.now_unix_ms(), payload_for(1)), &fixture_key("a"), &cfg.limits()).unwrap();
+    let expiring = || {
+        let mut ring = KeyRing::new(16);
+        ring.insert_with_meta(
+            fixture_key("a"),
+            KeyMeta::new("issuer:test-fixture", KeyPurpose::Handoff, 0, Some(clock.now_unix_ms())).unwrap(),
+        )
+        .unwrap();
+        ring
+    };
+    let v = verify_with_interleave(&trident, &valid, || {
+        trident.replace_keyring(expiring()).unwrap();
+    });
+    assert_eq!(v.reasons(), &[ReasonCode::KeyExpired], "{v:?}");
+}
+
 // ===========================================================================
 // 2. Replay and ordering
 // ===========================================================================
 
-/// An envelope accepted by one receiver is accepted again by a second
-/// receiver that trusts the same sender key: nothing in the MAC input names
-/// the intended recipient, so a captured envelope can be redirected.
+/// An envelope captured on its way to one receiver must not be accepted by
+/// a second receiver that trusts the same sender key. The MAC input names
+/// the intended recipient (the receiver's configured `audience`, see
+/// `seal_for` and `MAC_AUDIENCE_DOMAIN`), so a redirected envelope fails
+/// prong 1 at any other receiver. The weakness this test was written
+/// against (no recipient in the MAC input) is closed; the test stays as
+/// the regression guard.
 #[test]
 fn rt_cross_receiver_replay_is_refused() {
     // Two receivers can only be told apart if they have distinct
