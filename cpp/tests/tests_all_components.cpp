@@ -628,6 +628,164 @@ TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][def
     }
 }
 
+// I-01 (R2-K-01): the FFI host's parameters, with a refill rate the test
+// controls. 2^38 ticks per token is one token per two minutes here, so no
+// refill lands inside a test, and a never-used bucket starts full whatever
+// the rate. Every count below is exact.
+using FfiPolicyHost = GovernedMinotaurHost<1000, 100, 100, 2'100'000, 16>;
+constexpr uint64_t kNoRefill = 1ULL << 38;
+
+namespace {
+int ExactConsumeUntilLimited(FfiPolicyHost& host, uint64_t domain, uint32_t tokens, int limit, HostExecutionError* last) {
+    SIMDCapabilityToken token(domain, CapabilityMask256(0x01, 0, 0, 0));
+    int ok = 0;
+    *last = HostExecutionError::None;
+    for (int i = 0; i < limit; ++i) {
+        auto res = host.ExecuteGovernedTransaction(token, tokens, ~0ULL, 1'000'000'000ULL, []() {});
+        if (res.has_value()) { ++ok; continue; }
+        *last = res.error();
+        break;
+    }
+    return ok;
+}
+}  // namespace
+
+TEST_CASE("Component 12: Layer 4 - FFI policy host serves exactly its budget and refuses the rest", "[layer-4][I-01]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    int completed = 0;
+    int refusals = 0;
+    bool unchanged_after_refusal = false;
+    bool then_exhausted = false;
+    std::thread([&]() {
+        // 17 requests of 50 from the 900 spendable tokens: all complete, leaving 150.
+        SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
+        for (int i = 0; i < 17; ++i) {
+            if (host.ExecuteGovernedTransaction(token, 50, ~0ULL, 1'000'000'000ULL, []() {}).has_value()) ++completed;
+        }
+        // 150 left: a request of 100 needs 200 and is refused, five times.
+        for (int i = 0; i < 5; ++i) {
+            auto r = host.ExecuteGovernedTransaction(token, 100, ~0ULL, 1'000'000'000ULL, []() {});
+            if (!r.has_value() && r.error() == HostExecutionError::RateLimitExceeded) ++refusals;
+        }
+        // The refusals consumed nothing: a request of 50 (needs 150) still completes,
+        // and after it the bucket is at the floor.
+        unchanged_after_refusal = host.ExecuteGovernedTransaction(token, 50, ~0ULL, 1'000'000'000ULL, []() {}).has_value();
+        auto r = host.ExecuteGovernedTransaction(token, 1, ~0ULL, 1'000'000'000ULL, []() {});
+        then_exhausted = !r.has_value() && r.error() == HostExecutionError::RateLimitExceeded;
+    }).join();
+
+    REQUIRE(completed == 17);
+    REQUIRE(refusals == 5);
+    REQUIRE(unchanged_after_refusal);
+    REQUIRE(then_exhausted);
+}
+
+TEST_CASE("Component 12: Layer 4 - FFI policy host: denied capability and oversized request consume nothing", "[layer-4][I-01]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    int denied = 0, oversized = 0, completed = 0;
+    bool payload_ran_on_failure = false;
+    HostExecutionError last = HostExecutionError::None;
+    std::thread([&]() {
+        SIMDCapabilityToken bad(2, CapabilityMask256(0x100, 0, 0, 0));
+        SIMDCapabilityToken good(2, CapabilityMask256(0x01, 0, 0, 0));
+        for (int i = 0; i < 20; ++i) {
+            auto r = host.ExecuteGovernedTransaction(bad, 100, ~0ULL, 1'000'000'000ULL,
+                                                     [&]() { payload_ran_on_failure = true; });
+            if (!r.has_value() && r.error() == HostExecutionError::CapabilityValidationFailed) ++denied;
+        }
+        for (int i = 0; i < 20; ++i) {
+            auto r = host.ExecuteGovernedTransaction(good, 101, ~0ULL, 1'000'000'000ULL,
+                                                     [&]() { payload_ran_on_failure = true; });
+            if (!r.has_value() && r.error() == HostExecutionError::RateLimitExceeded) ++oversized;
+        }
+        // The bucket is still full: exactly 9 requests of 100.
+        completed = ExactConsumeUntilLimited(host, 2, 100, 50, &last);
+    }).join();
+
+    REQUIRE(denied == 20);
+    REQUIRE(oversized == 20);
+    REQUIRE_FALSE(payload_ran_on_failure);
+    REQUIRE(completed == 9);
+    REQUIRE(last == HostExecutionError::RateLimitExceeded);
+}
+
+TEST_CASE("Component 12: Layer 4 - FFI policy host: concurrent transactions sum exactly", "[layer-4][I-01]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    constexpr int kThreads = 4;
+    constexpr int kPerThread = 15;
+    constexpr uint32_t kTokens = 10;  // 600 of 900 spendable tokens
+    std::atomic<int> completed{0};
+    std::atomic<int> failed{0};
+    std::atomic<int> payload_runs{0};
+    std::atomic<int> arrived{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&]() {
+            SIMDCapabilityToken token(3, CapabilityMask256(0x01, 0, 0, 0));
+            arrived++;
+            while (!go.load(std::memory_order_acquire)) {}
+            for (int i = 0; i < kPerThread; ++i) {
+                auto r = host.ExecuteGovernedTransaction(token, kTokens, ~0ULL, 1'000'000'000ULL,
+                                                         [&]() { payload_runs++; });
+                if (r.has_value()) completed++; else failed++;
+            }
+        });
+    }
+    while (arrived.load() < kThreads) {}
+    go.store(true, std::memory_order_release);
+    for (auto& w : workers) w.join();
+
+    int drained = 0;
+    HostExecutionError last = HostExecutionError::None;
+    std::thread([&]() { drained = ExactConsumeUntilLimited(host, 3, kTokens, 200, &last); }).join();
+
+    REQUIRE(failed.load() == 0);
+    REQUIRE(completed.load() == kThreads * kPerThread);
+    REQUIRE(payload_runs.load() == kThreads * kPerThread);
+    REQUIRE(drained == 30);  // (900 - 600) / 10
+    REQUIRE(last == HostExecutionError::RateLimitExceeded);
+}
+
+TEST_CASE("Component 12: Layer 4 - a failed transaction records no TransactionCompleted event", "[layer-4][I-01]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    HostExecutionError denied = HostExecutionError::None;
+    HostExecutionError limited = HostExecutionError::None;
+    bool ok = false;
+    std::thread([&]() {
+        SIMDCapabilityToken bad(4, CapabilityMask256(0x100, 0, 0, 0));
+        SIMDCapabilityToken good(4, CapabilityMask256(0x01, 0, 0, 0));
+        auto r1 = host.ExecuteGovernedTransaction(bad, 1, ~0ULL, 1'000'000'000ULL, []() {});
+        if (!r1.has_value()) denied = r1.error();
+        auto r2 = host.ExecuteGovernedTransaction(good, 101, ~0ULL, 1'000'000'000ULL, []() {});
+        if (!r2.has_value()) limited = r2.error();
+        ok = host.ExecuteGovernedTransaction(good, 1, ~0ULL, 1'000'000'000ULL, []() {}).has_value();
+    }).join();
+    REQUIRE(denied == HostExecutionError::CapabilityValidationFailed);
+    REQUIRE(limited == HostExecutionError::RateLimitExceeded);
+    REQUIRE(ok);
+
+    // A fresh host's ring holds the events in order; slot 3 was never written.
+    AuditEventRecord rec{};
+    REQUIRE(host.AuditRing().ReadSlot(0, rec));
+    REQUIRE(rec.event_type == AuditEventType::CapabilityViolation);
+    REQUIRE(rec.context_id == 4);
+    REQUIRE(host.AuditRing().ReadSlot(1, rec));
+    REQUIRE(rec.event_type == AuditEventType::RateLimitTriggered);
+    REQUIRE(host.AuditRing().ReadSlot(2, rec));
+    REQUIRE(rec.event_type == AuditEventType::TransactionCompleted);
+    REQUIRE(rec.tokens_consumed == 1);
+    REQUIRE_FALSE(host.AuditRing().ReadSlot(3, rec));
+}
+
 TEST_CASE("Component 16 & 17: Integration & Chaos Stress", "[components][16-17]") {
     constexpr int num_threads = 4;
     std::vector<std::thread> threads;

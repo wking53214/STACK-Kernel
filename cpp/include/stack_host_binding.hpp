@@ -368,6 +368,22 @@ public:
     GovernedMinotaurHost() noexcept = default;
 
     /**
+     * Construct with a run-time refill rate for the governor, in HardwareClock
+     * ticks per token (I-01). The tick counter's frequency is a run-time
+     * property of the machine, so a host that wants "N tokens per second"
+     * measures the counter against a wall clock and passes frequency / N here.
+     */
+    explicit GovernedMinotaurHost(uint64_t governor_ticks_per_token) noexcept
+        : governor_(governor_ticks_per_token) {}
+
+    /**
+     * Read access to the governance audit trail, so a caller or a test can
+     * check which events a transaction recorded (I-01: a failed transaction
+     * must leave no TransactionCompleted record).
+     */
+    [[nodiscard]] const SeccompAuditRing<8192>& AuditRing() const noexcept { return audit_ring_; }
+
+    /**
      * Set active capability mask. Guarded against mid-transaction changes.
      * Returns false if transaction is in flight, preventing capability mutation.
      *

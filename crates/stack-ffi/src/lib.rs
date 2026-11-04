@@ -25,6 +25,14 @@ extern "C" {
     ) -> i32;
     pub fn stack_arena_allocate(size: usize) -> *mut u8;
     pub fn stack_read_ticks() -> u64;
+    pub fn stack_host_payload_count() -> u64;
+    pub fn stack_host_audit_read_slot(
+        index: u64,
+        out_event_type: *mut u8,
+        out_timestamp: *mut u64,
+        out_context_id: *mut u64,
+        out_tokens: *mut u32,
+    ) -> i32;
     pub fn stack_supervised_run(
         payload_kind: u32,
         limits: *const SupervisedLimitsFfi,
@@ -334,6 +342,70 @@ pub fn read_ticks() -> u64 {
     unsafe { stack_read_ticks() }
 }
 
+/// How many times the built-in governed payload has run in this process. A
+/// completed transaction has run it once; a refused one has not run it.
+pub fn host_payload_count() -> u64 {
+    unsafe { stack_host_payload_count() }
+}
+
+/// One event type of the host's governance audit trail (`AuditEventType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostAuditEvent {
+    TransactionCompleted,
+    RateLimitTriggered,
+    SoftwareDeadlineExceeded,
+    HardwareTimerPreempted,
+    CapabilityViolation,
+    /// A value this crate does not know; carried rather than collapsed.
+    Unrecognized(u8),
+}
+
+impl HostAuditEvent {
+    fn from_code(code: u8) -> Self {
+        match code {
+            0 => HostAuditEvent::TransactionCompleted,
+            1 => HostAuditEvent::RateLimitTriggered,
+            2 => HostAuditEvent::SoftwareDeadlineExceeded,
+            3 => HostAuditEvent::HardwareTimerPreempted,
+            4 => HostAuditEvent::CapabilityViolation,
+            other => HostAuditEvent::Unrecognized(other),
+        }
+    }
+}
+
+/// One record of the host's governance audit trail.
+#[derive(Debug, Clone, Copy)]
+pub struct HostAuditRecord {
+    pub event: HostAuditEvent,
+    pub timestamp_ticks: u64,
+    pub context_id: u64,
+    pub tokens: u32,
+}
+
+/// Reads slot `index` of the host's own audit ring (8192 slots; the index
+/// wraps). `None` when the host is not initialized or the slot was never
+/// written. This is the ring `execute_governed_transaction` records into,
+/// not the free-standing ring behind `audit_push`.
+pub fn host_audit_read_slot(index: u64) -> Option<HostAuditRecord> {
+    let mut event_type = 0u8;
+    let mut timestamp = 0u64;
+    let mut context_id = 0u64;
+    let mut tokens = 0u32;
+    let rc = unsafe {
+        stack_host_audit_read_slot(index, &mut event_type, &mut timestamp, &mut context_id, &mut tokens)
+    };
+    if rc == 0 {
+        Some(HostAuditRecord {
+            event: HostAuditEvent::from_code(event_type),
+            timestamp_ticks: timestamp,
+            context_id,
+            tokens,
+        })
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum HostError {
     InitializationFailed,
@@ -489,15 +561,13 @@ mod tests {
                 Err(TransactionError::CapabilityDenied)
             );
             assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
-            // Pre-existing: the FFI host is GovernedMinotaurHost<64, 100, ...>,
-            // whose Reserved (100) exceeds MaxCapacity (64), so a Standard
-            // priority request can never clear `available < Reserved + amount`
-            // and every FFI transaction is rate limited. The old -3 collapse
-            // hid this; the distinct code now shows it. When the parameters
-            // are fixed this assertion becomes Ok(()).
+            // R2-K-01 (I-01): the FFI host used to be GovernedMinotaurHost<64, 100, ...>,
+            // whose Reserved (100) exceeded MaxCapacity (64), so every Standard
+            // request was rate limited and this assertion had to be RateLimited.
+            // With a bucket that can serve a request, a valid transaction completes.
             assert_eq!(
                 execute_governed_transaction(1, 0x01, 1, 1_000_000_000, 1_000_000_000),
-                Err(TransactionError::RateLimited)
+                Ok(())
             );
             return;
         }
@@ -519,6 +589,242 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    /// Runs the named test in a child copy of this binary with `env` set, and
+    /// requires the child to exit cleanly within 60 seconds. Sealing cannot
+    /// be undone, so each test that seals gets its own process.
+    fn run_in_child(test: &str, env: &str) {
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut child = std::process::Command::new(exe)
+            .args(["--exact", test, "--test-threads=1"])
+            .env(env, "1")
+            .spawn()
+            .expect("spawn child");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll child") {
+                assert!(status.success(), "child failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("child did not exit within 60 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    const NO_SOFTWARE_DEADLINE: u64 = u64::MAX;
+    const ONE_SECOND_NS: u64 = 1_000_000_000;
+    // FFI governance policy (ffi_wrapper.cpp): bucket 1000, floor 100,
+    // largest request 100, 1000 tokens per second; 900 spendable in a burst.
+    const SPENDABLE: u32 = 900;
+    const LARGEST_REQUEST: u32 = 100;
+
+    fn txn(domain: u64, caps: u64, tokens: u32) -> Result<(), TransactionError> {
+        execute_governed_transaction(domain, caps, tokens, NO_SOFTWARE_DEADLINE, ONE_SECOND_NS)
+    }
+
+    /// Runs `f` on a fresh thread that seals itself first; the result comes
+    /// back through join and is asserted on the unsealed caller.
+    fn on_sealed_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::spawn(move || {
+            assert!(host_initialize_and_seal().is_ok(), "seal");
+            f()
+        })
+        .join()
+        .expect("sealed thread")
+    }
+
+    /// Completed transactions of `tokens` each before the first RateLimited,
+    /// with the last result.
+    fn consume_until_rate_limited(domain: u64, tokens: u32, limit: usize) -> (usize, Result<(), TransactionError>) {
+        let mut ok = 0;
+        let mut last = Ok(());
+        for _ in 0..limit {
+            last = txn(domain, 0x01, tokens);
+            if last.is_err() {
+                break;
+            }
+            ok += 1;
+        }
+        (ok, last)
+    }
+
+    /// I-01: an exhausted bucket is RateLimited, refusals run no payload and
+    /// consume nothing, and refill restores service.
+    #[test]
+    fn test_exhaustion_refusal_and_refill_through_the_ffi() {
+        const CHILD_ENV: &str = "STACK_FFI_EXHAUST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let (completed, last, elapsed_ms, refusals, runs_delta) = on_sealed_thread(|| {
+                assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+                let t0 = std::time::Instant::now();
+                let (completed, last) = consume_until_rate_limited(1, LARGEST_REQUEST, 50);
+                let elapsed_ms = t0.elapsed().as_millis() as usize;
+                let before = host_payload_count();
+                let refusals = (0..5)
+                    .filter(|_| txn(1, 0x01, LARGEST_REQUEST) == Err(TransactionError::RateLimited))
+                    .count();
+                (completed, last, elapsed_ms, refusals, host_payload_count() - before)
+            });
+            assert_eq!(last, Err(TransactionError::RateLimited));
+            let expected = (SPENDABLE / LARGEST_REQUEST) as usize; // 9
+            assert!(completed >= expected, "completed {completed}");
+            assert!(completed <= expected + elapsed_ms / 100 + 1, "completed {completed} in {elapsed_ms} ms");
+            assert_eq!(refusals, 5);
+            assert_eq!(runs_delta, 0, "a refused transaction must not run the payload");
+
+            // 300 ms of refill at 1000 tokens per second: two more requests of 100.
+            // The unsealed thread sleeps; a sealed one cannot.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let (first, second, runs_delta) = on_sealed_thread(|| {
+                let before = host_payload_count();
+                let first = txn(1, 0x01, LARGEST_REQUEST);
+                let second = txn(1, 0x01, LARGEST_REQUEST);
+                (first, second, host_payload_count() - before)
+            });
+            assert_eq!(first, Ok(()));
+            assert_eq!(second, Ok(()));
+            assert_eq!(runs_delta, 2);
+            return;
+        }
+        run_in_child("tests::test_exhaustion_refusal_and_refill_through_the_ffi", CHILD_ENV);
+    }
+
+    /// I-01: an invalid capability is CapabilityDenied, runs no payload and
+    /// leaves the bucket full.
+    #[test]
+    fn test_invalid_capability_consumes_nothing_through_the_ffi() {
+        const CHILD_ENV: &str = "STACK_FFI_BADCAP_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let (denied, runs_delta, completed, last, elapsed_ms) = on_sealed_thread(|| {
+                assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+                let before = host_payload_count();
+                let denied = (0..20)
+                    .filter(|_| txn(2, 0x100, LARGEST_REQUEST) == Err(TransactionError::CapabilityDenied))
+                    .count();
+                let runs_delta = host_payload_count() - before;
+                let t0 = std::time::Instant::now();
+                let (completed, last) = consume_until_rate_limited(2, LARGEST_REQUEST, 50);
+                (denied, runs_delta, completed, last, t0.elapsed().as_millis() as usize)
+            });
+            assert_eq!(denied, 20);
+            assert_eq!(runs_delta, 0);
+            assert_eq!(last, Err(TransactionError::RateLimited));
+            let expected = (SPENDABLE / LARGEST_REQUEST) as usize;
+            assert!(completed >= expected, "completed {completed}");
+            assert!(completed <= expected + elapsed_ms / 100 + 1, "completed {completed} in {elapsed_ms} ms");
+            return;
+        }
+        run_in_child("tests::test_invalid_capability_consumes_nothing_through_the_ffi", CHILD_ENV);
+    }
+
+    /// I-01: repeated valid and invalid transactions leave no stale state: every
+    /// valid one completes, every invalid one is denied, and the in-flight
+    /// counter is back at zero so a capability change is applied.
+    #[test]
+    fn test_repeated_transactions_leave_no_stale_state_through_the_ffi() {
+        const CHILD_ENV: &str = "STACK_FFI_REPEAT_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let (completed, denied, caps_after) = on_sealed_thread(|| {
+                assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+                let mut completed = 0;
+                let mut denied = 0;
+                for _ in 0..200 {
+                    if txn(3, 0x01, 1) == Ok(()) {
+                        completed += 1;
+                    }
+                    if txn(3, 0x100, 1) == Err(TransactionError::CapabilityDenied) {
+                        denied += 1;
+                    }
+                }
+                (completed, denied, host_set_capabilities(0xFF, 0, 0, 0))
+            });
+            assert_eq!(completed, 200);
+            assert_eq!(denied, 200);
+            assert_eq!(caps_after, Ok(()));
+            return;
+        }
+        run_in_child("tests::test_repeated_transactions_leave_no_stale_state_through_the_ffi", CHILD_ENV);
+    }
+
+    /// I-01: 4 threads x 15 transactions x 10 tokens on one domain all
+    /// complete (600 of 900 spendable), and draining the rest in tens gives
+    /// exactly 30 more plus the refill allowance.
+    #[test]
+    fn test_concurrent_transactions_sum_exactly_through_the_ffi() {
+        const CHILD_ENV: &str = "STACK_FFI_SUM_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            const THREADS: usize = 4;
+            const PER_THREAD: usize = 15;
+            const TOKENS: u32 = 10;
+            on_sealed_thread(|| assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(())));
+            let runs_before = host_payload_count();
+            let t0 = std::time::Instant::now();
+            let go = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+            let workers: std::vec::Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let go = go.clone();
+                    std::thread::spawn(move || {
+                        assert!(host_initialize_and_seal().is_ok(), "seal");
+                        go.wait();
+                        (0..PER_THREAD).filter(|_| txn(4, 0x01, TOKENS) == Ok(())).count()
+                    })
+                })
+                .collect();
+            let completed: usize = workers.into_iter().map(|w| w.join().expect("worker")).sum();
+            let (drained, last) = on_sealed_thread(|| consume_until_rate_limited(4, TOKENS, 200));
+            let elapsed_ms = t0.elapsed().as_millis() as usize;
+            assert_eq!(completed, THREADS * PER_THREAD);
+            assert_eq!(last, Err(TransactionError::RateLimited));
+            let expected_rest = ((SPENDABLE as usize) - THREADS * PER_THREAD * TOKENS as usize) / TOKENS as usize; // 30
+            assert!(drained >= expected_rest, "drained {drained}");
+            assert!(drained <= expected_rest + elapsed_ms / TOKENS as usize + 1, "drained {drained} in {elapsed_ms} ms");
+            assert_eq!(host_payload_count() - runs_before, (completed + drained) as u64);
+            return;
+        }
+        run_in_child("tests::test_concurrent_transactions_sum_exactly_through_the_ffi", CHILD_ENV);
+    }
+
+    /// I-01: a failed transaction leaves no TransactionCompleted record in the
+    /// host's audit trail; only the completed one does.
+    #[test]
+    fn test_failed_transaction_leaves_no_success_audit_record_through_the_ffi() {
+        const CHILD_ENV: &str = "STACK_FFI_AUDIT_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            const DOMAIN: u64 = 5;
+            let (denied, limited, ok) = on_sealed_thread(|| {
+                assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+                let denied = txn(DOMAIN, 0x100, 1);
+                let limited = txn(DOMAIN, 0x01, LARGEST_REQUEST + 1);
+                let ok = txn(DOMAIN, 0x01, 1);
+                (denied, limited, ok)
+            });
+            assert_eq!(denied, Err(TransactionError::CapabilityDenied));
+            assert_eq!(limited, Err(TransactionError::RateLimited));
+            assert_eq!(ok, Ok(()));
+            let mut completed = 0;
+            let mut rate_limited = 0;
+            let mut violations = 0;
+            for index in 0..8192u64 {
+                if let Some(rec) = host_audit_read_slot(index) {
+                    if rec.context_id != DOMAIN {
+                        continue;
+                    }
+                    match rec.event {
+                        HostAuditEvent::TransactionCompleted => completed += 1,
+                        HostAuditEvent::RateLimitTriggered => rate_limited += 1,
+                        HostAuditEvent::CapabilityViolation => violations += 1,
+                        other => panic!("unexpected event {other:?}"),
+                    }
+                }
+            }
+            assert_eq!((violations, rate_limited, completed), (1, 1, 1));
+            return;
+        }
+        run_in_child("tests::test_failed_transaction_leaves_no_success_audit_record_through_the_ffi", CHILD_ENV);
     }
 
     const SUPERVISED_DEADLINE_NS: u64 = 300_000_000;

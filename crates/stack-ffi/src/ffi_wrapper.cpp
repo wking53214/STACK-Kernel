@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <atomic>
 #include <x86intrin.h>
 #include <fcntl.h>
@@ -18,11 +19,77 @@
 
 using namespace stack;
 
+// ---------------------------------------------------------------------------
+// Governance policy of the FFI host (I-01, R2-K-01).
+//
+// The previous host was GovernedMinotaurHost<64, 100, 1000, 100, 16>: a
+// Reserved floor of 100 in a bucket of 64, which no Standard request could
+// clear, so every transaction was rate limited; and TicksPerToken 100, about
+// 21 million tokens per second on this clock, which would have been no limit
+// at all once the floor was fixed. KineticGovernor now static_asserts
+// Reserved + MaxBurst <= MaxCapacity, so the first mistake cannot compile.
+//
+// Policy: a domain may hold 1000 tokens, a Standard request may not dip into
+// the last 100, the largest single request is 100 tokens, and the bucket
+// refills at kTokensPerSecond. So a domain can burst 900 tokens and then
+// sustain 1000 tokens per second, in requests of at most 100.
+//
+// The refill rate is in HardwareClock ticks (RDTSCP on x86_64, the same
+// counter stack_read_ticks returns). The TSC frequency is a property of the
+// machine, not of the build, so it is measured once at initialization against
+// CLOCK_MONOTONIC and handed to the host's constructor; kDefaultTicksPerToken
+// is only the template default and is never used by this wrapper.
+// ---------------------------------------------------------------------------
+static constexpr uint32_t kMaxCapacity = 1000;
+static constexpr uint32_t kReservedTokens = 100;
+static constexpr uint32_t kMaxRequestTokens = 100;   // largest single request
+static constexpr uint64_t kDefaultTicksPerToken = 2'100'000;  // 2.1 GHz at 1000 tokens/s
+static constexpr std::size_t kMaxDomains = 16;
+static constexpr uint64_t kTokensPerSecond = 1000;
+static constexpr uint64_t kCalibrationSpanNs = 10'000'000;  // 10 ms
+
+static_assert(static_cast<uint64_t>(kReservedTokens) + kMaxRequestTokens <= kMaxCapacity,
+              "FFI host: Reserved + largest request must fit in the bucket (R2-K-01)");
+static_assert(kTokensPerSecond >= 1 && kTokensPerSecond <= 1'000'000'000ULL,
+              "FFI host: tokens per second must divide a second's nanoseconds");
+
+using FfiHost = host::GovernedMinotaurHost<kMaxCapacity, kReservedTokens, kMaxRequestTokens,
+                                           kDefaultTicksPerToken, kMaxDomains>;
+
+// Measures the tick counter against CLOCK_MONOTONIC over kCalibrationSpanNs
+// and returns the ticks per token for kTokensPerSecond. Runs once, on the
+// initializing thread, before anything is sealed (clock_gettime is on the
+// allowlist anyway). A counter that does not advance gives 1 tick per token,
+// the governor's fastest expressible rate; it is clamped, not an error, since
+// HardwareClock has no failure mode to report.
+static uint64_t CalibrateTicksPerToken() noexcept {
+    timespec start{};
+    ::clock_gettime(CLOCK_MONOTONIC, &start);
+    const uint64_t ticks_start = governor::HardwareClock::ReadTicks();
+    uint64_t elapsed_ns = 0;
+    do {
+        timespec now{};
+        ::clock_gettime(CLOCK_MONOTONIC, &now);
+        elapsed_ns = static_cast<uint64_t>(now.tv_sec - start.tv_sec) * 1'000'000'000ULL
+                   + static_cast<uint64_t>(now.tv_nsec - start.tv_nsec);
+    } while (elapsed_ns < kCalibrationSpanNs);
+    const uint64_t ticks = governor::HardwareClock::ReadTicks() - ticks_start;
+    // ticks_per_token = (ticks / elapsed_s) / kTokensPerSecond
+    //                 = ticks * (1e9 / kTokensPerSecond) / elapsed_ns
+    // ticks over 10 ms is below 1e8 on any current clock, so the product fits.
+    const uint64_t ns_per_token = 1'000'000'000ULL / kTokensPerSecond;
+    const uint64_t ticks_per_token = (ticks * ns_per_token) / elapsed_ns;
+    return ticks_per_token == 0 ? 1 : ticks_per_token;
+}
+
 // Global instances
-static host::GovernedMinotaurHost<64, 100, 1000, 100, 16>* g_host = nullptr;
+static FfiHost* g_host = nullptr;
 static std::atomic<bool> g_initialized(false);
 static isolation::StaticArenaBuffer<65536> g_arena;
 static telemetry::SeccompAuditRing<1024> g_audit_ring;
+// Number of times the built-in governed payload has run (I-01: a completed
+// transaction must have run it; a refused one must not have).
+static std::atomic<uint64_t> g_payload_runs{0};
 
 extern "C" {
 
@@ -30,8 +97,9 @@ extern "C" {
 // The host is process wide but the seccomp filter is per thread, so every
 // calling thread seals itself; a thread that is already sealed returns at once.
 int stack_host_initialize_and_seal() {
-    // Allocate host instance
-    static host::GovernedMinotaurHost<64, 100, 1000, 100, 16> host_instance;
+    // Allocate host instance. The calibrated refill rate is measured once,
+    // under the compiler's one-time initialization of this static.
+    static FfiHost host_instance(CalibrateTicksPerToken());
     if (!g_initialized.load()) g_host = &host_instance;
     
     // Initialize the hardened POSIX timer for this thread
@@ -101,6 +169,7 @@ int stack_execute_governed_transaction(
             // Minimal payload: just burn some cycles
             volatile uint64_t x = 0;
             for (int i = 0; i < 1000; i++) x += i;
+            g_payload_runs.fetch_add(1, std::memory_order_relaxed);
         });
 
     if (result.has_value()) return 0;
@@ -227,6 +296,40 @@ int stack_supervised_run(
     report->child_pid = static_cast<int32_t>(r.child_pid);
     report->deadline_fired = r.deadline_fired ? 1 : 0;
     report->reserved[0] = report->reserved[1] = report->reserved[2] = 0;
+    return 0;
+}
+
+// Number of times the built-in governed payload has run in this process.
+// Added in I-01 so a caller can tell that a completed transaction ran its
+// payload and that a refused one did not.
+uint64_t stack_host_payload_count() {
+    return g_payload_runs.load(std::memory_order_acquire);
+}
+
+// The host's own governance audit trail (distinct from the free-standing ring
+// behind stack_audit_push/stack_audit_read_slot). Slot `index` is filled and
+// 0 returned when the slot holds a record; -1 when the host is not
+// initialized, an output pointer is null, or the slot was never written.
+// out_event_type is the AuditEventType value (0 TransactionCompleted,
+// 1 RateLimitTriggered, 2 SoftwareDeadlineExceeded, 3 HardwareTimerPreempted,
+// 4 CapabilityViolation). Added in I-01.
+int stack_host_audit_read_slot(
+    uint64_t index,
+    uint8_t* out_event_type,
+    uint64_t* out_timestamp,
+    uint64_t* out_context_id,
+    uint32_t* out_tokens)
+{
+    if (!out_event_type || !out_timestamp || !out_context_id || !out_tokens) return -1;
+    if (!g_host) return -1;
+
+    telemetry::AuditEventRecord event{};
+    if (!g_host->AuditRing().ReadSlot(index, event)) return -1;
+
+    *out_event_type = static_cast<uint8_t>(event.event_type);
+    *out_timestamp = event.timestamp_ticks;
+    *out_context_id = event.context_id;
+    *out_tokens = event.tokens_consumed;
     return 0;
 }
 

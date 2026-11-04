@@ -409,6 +409,26 @@ public:
  *   - Exceeding one domain's capacity doesn't affect others
  *
  * This is the P3.1 implementation: per-domain buckets for fair rate limiting.
+ *
+ * PARAMETERS (I-01, R2-K-01). The template parameters are a policy and must
+ * be consistent, or the governor serves nothing:
+ *   MaxCapacity:   bucket size; a bucket starts full.
+ *   Reserved:      floor a Standard request may not dip into, so a Standard
+ *                  request of `amount` needs available >= Reserved + amount.
+ *   MaxBurst:      the largest single request. A request above it is refused
+ *                  as RateLimited before any bucket is read, so Reserved +
+ *                  MaxBurst <= MaxCapacity (checked at compile time) is what
+ *                  makes every admissible request servable from a full bucket.
+ *                  The shipped FFI host once had Reserved 100 and MaxCapacity
+ *                  64, which no request could clear; the static_assert below
+ *                  turns that into a compile error.
+ *   TicksPerToken: refill rate in HardwareClock ticks per token. The tick
+ *                  counter's frequency is not known at compile time (it is the
+ *                  TSC on x86_64), so a host that wants a rate in tokens per
+ *                  second measures the counter at run time and passes the
+ *                  result to the constructor; the template value is the
+ *                  default when no measurement is given.
+ *   MaxDomains:    number of independent buckets (domain ids 0..MaxDomains-1).
  */
 template <uint32_t MaxCapacity = 1000,
           uint32_t Reserved = 100,
@@ -416,6 +436,13 @@ template <uint32_t MaxCapacity = 1000,
           uint64_t TicksPerToken = 10000,
           std::size_t MaxDomains = 256>
 class alignas(64) KineticGovernor {
+    static_assert(MaxBurst >= 1, "KineticGovernor: MaxBurst (largest single request) must be at least 1");
+    static_assert(TicksPerToken >= 1, "KineticGovernor: TicksPerToken must be at least 1");
+    static_assert(MaxDomains >= 1, "KineticGovernor: at least one domain");
+    static_assert(static_cast<uint64_t>(Reserved) + MaxBurst <= MaxCapacity,
+                  "KineticGovernor: Reserved + MaxBurst must not exceed MaxCapacity, or no Standard request of "
+                  "MaxBurst tokens can ever be served (R2-K-01)");
+
 private:
     /**
      * Per-domain bucket storage. One atomic bucket per domain.
@@ -427,8 +454,24 @@ private:
 
     std::array<DomainBucket, MaxDomains> domains_{};
     VolumeCounter<1024> volume_{};
+    // Refill rate actually used: the template default, or the run-time
+    // measured value given to the constructor. Written once, before any
+    // Consume, so a plain member is enough.
+    uint64_t ticks_per_token_{TicksPerToken};
 
 public:
+    constexpr KineticGovernor() noexcept = default;
+
+    /**
+     * Construct with a run-time refill rate in HardwareClock ticks per token
+     * (for example measured TSC frequency / desired tokens per second). Zero
+     * is clamped to one tick per token, the fastest rate the clock can express.
+     */
+    constexpr explicit KineticGovernor(uint64_t ticks_per_token) noexcept
+        : ticks_per_token_(ticks_per_token == 0 ? 1 : ticks_per_token) {}
+
+    [[nodiscard]] constexpr uint64_t TicksPerTokenInUse() const noexcept { return ticks_per_token_; }
+
     /**
      * Consume tokens from a domain's bucket.
      *
@@ -466,6 +509,14 @@ public:
             return std::unexpected(GovernorError::DebtCeilingExceeded);
         }
 
+        // I-01: a request above the largest single request can never be
+        // served (Reserved + MaxBurst <= MaxCapacity is the compile-time
+        // guarantee for everything at or below it). Refused before the
+        // bucket is touched, so nothing is consumed.
+        if (amount > MaxBurst) {
+            return std::unexpected(GovernorError::RateLimited);
+        }
+
         // LAYER 7 CRITICAL FIX: Read clock inside kernel boundary
         // Minotaur cannot control time; governor controls time reading
         uint64_t now = HardwareClock::ReadTicks();
@@ -491,7 +542,15 @@ public:
                 elapsed = 0;
             }
 
-            uint64_t generated = elapsed / TicksPerToken;
+            uint64_t generated = elapsed / ticks_per_token_;
+            if (current.timestamp == 0) {
+                // I-01: a bucket that has never been consumed from starts
+                // full. Before this, its first fill was the clock's absolute
+                // value divided by ticks_per_token (capped at MaxCapacity),
+                // which is full for every realistic rate once the machine has
+                // been up for a moment, but was not a property of the policy.
+                generated = MaxCapacity;
+            }
             uint64_t available = std::min(static_cast<uint64_t>(MaxCapacity),
                                           current.tokens + generated);
 

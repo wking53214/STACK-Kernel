@@ -27,11 +27,19 @@ target_link_libraries(stack_production_hardened PRIVATE Catch2::Catch2WithMain s
 add_executable(stack_supervised_exec_tests tests/supervised_exec_tests.cpp)
 target_link_libraries(stack_supervised_exec_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
 
+# The shipped FFI host (crates/stack-ffi/src/ffi_wrapper.cpp) through its C
+# entry points: the same object, parameters and calibration a Rust caller gets.
+set(STACK_FFI_WRAPPER ${CMAKE_CURRENT_SOURCE_DIR}/../crates/stack-ffi/src/ffi_wrapper.cpp)
+add_executable(stack_ffi_tests tests/ffi_host_tests.cpp ${STACK_FFI_WRAPPER})
+target_link_libraries(stack_ffi_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic pthread)
+
 enable_testing()
 add_test(NAME STACKTests COMMAND stack_tests)
 add_test(NAME STACKProductionHardened COMMAND stack_production_hardened)
 add_test(NAME STACKSupervisedExec COMMAND stack_supervised_exec_tests)
 set_tests_properties(STACKSupervisedExec PROPERTIES TIMEOUT 300)
+add_test(NAME STACKFfiHost COMMAND stack_ffi_tests)
+set_tests_properties(STACKFfiHost PROPERTIES TIMEOUT 300)
 
 # Red-team programs: plain main() executables that exit non-zero on failure.
 # Built with the same -Werror flags as everything else.
