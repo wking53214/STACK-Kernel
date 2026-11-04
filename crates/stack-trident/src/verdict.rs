@@ -3,14 +3,63 @@
 
 use serde_json::Value;
 
+use crate::config::DeploymentProfile;
 use crate::envelope::Nonce;
 use crate::keys::Fingerprint;
 use crate::vocab::{Check, GateOutcome, GatePosition, ReasonCode, Resolution};
 
+/// How much an acceptance may be relied on, decided by the profile of
+/// the Trident that made it. The checks are the same under both; what
+/// differs is what the deployment was allowed to assume (audience
+/// binding, durable replay state, key metadata). A consumer that must
+/// not act on a development acceptance calls
+/// [`VerifiedHandoff::require_production`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Assurance {
+    /// Made by a [`DeploymentProfile::Development`] Trident.
+    Development,
+    /// Made by a [`DeploymentProfile::Production`] Trident: audience
+    /// bound, durable replay store, epoch floor on, every key carrying
+    /// issuer metadata.
+    Production,
+}
+
+impl Assurance {
+    /// The assurance a Trident with this profile gives.
+    pub const fn of(profile: DeploymentProfile) -> Self {
+        match profile {
+            DeploymentProfile::Development => Self::Development,
+            DeploymentProfile::Production => Self::Production,
+        }
+    }
+
+    /// Log and label spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Production => "production",
+        }
+    }
+}
+
+/// Returned by [`VerifiedHandoff::require_production`] for an acceptance
+/// made under the Development profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("handoff was accepted with development assurance; production assurance is required")]
+pub struct DevelopmentAssurance;
+
 /// An envelope that passed all three prongs. Every field here was either
 /// re-derived by the receiver or authenticated under the sender's key.
+///
+/// What this proves: the envelope was sealed by a holder of the key with
+/// fingerprint `sender`, binds `payload`, and was not seen before by this
+/// receiver. A valid HMAC proves possession of a shared key, not who the
+/// holder is and not that the action was legitimate; both belong to the
+/// layer that issued the key and the layer that judges the payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedHandoff {
+    /// Profile of the Trident that accepted it. See [`Assurance`].
+    pub assurance: Assurance,
     /// Authenticated sender.
     pub sender: Fingerprint,
     /// Accepted sequence number (now the sender's high-water mark).
@@ -31,6 +80,25 @@ pub struct VerifiedHandoff {
     pub subject_digest: String,
     /// The payload.
     pub payload: Value,
+}
+
+impl VerifiedHandoff {
+    /// Whether this acceptance carries [`Assurance::Production`].
+    pub fn is_production(&self) -> bool {
+        self.assurance == Assurance::Production
+    }
+
+    /// Refuses a development-assurance acceptance. Admission code that
+    /// acts on handoffs calls this before acting, so a Trident that was
+    /// allowed to assume things (no audience, no durable state) can never
+    /// authorise anything downstream.
+    pub fn require_production(&self) -> Result<&Self, DevelopmentAssurance> {
+        if self.is_production() {
+            Ok(self)
+        } else {
+            Err(DevelopmentAssurance)
+        }
+    }
 }
 
 /// Why an envelope was refused and what happened to receiver state.

@@ -21,6 +21,46 @@ pub const TRACKED_SENDERS_CEILING: usize = 65_536;
 pub const BREAKER_THRESHOLD_CEILING: u32 = 1024;
 /// Hard ceiling on `breaker_window_ms`: one day.
 pub const BREAKER_WINDOW_CEILING_MS: u64 = 86_400_000;
+/// Cap on `max_past_skew_ms` under [`DeploymentProfile::Production`]:
+/// five minutes. A wider window is a wider replay window for any envelope
+/// the replay cache has had to evict.
+pub const PRODUCTION_PAST_SKEW_CAP_MS: u64 = 300_000;
+/// Cap on `max_future_skew_ms` under [`DeploymentProfile::Production`]:
+/// one minute. A wider window delays the epoch floor by as much at every
+/// start and reset.
+pub const PRODUCTION_FUTURE_SKEW_CAP_MS: u64 = 60_000;
+
+/// How much a deployment is allowed to assume. The profile changes what
+/// [`TridentConfig::validate`] and [`crate::Trident::new_with_store`]
+/// refuse; it never changes how an envelope is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DeploymentProfile {
+    /// The default, for tests and local work. Everything the crate can be
+    /// configured to do is allowed, including binding no audience and
+    /// running on a non-durable replay store. An acceptance made under
+    /// this profile carries [`crate::Assurance::Development`], and a
+    /// consumer that needs production assurance refuses it.
+    #[default]
+    Development,
+    /// Refuses every configuration that rests on an assumption: an empty
+    /// or opted-out audience, a non-durable replay store, the start-up
+    /// epoch floor turned off, skew windows above
+    /// [`PRODUCTION_PAST_SKEW_CAP_MS`] and [`PRODUCTION_FUTURE_SKEW_CAP_MS`],
+    /// and any key in the ring that carries no issuer metadata. An
+    /// acceptance made under this profile carries
+    /// [`crate::Assurance::Production`].
+    Production,
+}
+
+impl DeploymentProfile {
+    /// Log and label spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Production => "production",
+        }
+    }
+}
 
 /// Which terminal breaches count toward a sender's circuit breaker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +80,12 @@ pub enum BreakerAttribution {
 }
 
 /// Why a [`TridentConfig`] was refused.
+///
+/// A requirement that is a yes or no, such as a profile rule, is reported
+/// with `value` 0 or 1 and the allowed range `1..=1` (required) or `0..=0`
+/// (forbidden). `field` then names the setting, or the thing being
+/// counted: `replay_store` (must be durable), `keyring.legacy_keys` (must
+/// be 0).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("config field `{field}` is {value}; allowed range is {min}..={max}")]
 pub struct ConfigError {
@@ -56,6 +102,10 @@ pub struct ConfigError {
 /// All caps and windows. Every field has a default and a hard ceiling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TridentConfig {
+    /// What this deployment may assume. Default
+    /// [`DeploymentProfile::Development`] so that existing callers keep
+    /// working; see [`TridentConfig::production`] for the other.
+    pub profile: DeploymentProfile,
     /// Largest accepted envelope, in bytes, raw or canonically encoded.
     /// Default 65,536 (64 KiB). Ceiling 16 MiB.
     pub max_envelope_bytes: usize,
@@ -130,11 +180,22 @@ pub struct TridentConfig {
     pub breaker_window_ms: u64,
     /// Which breaches count. Default [`BreakerAttribution::AuthenticatedOnly`].
     pub breaker_attribution: BreakerAttribution,
+    /// DANGEROUS operator override. At start, a durable replay store whose
+    /// high-water mark is ahead of the wall clock by more than
+    /// `max_future_skew_ms` means the clock went backwards since the
+    /// previous run, and the Trident refuses to start. With this set it
+    /// starts anyway, logs a warning, and keeps refusing every envelope
+    /// issued at or before the stored high-water mark until the clock has
+    /// caught up (the epoch floor is unchanged by this flag). Default
+    /// false. Set it only for a deliberate recovery after a clock
+    /// correction, never in a config that is left in place.
+    pub dangerously_allow_clock_behind_store: bool,
 }
 
 impl Default for TridentConfig {
     fn default() -> Self {
         Self {
+            profile: DeploymentProfile::Development,
             max_envelope_bytes: 65_536,
             max_depth: 32,
             max_nodes: 16_384,
@@ -149,6 +210,7 @@ impl Default for TridentConfig {
             breaker_threshold: 5,
             breaker_window_ms: 60_000,
             breaker_attribution: BreakerAttribution::AuthenticatedOnly,
+            dangerously_allow_clock_behind_store: false,
         }
     }
 }
@@ -174,11 +236,28 @@ impl TridentConfig {
     /// The default config with the audience requirement explicitly waived:
     /// no receiver is bound, and [`TridentConfig::validate`] warns that any
     /// holder of the shared key can replay an envelope to any receiver.
-    /// For tests and single-receiver setups. A deployment where more than
-    /// one receiver trusts a sender key sets `audience` instead.
+    ///
+    /// Development only. The profile is
+    /// [`DeploymentProfile::Development`], and setting it to `Production`
+    /// on this config makes `validate` refuse it (field
+    /// `allow_unbound_audience`): there is no production deployment that
+    /// binds no receiver. A deployment where more than one receiver
+    /// trusts a sender key sets `audience` instead.
     pub fn unbound_audience() -> Self {
         Self {
             allow_unbound_audience: true,
+            ..Self::default()
+        }
+    }
+
+    /// The default config under [`DeploymentProfile::Production`], bound
+    /// to `audience`. Still needs a durable store
+    /// ([`crate::Trident::new_with_store`]) and a ring whose every key
+    /// carries issuer metadata.
+    pub fn production(audience: impl Into<String>) -> Self {
+        Self {
+            profile: DeploymentProfile::Production,
+            audience: audience.into(),
             ..Self::default()
         }
     }
@@ -189,6 +268,15 @@ impl TridentConfig {
     /// An empty `audience` fails here (field `audience`) unless
     /// `allow_unbound_audience` is set, so a receiver that binds no audience
     /// is always a decision and never an accident.
+    ///
+    /// Under [`DeploymentProfile::Production`] it also fails on
+    /// `allow_unbound_audience` (field `allow_unbound_audience`, even with
+    /// an audience set: the opt-out has no place in a production config),
+    /// on `enforce_startup_epoch == false` (field `enforce_startup_epoch`)
+    /// and on skew windows above [`PRODUCTION_PAST_SKEW_CAP_MS`] and
+    /// [`PRODUCTION_FUTURE_SKEW_CAP_MS`]. The rules that need the store or
+    /// the key ring (a durable store, no legacy keys) are applied by
+    /// [`crate::Trident::new_with_store`].
     ///
     /// A config that passes may still rest on an assumption the operator
     /// should know about. Each one is reported once per call as a
@@ -236,6 +324,18 @@ impl TridentConfig {
             u64::from(BREAKER_THRESHOLD_CEILING),
         )?;
         check("breaker_window_ms", self.breaker_window_ms, 1, BREAKER_WINDOW_CEILING_MS)?;
+        if self.profile == DeploymentProfile::Production {
+            check(
+                "allow_unbound_audience",
+                u64::from(self.allow_unbound_audience),
+                0,
+                0,
+            )?;
+            check("audience", as_u64(self.audience.len()), 1, as_u64(MAX_AUDIENCE_BYTES))?;
+            check("enforce_startup_epoch", u64::from(self.enforce_startup_epoch), 1, 1)?;
+            check("max_past_skew_ms", self.max_past_skew_ms, 1, PRODUCTION_PAST_SKEW_CAP_MS)?;
+            check("max_future_skew_ms", self.max_future_skew_ms, 0, PRODUCTION_FUTURE_SKEW_CAP_MS)?;
+        }
         if self.audience.is_empty() {
             if !self.allow_unbound_audience {
                 tracing::error!(
@@ -255,6 +355,11 @@ impl TridentConfig {
         if self.enforce_startup_epoch && self.restored_high_water_ms == 0 {
             tracing::warn!(
                 "stack.trident restart replay guard assumes the wall clock did not go backwards: restored_high_water_ms is 0"
+            );
+        }
+        if self.dangerously_allow_clock_behind_store {
+            tracing::warn!(
+                "stack.trident dangerously_allow_clock_behind_store is set: a clock behind the replay store will not stop the verifier from starting"
             );
         }
         Ok(())
