@@ -197,6 +197,29 @@ jobs:
           PYTHON: python
         run: cargo test -p stack-sentinel --test crosscheck --locked -- --ignored
 
+  cpp:
+    # The C++ containment headers under cpp/: the Catch2 suites, the
+    # supervised-executor tests (hostile payloads killed at a deadline in a
+    # child process) and the eight red-team programs, built with the
+    # project's own flags (-Werror) and run under ctest. Ubuntu 24.04 ships
+    # g++ 13, cmake 3.28 and Catch2 3.4, the versions this was developed on.
+    # Known: the pre-existing stack_tests case "Capability Mutation Race
+    # Fix" (tests_all_components.cpp) is scheduling dependent and fails on
+    # an unchanged tree in roughly one run in five; see cpp/CONTAINMENT.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cmake, g++ and Catch2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ catch2
+      - name: Configure
+        run: cmake -S cpp -B build/cpp
+      - name: Build with the project flags
+        run: cmake --build build/cpp -j"$(nproc)"
+      - name: Run every registered test, red-team programs included
+        run: ctest --test-dir build/cpp --output-on-failure
+
   anc:
     # The four ANC crates, every test except ANC_WALL_CLOCK_TESTS. Blocking.
     # Release (whose profile keeps overflow checks; the ANC crates have no

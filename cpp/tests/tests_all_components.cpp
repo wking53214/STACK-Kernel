@@ -28,6 +28,35 @@ static bool ThisThreadIsFiltered() {
     const long rc = ::syscall(SYS_getpid);
     return rc == -1 && errno == ENOSYS;
 }
+
+// Spins on CLOCK_MONOTONIC (vDSO; clock_gettime is also on the allowlist) for
+// the given wall-clock span. Burns CPU the whole time, so a CPU-time deadline
+// shorter than the span expires while the payload is still running.
+static void BurnCpuForMilliseconds(long ms) {
+    timespec start{};
+    ::clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) {
+        timespec now{};
+        ::clock_gettime(CLOCK_MONOTONIC, &now);
+        const long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L + (now.tv_nsec - start.tv_nsec) / 1'000'000L;
+        if (elapsed_ms >= ms) return;
+    }
+}
+
+// Reaps a forked child with a wall-clock bound so a wedged child cannot hang
+// the runner. Returns the wait status; kills the child first if it exceeds the bound.
+static int ReapChildWithin(pid_t pid, long bound_ms) {
+    int status = 0;
+    for (long waited = 0; waited < bound_ms; waited += 10) {
+        const pid_t r = ::waitpid(pid, &status, WNOHANG);
+        if (r == pid) return status;
+        timespec nap{0, 10'000'000L};
+        ::nanosleep(&nap, nullptr);
+    }
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, &status, 0);
+    return status;
+}
 TEST_CASE("Components 1-5: Governor & Sync Core", "[components][1-5]") {
     KineticGovernor<> gov;
     auto res = gov.Consume(0, 10, PriorityClass::Standard);
@@ -156,24 +185,56 @@ TEST_CASE("Component 12: Layer 4 - Debt Refund Asymmetry Fix", "[layer-4][defect
 }
 
 TEST_CASE("Component 12: Layer 4 - BPF Filter Jump Offsets Fix", "[layer-4][defect-3]") {
-    // RED TEAM: Test - Verify filter compiles with computed jump offsets
-    //
-    // VERIFICATION STRATEGY:
-    // Replacing hardcoded jump offsets with constexpr-computed offsets means:
-    // 1. If offsets are wrong, filter array construction fails at compile time
-    // 2. If offsets are correct, the filter is valid and can be installed
-    // 3. Compilation success proves the offset computation is correct
-    //
-    // This defect is verified by successful compilation of stack_host_binding.hpp
-    // The filter array is defined with constexpr-computed offsets; compilation
-    // proves these offsets are syntactically and structurally valid.
-
-    {
-        // Verify InstallFilter function exists and has correct signature
-        REQUIRE(true);  // Type check happens at compile time
-        // Actual syscall filtering is tested in integration/subprocess tests
-        // since SECCOMP is permanent per process/thread
+    // Runs the real filter in a forked child (a filter cannot be removed, so
+    // the runner must not install it) and checks where each call lands:
+    // every allowlisted syscall must reach the kernel, the rt_sigaction
+    // special case must allow GOVERNOR_PREEMPT_SIG and refuse another
+    // signal with EPERM, and an unlisted syscall must get ENOSYS. A wrong
+    // jump offset misroutes at least one of these. The child reports a bit
+    // per check in its exit status; the parent asserts on the whole mask.
+    int pipe_fds[2] = {-1, -1};
+    REQUIRE(::pipe(pipe_fds) == 0);
+    std::cout.flush();
+    const pid_t pid = ::fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+        int mask = 0;
+        if (!HardenedPosixPreemptionGuard::RegisterSignalHandler().has_value()) ::_exit(0);
+        if (!SeccompFilterEngine::InstallFilter().has_value()) ::_exit(0);
+        // Allowlisted calls reach the kernel: success, or the kernel's own
+        // errno for a bad argument (anything but ENOSYS from the filter).
+        timespec ts{};
+        if (::syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts) == 0) mask |= 1 << 0;
+        char byte = 'w';
+        if (::syscall(SYS_write, pipe_fds[1], &byte, 1) == 1) mask |= 1 << 1;
+        char got = 0;
+        if (::syscall(SYS_read, pipe_fds[0], &got, 1) == 1 && got == 'w') mask |= 1 << 2;
+        uint32_t futex_word = 0;
+        if (::syscall(SYS_futex, &futex_word, 1 /* FUTEX_WAKE */, 1, nullptr, nullptr, 0) == 0) mask |= 1 << 3;
+        itimerspec zero{};
+        errno = 0;
+        if (::syscall(SYS_timer_settime, 0x7fffffff, 0, &zero, nullptr) == -1 && errno == EINVAL) mask |= 1 << 4;
+        // The libc wrapper marshals the kernel's sigaction layout; it still
+        // issues rt_sigaction, which is what the filter inspects.
+        struct sigaction sa{};
+        sa.sa_handler = SIG_DFL;
+        errno = 0;
+        if (::sigaction(GOVERNOR_PREEMPT_SIG, &sa, nullptr) == 0) mask |= 1 << 5;
+        errno = 0;
+        if (::sigaction(SIGUSR1, &sa, nullptr) == -1 && errno == EPERM) mask |= 1 << 6;
+        // Unlisted: the default deny.
+        errno = 0;
+        if (::syscall(SYS_getpid) == -1 && errno == ENOSYS) mask |= 1 << 7;
+        ::_exit(mask);  // exit_group: allowlisted
     }
+    const int status = ReapChildWithin(pid, 10'000);
+    ::close(pipe_fds[0]);
+    ::close(pipe_fds[1]);
+    INFO("child exit mask " << (WIFEXITED(status) ? WEXITSTATUS(status) : -1)
+         << " (bits: clock_gettime, write, read, futex, timer_settime, rt_sigaction preempt, rt_sigaction other EPERM, getpid ENOSYS)"
+         << " signaled=" << WIFSIGNALED(status));
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 0xFF);
 }
 
 TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][defect-2]") {
@@ -400,6 +461,93 @@ TEST_CASE("Component 12: Layer 4 - Every governed thread installs its own filter
     REQUIRE(transactions_ok.load() == num_threads);
     REQUIRE(threads_filtered.load() == num_threads);
     REQUIRE_FALSE(ThisThreadIsFiltered());
+}
+
+TEST_CASE("Component 10 & 11: Hard-timeout expiry on a sealed thread does not kill the process", "[layer-2][layer-4][D-01]") {
+    // D-01: the deadline signal handler runs on the sealed thread and returns
+    // through rt_sigreturn. With rt_sigreturn missing from the allowlist the
+    // kernel refuses the return and the whole process dies with SIGSEGV.
+    // The scenario runs in a forked child so a crash cannot take the runner
+    // down; the parent asserts on the wait status.
+    std::cout.flush();
+    const pid_t pid = ::fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+        // A fresh thread: the forking thread's thread-local timer state may
+        // say "initialized" while its kernel timer did not survive the fork.
+        int code = 13;
+        std::thread([&code]() {
+            GovernedMinotaurHost<> host;
+            if (!host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0))) { code = 10; return; }
+            SIMDCapabilityToken token(7, CapabilityMask256(0x01, 0, 0, 0));
+            // 20 ms of CPU time, payload burns 200 ms: the timer fires mid-payload.
+            auto res = host.ExecuteGovernedTransaction(
+                token, 10, 1'000'000'000'000ULL, 20'000'000ULL, []() { BurnCpuForMilliseconds(200); });
+            if (res.has_value()) { code = 11; return; }
+            // 0 on the expected error, otherwise 20 + the error code for diagnosis.
+            code = res.error() == HostExecutionError::PreemptionTriggered ? 0 : 20 + static_cast<int>(res.error());
+        }).join();
+        ::_exit(code);
+    }
+    const int status = ReapChildWithin(pid, 10'000);
+    INFO("wait status " << status << " signaled=" << WIFSIGNALED(status)
+         << " sig=" << (WIFSIGNALED(status) ? WTERMSIG(status) : 0)
+         << " exit=" << (WIFEXITED(status) ? WEXITSTATUS(status) : -1));
+    REQUIRE_FALSE((WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV));
+    REQUIRE(WIFEXITED(status));
+    // 0: the expiry was detected and reported as PreemptionTriggered.
+    REQUIRE(WEXITSTATUS(status) == 0);
+}
+
+TEST_CASE("Component 12: Layer 4 - A zero hard timeout is rejected, not silently undeadlined", "[layer-4][D-03]") {
+    // D-03: hard_timeout_nanoseconds == 0 used to mean "no deadline" and the
+    // payload ran unbounded with a SUCCESS result. The host now refuses it
+    // before sealing, consuming tokens or running the payload.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+    std::atomic<bool> payload_ran{false};
+    std::atomic<int> error_code{-1};
+    std::atomic<bool> sealed_after{true};
+
+    std::thread worker([&]() {
+        SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
+        auto res = host.ExecuteGovernedTransaction(
+            token, 5, 100'000'000'000ULL, 0ULL,
+            [&]() { payload_ran.store(true, std::memory_order_release); });
+        error_code.store(res.has_value() ? 0 : static_cast<int>(res.error()), std::memory_order_release);
+        sealed_after.store(ThisThreadIsFiltered(), std::memory_order_release);
+    });
+    worker.join();
+
+    REQUIRE_FALSE(payload_ran.load());
+    REQUIRE(error_code.load() == static_cast<int>(HostExecutionError::InvalidHardTimeout));
+    // Argument validation runs before the irreversible seal.
+    REQUIRE_FALSE(sealed_after.load());
+}
+
+TEST_CASE("Component 12: Layer 4 - A timer that cannot be armed fails closed", "[layer-4][D-03]") {
+    // If timer_settime fails the payload must not run, and the failure must
+    // be distinguishable from a timer_create failure. The worker forges an
+    // initialized-looking thread timer state with an id the kernel rejects
+    // (EINVAL), so Arm() fails deterministically on a sealed thread.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+    std::atomic<bool> payload_ran{false};
+    std::atomic<int> error_code{-1};
+
+    std::thread worker([&]() {
+        g_thread_timer_state.timer_id = reinterpret_cast<timer_t>(static_cast<uintptr_t>(0x7fffffff));
+        g_thread_timer_state.timer_initialized = true;
+        SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
+        auto res = host.ExecuteGovernedTransaction(
+            token, 5, 100'000'000'000ULL, 20'000'000ULL,
+            [&]() { payload_ran.store(true, std::memory_order_release); });
+        error_code.store(res.has_value() ? 0 : static_cast<int>(res.error()), std::memory_order_release);
+    });
+    worker.join();
+
+    REQUIRE_FALSE(payload_ran.load());
+    REQUIRE(error_code.load() == static_cast<int>(HostExecutionError::TimerArmFailed));
 }
 
 TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][defect-1]") {

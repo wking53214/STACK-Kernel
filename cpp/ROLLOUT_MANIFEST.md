@@ -1,48 +1,41 @@
-# ≡TACK Rollout Manifest v1.0.0
-# Component 20: Deployment Strategy for 17 Host Body Repositories
+# C++ containment layer: integration notes
 
-## Phase 1: Dependency Injection (Repos 1-5) [Core Infrastructure]
+This file used to describe a staged rollout to seventeen named repositories
+and declared "all 20 components production-locked". None of those
+repositories exist in this workspace, no rollout has happened, and the
+layer is not production-locked. What follows is what a consumer of these
+headers has to do, and what state the layer is in.
 
-**Target Repos**: host-body-core, minotaur-dispatcher, telemetry-aggregator, governor-daemon, seccomp-supervisor
+## Integrating the headers
 
-**Action**: 
-- Inject stack_containment CMake target via `cpp/CMakeLists.txt`
-- Update `#include` directives to reference `stack_kernel.hpp`, `stack_kinetic_governor.hpp`, `posix_deadline_timer_hardened.hpp`
-- Build with C++23, `-march=native`, `-fno-exceptions`
+- Link the `stack_containment` CMake INTERFACE target from
+  `cpp/CMakeLists.txt`, or add `cpp/include` to the include path. Build
+  with C++23, `-fno-exceptions -fno-rtti`, and on x86_64 `-mavx2`.
+- To run an untrusted payload that must be stopped: call
+  `stack::supervised::SupervisedExecutor::Run` with explicit `Limits`
+  (wall-clock deadline required) and classify on `ExecutionReport::outcome`.
+  Treat anything but `Completed` as failure. Read `CONTAINMENT.md` first.
+- To run a trusted payload under the governor on the calling thread: call
+  `GovernedMinotaurHost::ExecuteGovernedTransaction`. The calling thread is
+  sealed with a seccomp allowlist on first use and stays sealed. The hard
+  timeout is a cooperative CPU-time deadline, not a stop.
+- `SeccompAuditRing` is telemetry. Its signing is an XOR placeholder; do not
+  use it as a receipt.
+- `SIMDCapabilityToken` is a caller-supplied request mask checked against a
+  host-global active mask; it is not a credential and there is no issuer.
 
-## Phase 2: Signal & Preemption Wiring (Repos 6-12) [Worker Execution]
+## State of the layer
 
-**Target Repos**: minotaur-worker-pool, task-scheduler, compute-node-x86, compute-node-arm, job-queue-manager, priority-router, deadline-enforcer
+| Area | State |
+|---|---|
+| Build and tests | Eleven ctest entries, all compiled with `-Werror`; CI job `cpp` runs them. |
+| Supervised execution | Implemented and tested on x86_64 (`supervised_exec_tests.cpp`). aarch64 not built. |
+| In-process path | Cooperative deadline; D-01 and D-03 fixed; D-02 not fixable on this path. |
+| Capability model | Mask check only; no authorization, issuer, expiry or revocation (D-04, open). |
+| Audit as receipt | Not usable (D-05, open). |
+| FFI | Distinct failure codes; `supervised_run` exposed; FFI host parameters make every transaction rate limited (open). |
+| Known test issue | One scheduling-dependent Catch2 case; see `CONTAINMENT.md`. |
 
-**Action**:
-- Replace standard thread loops with `GovernedMinotaurHost::ExecuteGovernedTransaction`
-- Wire `HardenedPosixPreemptionGuard` signal handler registration at thread startup
-- Enable deadline scoping via `ExecutionDeadlineScope` for compute budgets
-
-## Phase 3: SECCOMP Lockdown & Telemetry (Repos 13-17) [Security Edge]
-
-**Target Repos**: edge-gateway, audit-logger, capability-issuer, zero-trust-proxy, compliance-monitor
-
-**Action**:
-- Connect `SeccompAuditRing` to edge telemetry pipeline (via `stack_audit.hpp`)
-- Issue `SIMDCapabilityToken` structs at gateway layer (via `stack_host_binding.hpp`)
-- Install `SeccompFilterEngine::InstallFilter()` after signal handler registration but before untrusted worker handoff
-
-## Integration Checklist
-
-- [ ] Phase 1: Core infrastructure (5 repos) linked and building
-- [ ] Phase 2: Worker pools executing under governorship (7 repos)
-- [ ] Phase 3: Telemetry and capability issuance at security edge (5 repos)
-- [ ] All 20 components validated (test_all_components.cpp passes)
-- [ ] ABI stability matrix verified (lock-free atomics, alignment contracts)
-- [ ] Chaos stress test passes (4-thread concurrent load, 2000 transactions/sec)
-
-## Components Status
-
-✓ 1-10: Hardware sync, governor, preemption
-✓ 11-13: SECCOMP, host binding, SIMD tokens
-✓ 14-15: Zero-heap arena, seqlock audit ring
-✓ 16-17: Integration harnesses & chaos stress
-✓ 18-20: ABI verification, build targets, deployment plan
-
-All 20 components production-locked. Ready for Host Body rollout.
+The checklist that was here ("All 20 components validated", "ABI stability
+matrix verified", "Chaos stress test passes") had no artefacts behind it
+and is withdrawn.

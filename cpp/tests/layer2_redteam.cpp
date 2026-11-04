@@ -65,7 +65,7 @@ void test_signal_fire_basic() {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
         if (elapsed > 20) break;
         // Busy loop to consume CPU time
-        volatile int x = 0;
+        [[maybe_unused]] volatile int x = 0;
         for (int i = 0; i < 10000; ++i) x = i;
     }
 
@@ -112,7 +112,7 @@ void test_disarm_race_stale_state_poison() {
             auto now = std::chrono::high_resolution_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
             if (elapsed > 10) break;
-            volatile int x = 0;
+            [[maybe_unused]] volatile int x = 0;
             for (int i = 0; i < 10000; ++i) x = i;
         }
         // Destructor runs here, disarms timer, clears preempted flag
@@ -131,7 +131,7 @@ void test_disarm_race_stale_state_poison() {
         }
 
         // Run a quick, non-preemptive payload
-        volatile int x = 0;
+        [[maybe_unused]] volatile int x = 0;
         for (int i = 0; i < 1000; ++i) x = i;
 
         // If preempted flag was poisoned from transaction 1's disarm race,
@@ -180,7 +180,7 @@ void test_repeated_arm_disarm_cycles() {
             auto now = std::chrono::high_resolution_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
             if (elapsed > 60) break;
-            volatile int x = 0;
+            [[maybe_unused]] volatile int x = 0;
             for (int i = 0; i < 10000; ++i) x = i;
         }
 

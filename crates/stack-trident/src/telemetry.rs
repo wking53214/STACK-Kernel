@@ -41,6 +41,12 @@ pub const REPLAY_EVICTIONS_TOTAL: &str = "stack_trident_replay_evictions_total";
 /// Counter. Counted breaches that could not be recorded because the sender
 /// table was full. No labels.
 pub const BREAKER_UNTRACKED_TOTAL: &str = "stack_trident_breaker_untracked_total";
+/// Counter. Writes to the durable replay store that failed. A failed
+/// acceptance commit refuses the envelope (`state_unavailable`); a failed
+/// quarantine or release mark is logged and leaves the in-memory state in
+/// force. Any non-zero rate means the verifier is refusing valid work or
+/// will lose quarantines on restart; alert on it. No labels.
+pub const STORE_FAILURES_TOTAL: &str = "stack_trident_store_failures_total";
 
 /// Span around one verification.
 pub const SPAN_VERIFY: &str = "stack.trident.verify";

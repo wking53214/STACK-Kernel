@@ -171,6 +171,21 @@ public:
  *   - SYS_timer_settime (223): Arm and disarm the thread's deadline timer. The
  *     timer is created before the filter is installed (timer_create is not
  *     allowed), but a sealed thread must still be able to arm it.
+ *   - SYS_rt_sigreturn (15): Return from the deadline signal handler. The
+ *     kernel issues this call from the signal trampoline when the handler
+ *     returns; with it denied the return faults and the whole process dies
+ *     with SIGSEGV on the first deadline expiry (D-01).
+ *
+ * NOT ISOLATION: this filter bounds what a payload on the sealed thread can
+ * call; it does not bound how long the payload runs and it cannot stop it.
+ * The deadline on this path is cooperative: its handler only sets a flag
+ * that is read after the payload returns, and the allowlist above lets the
+ * payload disarm that very deadline (timer_settime on the thread's timer) or
+ * ignore its signal (rt_sigaction on GOVERNOR_PREEMPT_SIG). Both calls are
+ * needed by the host itself and are not removed here. A payload that must be
+ * stopped runs under stack::supervised::SupervisedExecutor
+ * (stack_supervised_exec.hpp), which puts it in a child process the parent
+ * can kill.
  *
  * All other syscalls return SECCOMP_RET_ERRNO (ENOSYS). This is safer:
  * if a payload tries ptrace, mmap, prctl, socket, etc., it gets ENOSYS
@@ -213,6 +228,7 @@ private:
     static constexpr long SYS_CLOCK_GETTIME = 228;
     static constexpr long SYS_FUTEX = 202;
     static constexpr long SYS_TIMER_SETTIME = 223;
+    static constexpr long SYS_RT_SIGRETURN = 15;
 #elif defined(__aarch64__)
     static constexpr long SYS_READ = 63;
     static constexpr long SYS_WRITE = 64;
@@ -222,6 +238,7 @@ private:
     static constexpr long SYS_CLOCK_GETTIME = 113;
     static constexpr long SYS_FUTEX = 98;
     static constexpr long SYS_TIMER_SETTIME = 110;
+    static constexpr long SYS_RT_SIGRETURN = 139;
 #else
 #error "SeccompFilterEngine: no syscall table for this architecture"
 #endif
@@ -233,6 +250,7 @@ private:
     static_assert(SYS_CLOCK_GETTIME == __NR_clock_gettime, "SYS_CLOCK_GETTIME must equal __NR_clock_gettime for this architecture");
     static_assert(SYS_FUTEX == __NR_futex, "SYS_FUTEX must equal __NR_futex for this architecture");
     static_assert(SYS_TIMER_SETTIME == __NR_timer_settime, "SYS_TIMER_SETTIME must equal __NR_timer_settime for this architecture");
+    static_assert(SYS_RT_SIGRETURN == __NR_rt_sigreturn, "SYS_RT_SIGRETURN must equal __NR_rt_sigreturn for this architecture");
 
     // Set only after the filter is installed on this thread. Per thread and not
     // per host: the filter is, and a second install would be denied by it.
@@ -268,27 +286,28 @@ public:
             // [3] Load Syscall Number
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
 
-            // [4-11] Whitelist explicit allowed syscalls (jump-on-match to allow)
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_READ, 11, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_WRITE, 10, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT_GROUP, 9, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_CLOCK_GETTIME, 8, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_FUTEX, 7, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT, 6, 0),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_TIMER_SETTIME, 5, 0),
+            // [4-12] Whitelist explicit allowed syscalls (jump-on-match to allow at [17])
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_READ, 12, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_WRITE, 11, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT_GROUP, 10, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_CLOCK_GETTIME, 9, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_FUTEX, 8, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_EXIT, 7, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_TIMER_SETTIME, 6, 0),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_RT_SIGRETURN, 5, 0),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_RT_SIGACTION, 1, 0),
 
-            // [12] Default deny (not in whitelist)
+            // [13] Default deny (not in whitelist)
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)),
 
-            // [13] SYS_rt_sigaction special case (check for GOVERNOR_PREEMPT_SIG)
+            // [14] SYS_rt_sigaction special case (check for GOVERNOR_PREEMPT_SIG)
             BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
             BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(GOVERNOR_PREEMPT_SIG), 1, 0),
 
-            // [15] SYS_rt_sigaction deny (not for GOVERNOR_PREEMPT_SIG)
+            // [16] SYS_rt_sigaction deny (not for GOVERNOR_PREEMPT_SIG)
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
 
-            // [16] All whitelisted calls: allow
+            // [17] All whitelisted calls: allow
             BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
         };
 
@@ -318,7 +337,14 @@ enum class HostExecutionError : uint8_t {
     PreemptionTriggered,
     DeadlineExceeded,
     CapabilityValidationFailed,
-    DebtCeilingExceeded
+    DebtCeilingExceeded,
+    // hard_timeout_nanoseconds was 0. A zero budget used to arm nothing and
+    // run the payload with no deadline at all (D-03); it is now refused
+    // before the thread is sealed and before any token is consumed.
+    InvalidHardTimeout,
+    // timer_settime failed on an already created timer. Distinct from
+    // TimerInitializationFailed (timer_create). The payload does not run.
+    TimerArmFailed
 };
 
 template <
@@ -395,6 +421,19 @@ public:
         uint64_t hard_timeout_nanoseconds,
         ExecutionPayload&& payload) noexcept
     {
+        // COOPERATIVE DEADLINE ONLY. The hard timeout below is a CPU-time
+        // timer whose handler sets a flag that is read after the payload
+        // returns. It does not stop the payload: a payload that never
+        // returns is never stopped, a payload blocked in read() consumes no
+        // CPU time and never trips it, and the sealed thread's allowlist
+        // lets the payload disarm the timer (timer_settime) or ignore its
+        // signal (rt_sigaction on GOVERNOR_PREEMPT_SIG). This path is not
+        // isolation. Use stack::supervised::SupervisedExecutor for a payload
+        // that must be stopped at a deadline.
+        if (hard_timeout_nanoseconds == 0) [[unlikely]] {
+            return std::unexpected(HostExecutionError::InvalidHardTimeout);
+        }
+
         if (!SeccompFilterEngine::IsInstalledOnThisThread()) [[unlikely]] {
             auto init_res = InitializeAndSeal();
             if (!init_res.has_value()) return std::unexpected(init_res.error());
@@ -443,10 +482,15 @@ public:
         TransactionRollbackGuard guard(
             governor_, debt_tracker_, domain_id, start_tick, 0, required_tokens);
 
-        // Component 10 Check: Persistent POSIX Timer
+        // Component 10 Check: Persistent POSIX Timer. Fails closed: an arm
+        // failure returns before the payload runs and the rollback guard
+        // refunds the tokens. The guard's own reason tells timer_create
+        // (resource_unavailable_try_again) from timer_settime (invalid_argument).
         HardenedPosixPreemptionGuard timer_guard;
-        if (!timer_guard.Arm(hard_timeout_nanoseconds).has_value()) [[unlikely]] {
-            return std::unexpected(HostExecutionError::TimerInitializationFailed);
+        if (auto arm_res = timer_guard.Arm(hard_timeout_nanoseconds); !arm_res.has_value()) [[unlikely]] {
+            return std::unexpected(arm_res.error() == std::errc::invalid_argument
+                                       ? HostExecutionError::TimerArmFailed
+                                       : HostExecutionError::TimerInitializationFailed);
         }
 
         // LAYER 8 FIX: Re-validate capabilities before payload execution
