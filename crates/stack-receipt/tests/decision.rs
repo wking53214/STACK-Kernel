@@ -267,10 +267,10 @@ fn synthetic_rosters_are_refused_for_each_named_reason() {
 }
 
 #[test]
-fn the_fixture_decision_in_common_carries_a_placeholder_root_that_does_not_recompute() {
-    // The shared fixture uses a constant root; the recorder tests that
-    // need a real root build one with decision_root. This pins that the
-    // placeholder is not accidentally valid.
+fn the_shared_fixture_decision_recomputes_and_differs_from_every_real_root() {
     let d = decision();
-    assert!(!d.root_matches());
+    assert!(d.root_matches());
+    for case in load_cases() {
+        assert_ne!(evidence(&case).root, d.root);
+    }
 }

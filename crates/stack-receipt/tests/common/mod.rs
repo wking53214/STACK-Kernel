@@ -4,13 +4,38 @@
 #![allow(dead_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
 use stack_receipt::{
-    genesis_hash, Action, ActualAction, Assurance, Attempted, Authorized, CapabilityBinding, DecisionEvidence,
-    Digest32, Event, ExecutionId, GateOutcome, GatePosition, Handoff, NativeDigest, Outcome, Proposed, Provenance,
-    ReceiptKeyAnchor, ReceiptKeyId, ReceiptPublicKey, ReceiptSigner, Record, Rejected, SignedRecord, Subject,
-    Terminal, TrustedReceiptKeys, Verdict,
+    decision_root, genesis_hash, subject_digest, Action, ActualAction, Assurance, Attempted, Authorized,
+    CapabilityBinding, CnsValue, DecisionEvidence, Digest32, Event, ExecutionId, GateOutcome, GatePosition, Handoff,
+    NativeDigest, Outcome, Proposed, Provenance, ReceiptKeyAnchor, ReceiptKeyId, ReceiptPublicKey, ReceiptSigner,
+    Record, Rejected, SignedRecord, Subject, Terminal, TrustedReceiptKeys, Verdict,
 };
+
+/// The content the fixture execution is about.
+pub fn subject_content() -> CnsValue {
+    let mut m = BTreeMap::new();
+    m.insert("doc".to_owned(), CnsValue::text("invoice-42"));
+    m.insert("amount".to_owned(), CnsValue::Int(1200));
+    CnsValue::Map(m)
+}
+
+/// The CNS digest of [`subject_content`].
+pub fn subject_digest_of_content() -> Digest32 {
+    subject_digest(&subject_content())
+}
+
+/// The result bytes the fixture Completed outcome digests.
+pub fn result_bytes() -> &'static [u8] {
+    b"stack-receipt fixture result bytes"
+}
+
+/// SHA-256 of [`result_bytes`].
+pub fn result_digest() -> Digest32 {
+    Digest32::from_bytes(Sha256::digest(result_bytes()).into())
+}
 
 /// Start of test time (a fixed Unix ms value).
 pub const T0: u64 = 1_800_000_000_000;
@@ -92,16 +117,17 @@ pub fn verdict(gate: &str, position: GatePosition, outcome: GateOutcome) -> Verd
     }
 }
 
-/// A two-seat, all-PASS decision. Its root is a placeholder here; the
-/// decision tests recompute real roots.
+/// A two-seat, all-PASS decision with a real (recomputable) root.
 pub fn decision() -> DecisionEvidence {
+    let seats = vec!["Governance_Gateway:door".to_owned(), "DIT:judge".to_owned()];
+    let verdicts = vec![
+        verdict("door", GatePosition::Alpha, GateOutcome::Pass),
+        verdict("judge", GatePosition::Omega, GateOutcome::Pass),
+    ];
     DecisionEvidence {
-        root: d(0x44),
-        seats: vec!["Governance_Gateway:door".into(), "DIT:judge".into()],
-        verdicts: vec![
-            verdict("door", GatePosition::Alpha, GateOutcome::Pass),
-            verdict("judge", GatePosition::Omega, GateOutcome::Pass),
-        ],
+        root: decision_root(&seats, &verdicts),
+        seats,
+        verdicts,
     }
 }
 
@@ -122,8 +148,8 @@ pub fn capability() -> CapabilityBinding {
         issuer_key_id: d(0x66),
         policy_ref: "policy/1".into(),
         audience: "kernel-1".into(),
-        subject_digest: d(0x22),
-        decision_root: d(0x44),
+        subject_digest: subject_digest_of_content(),
+        decision_root: decision().root,
         one_time: true,
         authorized_at_ms: T0 + 1,
     }
@@ -148,7 +174,7 @@ pub fn proposed() -> Event {
     Event::Proposed(Proposed {
         subject: Subject {
             identity: "invoice-42".into(),
-            digest: d(0x22),
+            digest: subject_digest_of_content(),
         },
         decision: decision(),
         action: action(),
@@ -206,8 +232,25 @@ pub fn terminal(outcome: Outcome) -> Event {
 pub fn completed() -> Outcome {
     Outcome::Completed {
         exit_code: 0,
-        result_digest: d(0xcc),
+        result_digest: result_digest(),
     }
+}
+
+/// Re-signs `records` as one chain under `signer`, rewriting sequence,
+/// prev hash and key id. What an insider holding the receipt key can
+/// produce from any list of records.
+pub fn resign_chain(signer: &ReceiptSigner, records: Vec<Record>) -> Vec<SignedRecord> {
+    let mut prev = genesis_hash();
+    let mut out = Vec::new();
+    for (i, mut r) in records.into_iter().enumerate() {
+        r.sequence = u64::try_from(i).unwrap() + 1;
+        r.prev_hash = prev;
+        r.key_id = *signer.key_id();
+        let s = signer.sign(r).unwrap();
+        prev = *s.hash();
+        out.push(s);
+    }
+    out
 }
 
 /// Every outcome variant once.

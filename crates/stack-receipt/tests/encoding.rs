@@ -93,7 +93,7 @@ fn mutations() -> Vec<(&'static str, Record)> {
     };
     push("subject.identity", &|r| prop(r, &|p| p.subject.identity = "invoice-43".into()));
     push("subject.digest", &|r| prop(r, &|p| p.subject.digest = d(0x23)));
-    push("decision.root", &|r| prop(r, &|p| p.decision.root = d(0x45)));
+    push("decision.root", &|r| prop(r, &|p| p.decision.root = d(0x44)));
     push("decision.seats.order", &|r| prop(r, &|p| p.decision.seats.reverse()));
     push("decision.seats.name", &|r| prop(r, &|p| p.decision.seats[0] = "DGK:door".into()));
     push("decision.seats.removed", &|r| prop(r, &|p| {
@@ -148,7 +148,7 @@ fn authorized_mutations() -> Vec<(&'static str, Record)> {
     push("policy_ref.empty", &|a| a.capability.policy_ref = String::new());
     push("audience", &|a| a.capability.audience = "kernel-2".into());
     push("subject_digest", &|a| a.capability.subject_digest = d(0x23));
-    push("decision_root", &|a| a.capability.decision_root = d(0x45));
+    push("decision_root", &|a| a.capability.decision_root = d(0x44));
     push("one_time", &|a| a.capability.one_time = false);
     push("authorized_at_ms", &|a| a.capability.authorized_at_ms += 1);
     push("action.operation", &|a| a.action.operation = "write".into());
@@ -181,7 +181,7 @@ fn attempted_and_terminal_mutations() -> Vec<(&'static str, Record)> {
     push("completed.exit_code", &|t| {
         t.outcome = Outcome::Completed {
             exit_code: 1,
-            result_digest: d(0xcc),
+            result_digest: result_digest(),
         }
     });
     push("completed.result_digest", &|t| {

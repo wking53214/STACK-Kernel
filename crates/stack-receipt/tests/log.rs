@@ -381,4 +381,14 @@ fn a_process_killed_between_attempted_and_terminal_leaves_the_attempt_open() {
     assert_eq!(stages, [Stage::Proposed, Stage::Authorized, Stage::Attempted]);
     assert!(!parsed.adopted_tail);
     assert_eq!(parsed.discarded_tail_bytes, 0);
+    // The verifier: INCOMPLETE with an unknown outcome, never success.
+    let v = stack_receipt::verify_log_bytes(
+        &std::fs::read(&path).unwrap(),
+        &baseline_trust(),
+        &stack_receipt::Expectations::default(),
+    );
+    assert_eq!(v.state, stack_receipt::State::Incomplete);
+    assert_eq!(v.executions.len(), 1);
+    assert_eq!(v.executions[0].execution.outcome, Some(stack_receipt::OutcomeKind::Unknown));
+    assert_eq!(v.executions[0].findings[0].code, stack_receipt::FindingCode::TerminalMissing);
 }

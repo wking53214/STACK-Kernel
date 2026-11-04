@@ -27,8 +27,9 @@
 //! | [`decision`] | decision root recomputation and the verifier's roster policy |
 //! | [`log`] | the `ReceiptLog` trait, the durable `FileReceiptLog`, the log file parser |
 //! | [`recorder`] | the write-ahead `Recorder` and its typestate `Execution` handles |
+//! | [`verify`] | the independent verifier: five states, scope, typed findings |
 //!
-//! The last step adds the verifier.
+//! `RECEIPT.md` at the crate root is the specification.
 
 #![forbid(unsafe_code)]
 
@@ -39,7 +40,12 @@ pub mod log;
 pub mod record;
 pub mod recorder;
 pub mod sign;
+pub mod verify;
 
+pub use verify::{
+    verify_log, verify_log_bytes, verify_receipt_chain, Check, ExecutionSummary, Expectations, Finding, FindingCode,
+    Limitation, LogVerification, Scope, Severity, State, Verification,
+};
 pub use log::{
     check_chains, parse_log, FileReceiptLog, Head, LogError, MemoryReceiptLog, ParsedLog, ReceiptLog, HEADER_LEN,
     MAGIC, MAX_FRAME_BYTES, MAX_LOG_BYTES, SLOT_LEN,
