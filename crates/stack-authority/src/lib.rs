@@ -27,14 +27,16 @@
 //! ## Status
 //!
 //! Step 1: the capability type, its one wire encoding, the strict parser
-//! and the digest. Trust, verification, authorization and the use store
-//! follow in later steps.
+//! and the digest. Step 2: the trust set, the revocation list and strict
+//! signature verification. Authorization and the use store follow in
+//! later steps.
 
 #![forbid(unsafe_code)]
 
 pub mod capability;
 pub mod digest;
 pub mod scope;
+pub mod trust;
 
 pub use capability::{
     Capability, CapabilityDigest, Field, ParseError, SignedCapability, DIGEST_DOMAIN, DOMAIN_TAG, KEY_ID_BYTES,
@@ -43,3 +45,7 @@ pub use capability::{
 };
 pub use digest::Digest32;
 pub use scope::{validate_path, PathError, ResourceScope, ScopeKind, MAX_PATH_BYTES};
+pub use trust::{
+    AnchorStatus, BadSignature, KeyId, PublicKey, Purpose, ResolveError, RevocationList, TrustAnchor, TrustError,
+    TrustSet, KEY_ID_DOMAIN,
+};

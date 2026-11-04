@@ -9,16 +9,69 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
-use stack_authority::{Capability, Digest32, ResourceScope, ScopeKind, KEY_ID_BYTES, NONCE_BYTES};
+use stack_authority::{
+    Capability, Digest32, KeyId, PublicKey, Purpose, ResourceScope, ScopeKind, TrustAnchor, TrustSet, KEY_ID_BYTES,
+    NONCE_BYTES,
+};
 
 /// Start of test time (a fixed Unix ms value).
 pub const T0: u64 = 1_800_000_000_000;
+/// One hour in milliseconds.
+pub const HOUR: u64 = 3_600_000;
+/// One day in milliseconds.
+pub const DAY: u64 = 24 * HOUR;
 
 /// TEST FIXTURE SIGNING KEY: seed is SHA-256 of a public label. Not a
 /// secret, not an issuer anyone deploys.
 pub fn fixture_signing_key(label: &str) -> SigningKey {
     let seed: [u8; 32] = Sha256::digest(format!("stack-authority TEST FIXTURE issuer: {label}").as_bytes()).into();
     SigningKey::from_bytes(&seed)
+}
+
+/// The public half of the fixture key for `label`.
+pub fn fixture_public_key(label: &str) -> PublicKey {
+    PublicKey::from_bytes(fixture_signing_key(label).verifying_key().to_bytes()).unwrap()
+}
+
+/// The key id of the fixture key for `label`.
+pub fn fixture_key_id(label: &str) -> KeyId {
+    fixture_public_key(label).key_id()
+}
+
+/// An active issuer anchor for the fixture key `key_label`, speaking for
+/// `issuer_id`, valid from `T0 - DAY` to `T0 + DAY`.
+pub fn fixture_anchor(issuer_id: &str, key_label: &str) -> TrustAnchor {
+    fixture_anchor_window(issuer_id, key_label, T0 - DAY, T0 + DAY)
+}
+
+/// An active issuer anchor with an explicit window.
+pub fn fixture_anchor_window(issuer_id: &str, key_label: &str, not_before: u64, not_after: u64) -> TrustAnchor {
+    TrustAnchor::new(
+        issuer_id,
+        fixture_public_key(key_label),
+        Purpose::CapabilityIssuer,
+        not_before,
+        not_after,
+    )
+    .unwrap()
+}
+
+/// A trust set holding one anchor: `issuer-1` under key `issuer-1`.
+pub fn baseline_trust_set() -> TrustSet {
+    let mut ts = TrustSet::new(16);
+    ts.insert(fixture_anchor("issuer-1", "issuer-1")).unwrap();
+    ts
+}
+
+/// Encodes and signs `cap` with the fixture key for `key_label`, under
+/// that key's real key id. The honest issuing path.
+pub fn issue(cap: &Capability, key_label: &str) -> Vec<u8> {
+    issue_with_key_id(cap, fixture_key_id(key_label).as_bytes(), &fixture_signing_key(key_label))
+}
+
+/// The baseline capability signed by `issuer-1`.
+pub fn baseline_wire() -> Vec<u8> {
+    issue(&baseline_capability(), "issuer-1")
 }
 
 /// A deterministic 32-byte value from a label, for digests and ids.
