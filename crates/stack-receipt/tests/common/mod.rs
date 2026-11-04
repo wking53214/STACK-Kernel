@@ -4,14 +4,63 @@
 #![allow(dead_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use sha2::{Digest, Sha256};
 use stack_receipt::{
-    Action, ActualAction, Assurance, Attempted, Authorized, CapabilityBinding, DecisionEvidence, Digest32, Event,
-    ExecutionId, GateOutcome, GatePosition, Handoff, NativeDigest, Outcome, Proposed, Provenance, ReceiptKeyId,
-    Record, Rejected, Subject, Terminal, Verdict,
+    genesis_hash, Action, ActualAction, Assurance, Attempted, Authorized, CapabilityBinding, DecisionEvidence,
+    Digest32, Event, ExecutionId, GateOutcome, GatePosition, Handoff, NativeDigest, Outcome, Proposed, Provenance,
+    ReceiptKeyAnchor, ReceiptKeyId, ReceiptPublicKey, ReceiptSigner, Record, Rejected, SignedRecord, Subject,
+    Terminal, TrustedReceiptKeys, Verdict,
 };
 
 /// Start of test time (a fixed Unix ms value).
 pub const T0: u64 = 1_800_000_000_000;
+/// One day in milliseconds.
+pub const DAY: u64 = 24 * 3_600_000;
+
+/// TEST FIXTURE RECEIPT KEY: the secret is SHA-256 of a public label.
+/// Not a secret, not a key anyone deploys.
+pub fn fixture_signer(label: &str) -> ReceiptSigner {
+    let secret: [u8; 32] = Sha256::digest(format!("stack-receipt TEST FIXTURE key: {label}").as_bytes()).into();
+    ReceiptSigner::from_secret_bytes(&secret).unwrap()
+}
+
+/// The public half of the fixture key for `label`.
+pub fn fixture_public_key(label: &str) -> ReceiptPublicKey {
+    *fixture_signer(label).public_key()
+}
+
+/// An active anchor for the fixture key `label` under `kernel_id`, valid
+/// from `T0 - DAY` to `T0 + DAY`.
+pub fn fixture_anchor(kernel_id: &str, label: &str) -> ReceiptKeyAnchor {
+    ReceiptKeyAnchor::new(kernel_id, fixture_public_key(label), T0 - DAY, T0 + DAY).unwrap()
+}
+
+/// A trust set holding the `kernel-1` key for kernel `kernel-1`.
+pub fn baseline_trust() -> TrustedReceiptKeys {
+    let mut t = TrustedReceiptKeys::new(16);
+    t.insert(fixture_anchor("kernel-1", "kernel-1")).unwrap();
+    t
+}
+
+/// Signs `events` in order as one chain under the `kernel-1` fixture key:
+/// sequence 1.., prev hashes linked from genesis.
+pub fn sign_chain(events: Vec<Event>) -> Vec<SignedRecord> {
+    sign_chain_with(&fixture_signer("kernel-1"), events)
+}
+
+/// [`sign_chain`] under an explicit signer.
+pub fn sign_chain_with(signer: &ReceiptSigner, events: Vec<Event>) -> Vec<SignedRecord> {
+    let mut prev = genesis_hash();
+    let mut out = Vec::new();
+    for (i, event) in events.into_iter().enumerate() {
+        let mut r = record(u64::try_from(i).unwrap() + 1, prev, event);
+        r.key_id = *signer.key_id();
+        let s = signer.sign(r).unwrap();
+        prev = *s.hash();
+        out.push(s);
+    }
+    out
+}
 
 /// A digest filled with one byte.
 pub fn d(b: u8) -> Digest32 {

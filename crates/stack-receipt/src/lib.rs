@@ -22,16 +22,22 @@
 //! |---|---|
 //! | [`record`] | the record and event types, their bounds and validation |
 //! | [`encode`] | the one canonical encoding, the record hash, the genesis hash |
+//! | [`sign`] | the receipt signer, signed records and frames, the trusted receipt key set |
 //!
-//! Later steps add signing and the trusted receipt key set, the CNS
-//! decision root and roster policy, the durable file log and the
-//! write-ahead recorder, and the verifier.
+//! Later steps add the CNS decision root and roster policy, the durable
+//! file log and the write-ahead recorder, and the verifier.
 
 #![forbid(unsafe_code)]
 
 pub mod encode;
 pub mod record;
+pub mod sign;
 
+pub use sign::{
+    signed_message, BadSignature, FrameError, ReceiptKeyAnchor, ReceiptKeyStatus, ReceiptPublicKey, ReceiptSigner,
+    ResolveError, SignError, SignedRecord, TrustError, TrustedReceiptKeys, WeakKey, FRAME_OVERHEAD,
+    RECEIPT_KEY_ID_DOMAIN, SIGNATURE_BYTES, SIGNATURE_DOMAIN,
+};
 pub use encode::{
     canonical_bytes, decode_record, genesis_hash, record_hash, DecodeError, DOMAIN_TAG, GENESIS_DOMAIN,
     MAX_RECORD_BYTES, RECORD_HASH_DOMAIN,
