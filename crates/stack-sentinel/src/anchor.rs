@@ -9,6 +9,14 @@
 //!
 //! Reproduces `head_anchor_payload`, `read_head_anchor`,
 //! `verify_head_anchor` and `check_head_anchor`.
+//!
+//! An anchor may carry an optional `name`, a label the Python writer signs
+//! with the other four fields (`twin_custody.py:633-639`: the name joins the
+//! signed payload only when present and truthy, so an unnamed anchor signs
+//! exactly as before). [`read_anchor_file`] keeps the name and
+//! [`check_anchor_file_with`] verifies it; [`parse_head_anchor`] and
+//! [`check_head_anchor_with`] read and check the four fields only, as they
+//! always did, so they fail a named anchor's HMAC.
 
 use crate::attest::{digest_matches, AttestationStatus, KeySet};
 use crate::config::VerifierConfig;
@@ -68,8 +76,43 @@ fn field_str(o: &Object, name: &'static str) -> Result<String, AnchorError> {
 /// way: each field must have the type the writer gives it (`v` and
 /// `entries` integers, the rest strings). Python would coerce with `str()`
 /// and `int()` and then, for any value a real writer could not have made,
-/// fail the HMAC; both paths end in `TRUNCATED`.
+/// fail the HMAC; both paths end in `TRUNCATED`. An optional `name` is not
+/// kept; use [`read_anchor_file`] for an anchor that may be named.
 pub fn parse_head_anchor(bytes: &[u8], max_bytes: usize, limits: ParseLimits) -> Result<HeadAnchor, AnchorError> {
+    parse_inner(bytes, max_bytes, limits).map(|(a, _)| a)
+}
+
+/// An anchor as read from its file: the v1 fields and the optional name the
+/// writer signed with them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorFile {
+    /// The four signed fields, the version and the HMAC.
+    pub anchor: HeadAnchor,
+    /// `None` when the file has no `name` member. `Some("")` when it has one
+    /// that is null or empty (or any other falsy JSON value), which nothing
+    /// signed: such an anchor never verifies (`twin_custody.py:702-703`).
+    pub name: Option<String>,
+}
+
+/// [`parse_head_anchor`], keeping the optional `name`. A `name` that is a
+/// string is kept as it is; any other falsy value (null, `0`, `false`, an
+/// empty list or mapping) is kept as `Some("")`, so it fails the HMAC as it
+/// does in Python; a truthy value that is not a string, which the Python
+/// writer refuses to produce (`_check_anchor_name`), is
+/// [`AnchorError::NotAnAnchor`] (Python would sign its JSON form; both end
+/// in `TRUNCATED`).
+pub fn read_anchor_file(bytes: &[u8], max_bytes: usize, limits: ParseLimits) -> Result<AnchorFile, AnchorError> {
+    let (anchor, o) = parse_inner(bytes, max_bytes, limits)?;
+    let name = match o.get("name") {
+        None => None,
+        Some(Value::Str(s)) => Some(s.clone()),
+        Some(v) if !v.is_truthy() => Some(String::new()),
+        Some(_) => return Err(AnchorError::NotAnAnchor("name")),
+    };
+    Ok(AnchorFile { anchor, name })
+}
+
+fn parse_inner(bytes: &[u8], max_bytes: usize, limits: ParseLimits) -> Result<(HeadAnchor, Object), AnchorError> {
     if bytes.len() > max_bytes {
         return Err(AnchorError::TooLarge {
             len: bytes.len(),
@@ -88,35 +131,67 @@ pub fn parse_head_anchor(bytes: &[u8], max_bytes: usize, limits: ParseLimits) ->
         Some(Value::Int(i)) => i.clone(),
         _ => return Err(AnchorError::NotAnAnchor("entries")),
     };
-    Ok(HeadAnchor {
+    let a = HeadAnchor {
         head: field_str(&o, "head")?,
         entries,
         sealed_at: field_str(&o, "sealed_at")?,
         key_fingerprint: field_str(&o, "key_fingerprint")?,
         hmac: field_str(&o, "hmac")?,
-    })
+    };
+    Ok((a, o))
 }
 
-/// `head_anchor_payload`: domain, a zero byte, then the compact sorted JSON
-/// of `entries`, `head`, `key_fingerprint` and `sealed_at`.
+/// `head_anchor_payload` of an unnamed anchor: domain, a zero byte, then
+/// the compact sorted JSON of `entries`, `head`, `key_fingerprint` and
+/// `sealed_at`.
 pub fn anchor_payload(a: &HeadAnchor) -> Vec<u8> {
+    anchor_payload_named(a, None)
+}
+
+/// `head_anchor_payload(head, entries, sealed_at, key_fingerprint, name)`
+/// (`twin_custody.py:633-639`): as [`anchor_payload`], with `"name"` added
+/// to the sorted JSON only when `name` is present and non-empty (Python's
+/// `if name:`). `None` and `Some("")` give exactly the unnamed payload. The
+/// JSON is `canonical_json` (`twin_custody.py:117-119`): compact separators,
+/// sorted keys, `ensure_ascii`, which the compact writer reproduces.
+pub fn anchor_payload_named(a: &HeadAnchor, name: Option<&str>) -> Vec<u8> {
     let mut body = Object::new();
     body.insert("entries".into(), Value::Int(a.entries.clone()));
     body.insert("head".into(), Value::Str(a.head.clone()));
     body.insert("key_fingerprint".into(), Value::Str(a.key_fingerprint.clone()));
     body.insert("sealed_at".into(), Value::Str(a.sealed_at.clone()));
+    if let Some(n) = name.filter(|n| !n.is_empty()) {
+        body.insert("name".into(), Value::Str(n.to_owned()));
+    }
     let mut out = ANCHOR_DOMAIN.to_vec();
     out.push(0);
     out.extend_from_slice(dumps(&Value::Object(body), Separators::Compact).as_bytes());
     out
 }
 
-/// `verify_head_anchor`: the anchor's HMAC under the key it names.
+/// `verify_head_anchor` of an unnamed anchor: its HMAC under the key it
+/// names.
 pub fn verify_head_anchor(a: &HeadAnchor, keys: &KeySet) -> AttestationStatus {
     if keys.is_empty() {
         return AttestationStatus::Unverifiable;
     }
-    let payload = anchor_payload(a);
+    verify_payload(a, keys, anchor_payload(a))
+}
+
+/// `verify_head_anchor` (`twin_custody.py:694-719`) of an anchor as read
+/// from its file, name included. A `name` member that is present but empty
+/// is `Invalid`: nothing signed it.
+pub fn verify_anchor_file(f: &AnchorFile, keys: &KeySet) -> AttestationStatus {
+    if keys.is_empty() {
+        return AttestationStatus::Unverifiable;
+    }
+    if f.name.as_deref() == Some("") {
+        return AttestationStatus::Invalid;
+    }
+    verify_payload(&f.anchor, keys, anchor_payload_named(&f.anchor, f.name.as_deref()))
+}
+
+fn verify_payload(a: &HeadAnchor, keys: &KeySet, payload: Vec<u8>) -> AttestationStatus {
     if let Some(k) = keys.trusted_key(&a.key_fingerprint) {
         return if digest_matches(k, &payload, &a.hmac) {
             AttestationStatus::Ok
@@ -177,7 +252,22 @@ pub fn check_head_anchor(rows: &[LedgerRow], a: &HeadAnchor, keys: &KeySet) -> O
 ///   `anchor_makes_no_claim` (RETRY); Python treats a zero-entry anchor as
 ///   making no claim and passes the chain.
 pub fn check_head_anchor_with(rows: &[LedgerRow], a: &HeadAnchor, keys: &KeySet, config: &VerifierConfig) -> Option<Finding> {
-    let status = verify_head_anchor(a, keys);
+    check_status(rows, a, verify_head_anchor(a, keys), config)
+}
+
+/// [`check_head_anchor_with`] for an anchor as read from its file, its
+/// optional signed `name` included (see [`verify_anchor_file`]). For an
+/// unnamed anchor the answer is exactly that of [`check_head_anchor_with`].
+pub fn check_anchor_file_with(
+    rows: &[LedgerRow],
+    f: &AnchorFile,
+    keys: &KeySet,
+    config: &VerifierConfig,
+) -> Option<Finding> {
+    check_status(rows, &f.anchor, verify_anchor_file(f, keys), config)
+}
+
+fn check_status(rows: &[LedgerRow], a: &HeadAnchor, status: AttestationStatus, config: &VerifierConfig) -> Option<Finding> {
     let fp = describe(Some(&Value::Str(a.key_fingerprint.clone())));
     let untrusted = |reason, detail: String| {
         Some(Finding {

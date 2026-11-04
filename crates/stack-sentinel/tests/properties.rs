@@ -145,3 +145,63 @@ proptest! {
         prop_assert_ne!(report.verdict(), Verdict::Verified);
     }
 }
+
+/// The hashed decision-field edit above passes only through the anchor
+/// (HeadMismatch): its anchor seals every row. This one seals only the first
+/// `k` rows, as an anchor written some time ago does. Rows after the anchor
+/// are covered only by the unkeyed chain: a writer without the key edits a
+/// hashed field of an unsigned, unseeded row at or after `k`, recomputes
+/// every later hash and drops the signed tail it cannot re-sign, and the
+/// export verifies. The scope record must then say so
+/// (`rows_after_last_anchor_unkeyed`). An edit before `k` is never verified.
+fn edit_a_hashed_field(row: &mut Object) {
+    use stack_sentinel::canonical::{hashed_columns, hashed_mapping_keys};
+    let before = stack_sentinel::recompute_current_hash(row).unwrap();
+    let edited = Value::Str("edited".into());
+    if let Some((col, keys)) = hashed_mapping_keys(row) {
+        let mut m = row.get(col).and_then(Value::as_object).cloned().unwrap_or_default();
+        // A decision hashes only bool(data.parameter_changed): flip truthiness.
+        let truthy = m.get(keys[0]).is_some_and(Value::is_truthy);
+        m.insert(keys[0].into(), if truthy { Value::Bool(false) } else { edited });
+        row.insert(col.into(), Value::Object(m));
+    } else {
+        let (read, _) = hashed_columns(row);
+        let col = read.iter().find(|c| !matches!(**c, "record_kind" | "previous_hash")).unwrap();
+        row.insert((*col).into(), edited);
+    }
+    assert_ne!(stack_sentinel::recompute_current_hash(row).unwrap(), before, "the edit must move the hash");
+}
+
+fn keyed(row: &Object) -> bool {
+    ["authorized_by_sig", "shuffle_seed"].iter().any(|c| row.get(*c).is_some_and(Value::is_truthy))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
+
+    #[test]
+    fn rows_after_a_prefix_anchor_are_covered_only_by_the_unkeyed_chain(p in 0usize..16, k in 1usize..=16) {
+        let (cols, base) = post();
+        prop_assume!(!keyed(&base[p]));
+        // The rewritten export keeps rows up to the next signed or seeded one.
+        let end = (p + 1..base.len()).find(|i| keyed(&base[*i])).unwrap_or(base.len());
+        prop_assume!(k <= end);
+        let mut rows = base[..end].to_vec();
+        edit_a_hashed_field(&mut rows[p]);
+        common::rechain(&mut rows, p);
+        let anchor = common::anchor_bytes(&base, k, common::FIXTURE_KEY);
+        let s = common::verifier(&[common::FIXTURE_KEY])
+            .verify_export_scoped(&common::export_bytes(&cols, &rows), Some(&anchor))
+            .unwrap();
+        if p >= k {
+            prop_assert_eq!(s.report.verdict(), Verdict::Verified, "{}", s.report.render());
+            prop_assert!(s.scope.limitations.contains(&stack_sentinel::Limitation::RowsAfterLastAnchorUnkeyed));
+            let a = s.report.anchor.as_ref().unwrap();
+            prop_assert_eq!(a.entries.clone(), k.to_string());
+            prop_assert!(a.entries.parse::<usize>().unwrap() < s.report.rows_total);
+        } else {
+            prop_assert_ne!(s.report.verdict(), Verdict::Verified);
+            prop_assert_eq!(s.report.finding.as_ref().unwrap().reason, Reason::HeadMismatch);
+        }
+    }
+}

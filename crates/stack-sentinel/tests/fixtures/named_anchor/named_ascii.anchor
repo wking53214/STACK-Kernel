@@ -1,0 +1,9 @@
+{
+  "entries": 16,
+  "head": "b0aff3a212e7bea39682f75fabf25e8cc29a9be0f605519721154765c8b88692",
+  "hmac": "937ee375425152eabb01163371946ee9c080728dab84d4bf486ca06b782663fe",
+  "key_fingerprint": "acdf8e81f938b3ca",
+  "name": "nightly-checkpoint 2026-11-04",
+  "sealed_at": "2026-11-04T00:00:00+00:00",
+  "v": 1
+}
