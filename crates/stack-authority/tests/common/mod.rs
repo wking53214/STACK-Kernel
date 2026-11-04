@@ -114,6 +114,40 @@ pub fn memory_store() -> MemoryUseStore {
     MemoryUseStore::new(1024)
 }
 
+/// A directory under the system temp dir, unique to this process and
+/// call, removed on drop.
+pub struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    pub fn new(label: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "stack-authority-test-{}-{}-{}",
+            std::process::id(),
+            n,
+            label
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    pub fn file(&self, name: &str) -> std::path::PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A deterministic 32-byte value from a label, for digests and ids.
 pub fn fixture_bytes32(label: &str) -> [u8; 32] {
     Sha256::digest(format!("stack-authority TEST FIXTURE bytes: {label}").as_bytes()).into()

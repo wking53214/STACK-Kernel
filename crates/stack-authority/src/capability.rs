@@ -358,6 +358,11 @@ impl CapabilityDigest {
         Digest32::from_hex(s).map(Self)
     }
 
+    /// Wraps a digest read back from a record.
+    pub const fn from_digest32(d: Digest32) -> Self {
+        Self(d)
+    }
+
     /// The 64-character lowercase hex form.
     pub fn to_hex(&self) -> String {
         self.0.to_hex()

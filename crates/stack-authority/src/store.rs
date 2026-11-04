@@ -15,7 +15,7 @@
 //! [`MemoryUseStore`] forgets everything on restart and says so through
 //! [`UseStore::is_durable`]; the verifier refuses it unless its
 //! configuration allows a non-durable store. The durable, hash-chained
-//! `FileUseStore` follows in step 4.
+//! store is [`crate::FileUseStore`].
 
 use std::collections::HashMap;
 use std::fmt;

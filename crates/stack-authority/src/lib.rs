@@ -30,8 +30,8 @@
 //! and the digest. Step 2: the trust set, the revocation list and strict
 //! signature verification. Step 3: the [`Authority`], its ordered checks
 //! (see [`authority`]), the [`AuthorizedAction`] it alone can mint, the
-//! [`UseStore`] trait and the non-durable [`MemoryUseStore`]. The durable
-//! file store follows in step 4.
+//! [`UseStore`] trait and the non-durable [`MemoryUseStore`]. Step 4: the
+//! durable, locked, hash-chained [`FileUseStore`] (see [`file_store`]).
 
 #![forbid(unsafe_code)]
 
@@ -39,6 +39,7 @@ pub mod authority;
 pub mod capability;
 pub mod clock;
 pub mod digest;
+pub mod file_store;
 pub mod scope;
 pub mod store;
 pub mod trust;
@@ -51,6 +52,7 @@ pub use capability::{
 };
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use digest::Digest32;
+pub use file_store::{FileUseStore, LOG_HEADER, MAX_LOG_BYTES, RECORD_DOMAIN};
 pub use scope::{validate_path, PathError, ResourceScope, ScopeKind, MAX_PATH_BYTES};
 pub use store::{MemoryUseStore, UseError, UseKey, UseStore};
 pub use trust::{
