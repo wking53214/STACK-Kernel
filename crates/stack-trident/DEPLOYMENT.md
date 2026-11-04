@@ -3,8 +3,17 @@
 This document says what a deployment of the Trident verifier may rely on,
 what it must provide, and what the crate does not protect against. Every
 claim below is backed by a named test in `crates/stack-trident/tests/`
-(`replay_durable.rs`, `profile.rs`, `redteam.rs`, `trident.rs`) or is marked
-as a limit. Nothing here is proven by inspection alone.
+(`replay_durable.rs`, `profile.rs`, `redteam.rs`, `trident.rs`,
+`replay_shared.rs`, `store_conformance.rs`, `replay_race02.rs`) or is
+marked as a limit. Nothing here is proven by inspection alone.
+
+Labels. **[implemented]**: the code does it. **[tested]**: a named test
+exercises it (implies implemented). **[experimental]**: implemented and
+tested only in a form not meant for deployment. **[planned]**: neither
+implemented nor tested; no claim is made. **[blocked]**: cannot be tested
+in this environment. Statements in sections 2 to 5 that name a test are
+[tested]; a statement marked as a limit is a limit, not a claim. Section
+1a labels each statement.
 
 ## 1. Supported topologies
 
@@ -52,11 +61,73 @@ refuses it (`production_refuses_a_memory_store`).
   Nothing in this crate makes two verifiers on two hosts agree on what was
   accepted. A deployment with more than one verifier routes each sender to
   exactly one of them (sender affinity) and gives each its own store.
+  Section 1a describes the trait contract that a future shared store will
+  have to meet; meeting it in a test does not make sharing supported.
 * **A store on a network file system.** The lock and the fsync semantics
   are those of a local file system; nothing is tested elsewhere.
 * **Hot standby from the same file.** A standby must wait for the active
   verifier's lock to be released, and then takes over everything the active
   one accepted (the second half of the two-verifier test above).
+
+## 1a. The replay store contract: check-and-commit
+
+Decision D (RACE-02, R2-E-04). The Trident decides acceptance; the store
+can only turn an acceptance into a refusal.
+
+* [tested] `ReplayStore::commit` is an atomic check-and-commit. It refuses
+  a record with `StoreError::Conflict` when the (sender, nonce) pair is
+  still inside its retention window, when the sequence is not strictly
+  greater than the sender's stored sequence, or when `issued_at_unix_ms` is
+  below the stored epoch floor. A refused record leaves no trace
+  (`common::conformance::replay_store_conformance`).
+* [tested] The Trident maps a conflict to a refusal with the existing
+  reason (`IssuedBeforeEpoch`, `Replay`, `SequenceNotIncreasing`), never to
+  success, and leaves its memory unchanged
+  (`a_store_conflict_refuses_with_the_matching_reason_and_does_not_poison_memory`).
+  Conflicts are counted in `stack_trident_store_conflicts_total`
+  [implemented].
+* [tested] `operator_reset` publishes its epoch floor with
+  `ReplayStore::raise_epoch_floor`; a verifier started later on the same
+  store starts at that floor
+  (`an_epoch_floor_raised_by_one_verifier_binds_the_other_through_the_store`).
+  The `FileStore` persists the floor as a record and keeps it through
+  compaction (`file_store_conflicts_survive_a_restart_and_a_compaction`).
+  An older binary refuses a log holding a floor record as corrupt
+  [implemented, fail closed].
+* [tested] `MemoryStore` and `FileStore` implement the same check
+  (`memory_store_conforms`, `file_store_conforms`). Both are single-writer.
+  The `FileStore`'s torn-tail rules carry over: a discarded torn record is
+  not consumed, an adopted one is
+  (`file_store_torn_tail_record_is_not_consumed`,
+  `file_store_torn_header_slot_record_is_consumed`).
+* [tested] Behaviour change: an operator reset clears the verifier's
+  memory of sender sequences but not the store's, so a sequence lowered
+  after a reset is refused
+  (`a_sequence_lowered_after_an_operator_reset_is_refused_by_the_store`).
+  A `FileStore` restart already behaved this way.
+* [experimental] Two `Trident` instances in ONE process sharing ONE
+  test-only store (`SharedStore` in `tests/replay_shared.rs`, state behind
+  `Arc<Mutex<..>>`) accept a given envelope at most once, sequentially and
+  with 16 racing threads, and refuse a duplicate sequence or nonce in both
+  directions (`two_verifiers_sharing_one_store_accept_the_same_envelope_at_most_once`,
+  `two_verifiers_racing_one_envelope_accept_it_exactly_once`,
+  `a_duplicate_sequence_across_two_verifiers_is_refused`,
+  `a_duplicate_nonce_across_two_verifiers_is_refused`,
+  `shared_store_conforms_when_reached_through_many_handles`). These are
+  TRAIT-SEMANTICS tests on one machine with one clock. They are not
+  multi-host tests and support no multi-host claim.
+* [planned] A store shared across hosts (a kernel-owned PostgreSQL store).
+  Not implemented, not tested, no claim. Design only:
+  `SHARED_STORE_DESIGN.md`.
+* [blocked] Any multi-host proof: this environment is one machine with one
+  clock.
+* Limit: the in-crate stores prune nonces by the record's own
+  `accepted_at_unix_ms`. On a shared store, writers with different clocks
+  would prune for each other; the design document requires database time
+  for that reason.
+* Limit: the check view (sender sequences, live nonces) is held in memory
+  by both stores and is bounded by the retention window, not by
+  `replay_cache_capacity`, the same posture as the restore at start.
 
 ## 2. Production checklist
 
@@ -91,7 +162,10 @@ following hold; each refusal is a typed error naming the field
    A Development Trident can never produce a Production-assured handoff.
 9. Alerts: `stack_trident_store_failures_total` above zero (the verifier is
    refusing valid work with `state_unavailable`, or will lose quarantine
-   marks on restart); `stack_trident_check_failures_total{reason="key_revoked"}`
+   marks on restart); `stack_trident_halts_total{cause="store_failure"}`
+   (see section 3); `stack_trident_store_conflicts_total` above zero (the
+   store caught what memory did not: a replay through another writer, or
+   state memory had dropped); `stack_trident_check_failures_total{reason="key_revoked"}`
    and `{reason="key_expired"}` for senders still using old keys.
 
 Key rotation: issue the new key with `not_before_ms` at the start of the
@@ -154,6 +228,23 @@ A storage write that fails during a commit refuses the envelope
 (`state_unavailable`, RETRY) and changes nothing in memory, so the same
 envelope is accepted exactly once when storage recovers
 (`a_storage_write_failure_refuses_and_leaves_state_unchanged_so_a_later_retry_is_accepted_once`).
+
+A quarantine mark the store fails to persist (D-24) is counted in
+`stack_trident_store_failures_total`. Under Production it also halts the
+verifier (fail closed, `stack_trident_halts_total{cause="store_failure"}`):
+every envelope is refused `Halted` until `operator_reset` persists the
+mark, and a reset while the store still fails stays halted
+(`production_fails_closed_when_a_quarantine_mark_cannot_be_persisted`,
+`a_store_failure_halt_is_counted_with_its_cause`). Under Development the
+in-memory quarantine stands and the verifier keeps working
+(`development_counts_a_failed_quarantine_mark_and_keeps_the_in_memory_quarantine`).
+A release mark that fails is counted and is restrictive in every profile:
+the quarantine returns on restart
+(`a_failed_release_mark_is_counted_and_the_quarantine_returns_on_restart`).
+
+Replay after a key rotation and a restart on the same store is refused,
+and stays refused as a replay even if the old key is mistakenly made
+active again (`replay_after_key_rotation_and_restart_is_refused`).
 
 Not detectable from the file alone:
 
