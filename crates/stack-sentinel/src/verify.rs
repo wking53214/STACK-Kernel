@@ -503,7 +503,7 @@ impl Verifier {
         self.verify_export_scoped(export, anchor).map(|s| s.report)
     }
 
-    /// [`Verifier::verify_export`], with the [`Scope`] of its verdict: which
+    /// [`Verifier::verify_export`], with the [`Scope`](crate::scope::Scope) of its verdict: which
     /// columns the hash covered, which it did not, and the limitation codes
     /// (see [`crate::scope`]). The report is the one `verify_export` returns;
     /// the telemetry is the same.

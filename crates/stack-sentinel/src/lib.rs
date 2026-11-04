@@ -75,6 +75,9 @@
 //! nothing about it. This is the `sentinel_os` ledger design, reproduced as
 //! it is. [`Report::unhashed_columns`] lists, from a closed set of names,
 //! the unhashed columns an export carried.
+//! [`Verifier::verify_export_scoped`] (and the CLI's `--json`) states that
+//! scope as a stable record, `sentinel-scope/1`, with limitation codes a
+//! consumer must handle; `SCOPE.md` beside this crate defines it.
 //!
 //! Every verdict the Python tool can print, this crate can print. What it
 //! cannot see is outside both tools: which human stands behind a key, and
