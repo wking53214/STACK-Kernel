@@ -210,7 +210,7 @@ pub mod vocab;
 
 pub use canonical::{CanonicalError, Limits, MAX_SAFE_INTEGER};
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use config::{BreakerAttribution, ConfigError, TridentConfig};
+pub use config::{BreakerAttribution, ConfigError, DeploymentProfile, TridentConfig};
 pub use envelope::{
     seal, seal_for, EnvelopeDraft, HandoffEnvelope, Nonce, SealError, ENVELOPE_OWN_NODES, ENVELOPE_VERSION,
     FIELD_NAMES, MAC_AUDIENCE_DOMAIN, MAC_DOMAIN, MAX_AUDIENCE_BYTES,
@@ -218,5 +218,5 @@ pub use envelope::{
 pub use keys::{Fingerprint, KeyError, KeyRing, SecretKey};
 pub use store::{AcceptRecord, FileStore, FileStoreOptions, MemoryStore, ReplayStore, RestoredState, StoreError};
 pub use trident::{HaltedError, StartError, Trident};
-pub use verdict::{Refusal, Verdict, VerifiedHandoff};
+pub use verdict::{Assurance, DevelopmentAssurance, Refusal, Verdict, VerifiedHandoff};
 pub use vocab::{Check, GateOutcome, GatePosition, ReasonCode, Resolution};

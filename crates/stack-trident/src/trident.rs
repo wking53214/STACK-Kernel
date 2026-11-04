@@ -13,14 +13,14 @@ use tracing::field;
 use crate::cns_digest::subject_digest_raw;
 use crate::canonical::{decode_hex_lower, parse_strict, sha256_hex, CanonicalError, Limits};
 use crate::clock::{Clock, SystemClock};
-use crate::config::{BreakerAttribution, ConfigError, TridentConfig};
+use crate::config::{BreakerAttribution, ConfigError, DeploymentProfile, TridentConfig};
 use crate::envelope::{encode_payload_counted, hmac_sha256, HandoffEnvelope, Nonce, ENVELOPE_OWN_NODES, ENVELOPE_VERSION};
 use crate::keys::{Fingerprint, KeyRing};
 use crate::state::{ReplayCache, SenderTable, State};
 use crate::store::{AcceptRecord, MemoryStore, ReplayStore, StoreError};
 use crate::telemetry::{self as t, gauge_value, HaltCause};
 use crate::vocab::{GateOutcome, GatePosition, ReasonCode, Resolution};
-use crate::verdict::{Verdict, VerifiedHandoff};
+use crate::verdict::{Assurance, Verdict, VerifiedHandoff};
 
 /// Returned by operator calls that cannot run because the Trident is halted
 /// on a poisoned lock. Call [`Trident::operator_reset`] first.
@@ -147,6 +147,16 @@ impl Trident {
         mut store: Box<dyn ReplayStore>,
     ) -> Result<Self, StartError> {
         config.validate()?;
+        if config.profile == DeploymentProfile::Production && !store.is_durable() {
+            tracing::error!("stack.trident Production profile needs a durable replay store; MemoryStore is development only");
+            return Err(ConfigError {
+                field: "replay_store",
+                value: 0,
+                min: 1,
+                max: 1,
+            }
+            .into());
+        }
         let restored = store.load()?;
         let now = clock.now_unix_ms();
         if store.is_durable() {
@@ -257,6 +267,11 @@ impl Trident {
     /// The active config.
     pub fn config(&self) -> &TridentConfig {
         &self.config
+    }
+
+    /// The deployment profile, which every acceptance is marked with.
+    pub fn profile(&self) -> DeploymentProfile {
+        self.config.profile
     }
 
     /// Verifies an envelope that arrived as bytes. This is the path for
@@ -608,6 +623,7 @@ impl Trident {
                         drop(st);
                         let env = env.into_owned();
                         return Verdict::Accepted(Box::new(VerifiedHandoff {
+                            assurance: Assurance::of(self.config.profile),
                             sender: f,
                             sequence: env.sequence,
                             issued_at_unix_ms: env.issued_at_unix_ms,
