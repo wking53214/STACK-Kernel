@@ -70,6 +70,8 @@ const OUT_EXITED_NON_ZERO: u8 = 7;
 const OUT_RESULT_OVERSIZED: u8 = 8;
 const OUT_INTERRUPTED: u8 = 9;
 const OUT_UNKNOWN: u8 = 10;
+const OUT_TERMINATED: u8 = 11;
+const OUT_TERMINATION_UNCONFIRMED: u8 = 12;
 
 /// The hash a log's first record chains to.
 pub fn genesis_hash() -> [u8; 32] {
@@ -302,6 +304,14 @@ fn encode_event(e: &mut Encoder, event: &Event) -> Result<(), ValidationError> {
                 }
                 Outcome::Unknown { reason } => {
                     e.u8(OUT_UNKNOWN);
+                    e.text("terminal.reason", reason, 1, MAX_TEXT_BYTES)?;
+                }
+                Outcome::Terminated { signal } => {
+                    e.u8(OUT_TERMINATED);
+                    e.i32(*signal);
+                }
+                Outcome::TerminationUnconfirmed { reason } => {
+                    e.u8(OUT_TERMINATION_UNCONFIRMED);
                     e.text("terminal.reason", reason, 1, MAX_TEXT_BYTES)?;
                 }
             }
@@ -552,6 +562,10 @@ fn decode_event(d: &mut Decoder<'_>) -> Result<Event, DecodeError> {
                     reason: d.text("terminal.reason", 1, MAX_TEXT_BYTES)?,
                 },
                 OUT_UNKNOWN => Outcome::Unknown {
+                    reason: d.text("terminal.reason", 1, MAX_TEXT_BYTES)?,
+                },
+                OUT_TERMINATED => Outcome::Terminated { signal: d.i32()? },
+                OUT_TERMINATION_UNCONFIRMED => Outcome::TerminationUnconfirmed {
                     reason: d.text("terminal.reason", 1, MAX_TEXT_BYTES)?,
                 },
                 other => return Err(DecodeError::BadTagByte("terminal.outcome", other)),

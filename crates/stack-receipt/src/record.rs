@@ -502,19 +502,42 @@ impl From<&AuthorizedAction> for CapabilityBinding {
 }
 
 /// How a run ended. One variant per outcome the supervised executor
-/// reports (`stack_ffi::SupervisedOutcome`), plus `Interrupted` for a run
-/// the kernel itself stopped and `Unknown` for a run whose end the kernel
-/// could not observe. Nothing here is success except `Completed`, and
-/// `Completed` is a claim the verifier checks against the surrounding
-/// events, not a grant.
+/// reports (`stack_ffi::SupervisedOutcome`), plus `Terminated` and
+/// `TerminationUnconfirmed` for a worker the kernel itself killed,
+/// `Interrupted` for a run the kernel stopped before any kill, and
+/// `Unknown` for a run whose end the kernel could not observe. Nothing
+/// here is success except `Completed`, and `Completed` is a claim the
+/// verifier checks against the surrounding events, not a grant.
+///
+/// `Completed` means exactly: the worker exited 0 within the deadline
+/// and sent a well-formed result frame. The result bytes are the
+/// worker's own claim: a hostile worker can forge a well-formed result,
+/// and nothing in the receipt can tell a forged result from a genuine
+/// one. `result_digest` is therefore recorded as SELF-REPORTED, and the
+/// verifier lists it as such even when the auditor supplies the bytes
+/// and they match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Exit 0 with a complete, valid result.
+    /// Exit 0 within the deadline with a well-formed result frame. The
+    /// result is self-reported by the worker; see the enum documentation.
     Completed {
         /// The exit status.
         exit_code: i32,
-        /// SHA-256 of the result bytes.
+        /// SHA-256 of the result bytes the worker sent (self-reported).
         result_digest: Digest32,
+    },
+    /// The kernel sent the worker a termination signal and confirmed it
+    /// dead (reaped).
+    Terminated {
+        /// The signal sent.
+        signal: i32,
+    },
+    /// The kernel sent the worker a termination signal and could NOT
+    /// confirm it dead. The worker may still be running and acting; a
+    /// consumer must treat the action as possibly still in progress.
+    TerminationUnconfirmed {
+        /// What the kernel knows.
+        reason: String,
     },
     /// The wall-clock deadline passed; the child was killed.
     TimedOut,
@@ -563,6 +586,10 @@ pub enum Outcome {
 pub enum OutcomeKind {
     /// See [`Outcome::Completed`].
     Completed,
+    /// See [`Outcome::Terminated`].
+    Terminated,
+    /// See [`Outcome::TerminationUnconfirmed`].
+    TerminationUnconfirmed,
     /// See [`Outcome::TimedOut`].
     TimedOut,
     /// See [`Outcome::Crashed`].
@@ -588,6 +615,8 @@ impl OutcomeKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Completed => "completed",
+            Self::Terminated => "terminated",
+            Self::TerminationUnconfirmed => "termination_unconfirmed",
             Self::TimedOut => "timed_out",
             Self::Crashed => "crashed",
             Self::SeccompViolation => "seccomp_violation",
@@ -606,6 +635,8 @@ impl Outcome {
     pub const fn kind(&self) -> OutcomeKind {
         match self {
             Self::Completed { .. } => OutcomeKind::Completed,
+            Self::Terminated { .. } => OutcomeKind::Terminated,
+            Self::TerminationUnconfirmed { .. } => OutcomeKind::TerminationUnconfirmed,
             Self::TimedOut => OutcomeKind::TimedOut,
             Self::Crashed { .. } => OutcomeKind::Crashed,
             Self::SeccompViolation { .. } => OutcomeKind::SeccompViolation,
@@ -621,7 +652,7 @@ impl Outcome {
     /// Checks the reason strings.
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
-            Self::Interrupted { reason } | Self::Unknown { reason } => {
+            Self::Interrupted { reason } | Self::Unknown { reason } | Self::TerminationUnconfirmed { reason } => {
                 check_text("terminal.reason", reason, 1, MAX_TEXT_BYTES)
             }
             _ => Ok(()),

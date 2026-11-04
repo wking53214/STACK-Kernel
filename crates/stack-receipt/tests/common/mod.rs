@@ -270,6 +270,10 @@ pub fn every_outcome() -> Vec<Outcome> {
         Outcome::Unknown {
             reason: "supervisor error".into(),
         },
+        Outcome::Terminated { signal: 9 },
+        Outcome::TerminationUnconfirmed {
+            reason: "waitpid did not return before the kernel gave up".into(),
+        },
     ]
 }
 

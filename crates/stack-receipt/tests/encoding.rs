@@ -202,6 +202,8 @@ fn attempted_and_terminal_mutations() -> Vec<(&'static str, Record)> {
         "outcome.result_oversized",
         "outcome.interrupted",
         "outcome.unknown",
+        "outcome.terminated",
+        "outcome.termination_unconfirmed",
     ];
     for (name, o) in outcome_names.into_iter().zip(every_outcome().into_iter().skip(1)) {
         push(name, &|t| t.outcome = o.clone());
@@ -217,7 +219,7 @@ fn changing_any_field_changes_the_hash_and_no_two_changes_collide() {
     let mut all = mutations();
     all.extend(authorized_mutations());
     all.extend(attempted_and_terminal_mutations());
-    assert_eq!(all.len(), 70, "one mutation per field; update this count when a field is added");
+    assert_eq!(all.len(), 72, "one mutation per field; update this count when a field is added");
     let bases = [
         hash_of(&record(1, genesis_hash(), proposed())),
         hash_of(&record(2, [1; 32], authorized())),

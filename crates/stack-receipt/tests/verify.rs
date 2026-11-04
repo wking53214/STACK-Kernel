@@ -70,9 +70,43 @@ fn an_honest_completed_execution_with_every_expectation_is_verified_with_limitat
         Limitation::HandoffProvenanceNotRechecked,
         Limitation::TimestampsAreWriterClaims,
         Limitation::LogRollbackNotDetectableWithoutAnchor,
+        Limitation::ResultIsSelfReported,
     ];
     want.sort();
     assert_eq!(limits, want);
+}
+
+#[test]
+fn a_matching_result_digest_is_still_self_reported_and_termination_unconfirmed_is_flagged() {
+    let chain = sign_chain(honest_events());
+    let v = verify_receipt_chain(
+        &chain,
+        exec_id(),
+        &baseline_trust(),
+        &Expectations {
+            result_bytes: Some(result_bytes()),
+            ..Expectations::default()
+        },
+    );
+    assert!(v.scope.checked.contains(&Check::ResultDigestRecomputed));
+    assert!(v.scope.not_checked.contains(&Limitation::ResultIsSelfReported));
+    assert!(!v.scope.not_checked.contains(&Limitation::ResultBytesNotSupplied));
+    for outcome in every_outcome().into_iter().skip(1) {
+        let chain = sign_chain(vec![proposed(), authorized(), attempted(), terminal(outcome.clone())]);
+        let v = verify_receipt_chain(&chain, exec_id(), &baseline_trust(), &Expectations::default());
+        assert!(!v.scope.not_checked.contains(&Limitation::ResultIsSelfReported), "{outcome:?}");
+        let flagged = v.findings.iter().any(|f| f.code == FindingCode::WorkerMayStillBeRunning);
+        assert_eq!(
+            flagged,
+            outcome.kind() == OutcomeKind::TerminationUnconfirmed,
+            "{outcome:?}"
+        );
+        assert_eq!(v.state, State::VerifiedWithLimitations, "{outcome:?}");
+    }
+    let chain = sign_chain(vec![proposed(), authorized(), attempted(), terminal(Outcome::Terminated { signal: 9 })]);
+    let v = verify_receipt_chain(&chain, exec_id(), &baseline_trust(), &Expectations::default());
+    assert_eq!(v.execution.outcome, Some(OutcomeKind::Terminated));
+    assert_ne!(v.execution.outcome, Some(OutcomeKind::Completed));
 }
 
 #[test]

@@ -150,6 +150,10 @@ pub enum Limitation {
     AudienceNotSupplied,
     /// No result bytes were supplied for a Completed outcome.
     ResultBytesNotSupplied,
+    /// The result of a Completed outcome is the worker's own claim: a
+    /// hostile worker can forge a well-formed result, and a matching
+    /// digest proves only that these are the bytes the worker sent.
+    ResultIsSelfReported,
     /// The Trident handoff MAC is not re-verified here.
     HandoffProvenanceNotRechecked,
     /// Every timestamp and elapsed time is the writer's claim.
@@ -173,6 +177,7 @@ impl Limitation {
             Self::RosterPolicyNotSupplied => "roster_policy_not_supplied",
             Self::AudienceNotSupplied => "audience_not_supplied",
             Self::ResultBytesNotSupplied => "result_bytes_not_supplied",
+            Self::ResultIsSelfReported => "result_is_self_reported",
             Self::HandoffProvenanceNotRechecked => "handoff_provenance_not_rechecked",
             Self::TimestampsAreWriterClaims => "timestamps_are_writer_claims",
             Self::LogRollbackNotDetectableWithoutAnchor => "log_rollback_not_detectable_without_anchor",
@@ -286,6 +291,10 @@ pub enum FindingCode {
     NotAttempted,
     /// Proposed with nothing after it.
     NotAuthorized,
+    /// The terminal outcome is `TerminationUnconfirmed`: the kernel could
+    /// not confirm the worker dead, so the action may still be in
+    /// progress (informational; the outcome already says so).
+    WorkerMayStillBeRunning,
     /// A torn frame was discarded (informational).
     TornTailDiscarded,
     /// A complete unacknowledged frame was adopted (informational).
@@ -297,9 +306,11 @@ impl FindingCode {
     pub const fn severity(&self) -> Severity {
         match self {
             Self::TerminalMissing | Self::NotAttempted | Self::NotAuthorized => Severity::Incomplete,
-            Self::EmptyLog | Self::ExecutionNotFound | Self::TornTailDiscarded | Self::TrailingFrameAdopted => {
-                Severity::Info
-            }
+            Self::EmptyLog
+            | Self::ExecutionNotFound
+            | Self::TornTailDiscarded
+            | Self::TrailingFrameAdopted
+            | Self::WorkerMayStillBeRunning => Severity::Info,
             _ => Severity::Reject,
         }
     }
@@ -346,6 +357,7 @@ impl FindingCode {
             Self::TerminalMissing => "terminal_missing",
             Self::NotAttempted => "not_attempted",
             Self::NotAuthorized => "not_authorized",
+            Self::WorkerMayStillBeRunning => "worker_may_still_be_running",
             Self::TornTailDiscarded => "torn_tail_discarded",
             Self::TrailingFrameAdopted => "trailing_frame_adopted",
         }
@@ -760,7 +772,15 @@ fn verify_execution(
 
     // The result.
     if let Some(t) = terminal {
+        if matches!(t.outcome, Outcome::TerminationUnconfirmed { .. }) {
+            findings.push(Finding::new(
+                FindingCode::WorkerMayStillBeRunning,
+                None,
+                "termination was not confirmed; the worker may still be acting",
+            ));
+        }
         if let Outcome::Completed { result_digest, .. } = &t.outcome {
+            scope.limit(Limitation::ResultIsSelfReported);
             match exp.result_bytes {
                 Some(bytes) => {
                     scope.check(Check::ResultDigestRecomputed);
