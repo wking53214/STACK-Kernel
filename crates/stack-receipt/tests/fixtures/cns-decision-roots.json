@@ -1,0 +1,198 @@
+{
+  "schema": "stack-receipt-cns-decision-roots/1",
+  "comment": "Generates cns-decision-roots.json from the real CNS SuperGate. See the module docstring of gen_cns_decision_roots.py.",
+  "cns_commit": "4acd8f958a091900d43f553eba7fe83f7d33c4d6",
+  "cases": [
+    {
+      "name": "two_seats_all_pass",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "door",
+          "digest": "277e361563e5d5c92e108e14291caec1f01af38f9e2b4c3eebf072b8433fa5b1"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "judge",
+          "digest": "1d7751f2e6b0a2b0499dddf46eccd0ade92646dbeaf08ee1d3c0960d092ff930"
+        }
+      ],
+      "root": "2d742c16a14217f45edd39a7b5d25690cacafbbce597da9c6ee767103d05eee3",
+      "allowed": true,
+      "outcome": "pass"
+    },
+    {
+      "name": "three_seats_with_same_subject",
+      "seats": [
+        "CNS:same_subject",
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "same_subject",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "same_subject",
+          "digest": "4b3aff99d07b046501727b631aef09d005948ce130af7a7567fbf796e0b86db6"
+        },
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "door",
+          "digest": "4e1ba620b147ec09bd37de968165676b396e947c7d6b4d014f0fc5b2a925798b"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "judge",
+          "digest": "4e1ba620b147ec09bd37de968165676b396e947c7d6b4d014f0fc5b2a925798b"
+        }
+      ],
+      "root": "3378e5459aeec34d3d0d1ba8ae6c4835351925ee0cc694b4b5aff4b8861e2fc2",
+      "allowed": true,
+      "outcome": "pass"
+    },
+    {
+      "name": "omega_retry",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "door",
+          "digest": "277e361563e5d5c92e108e14291caec1f01af38f9e2b4c3eebf072b8433fa5b1"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "retry",
+          "subject": "judge",
+          "digest": "1d7751f2e6b0a2b0499dddf46eccd0ade92646dbeaf08ee1d3c0960d092ff930"
+        }
+      ],
+      "root": "4363df666ae61435e4e6941cdb621243b850dc1c05c90ec92af1f906cc83bd21",
+      "allowed": false,
+      "outcome": "retry"
+    },
+    {
+      "name": "alpha_breach_omega_not_run",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "terminal_breach",
+          "subject": "door",
+          "digest": "277e361563e5d5c92e108e14291caec1f01af38f9e2b4c3eebf072b8433fa5b1"
+        }
+      ],
+      "root": "c6da86cd6c1b85e59c597d1fa7969cfb66958dd6a1a58adce603d21f632783ce",
+      "allowed": false,
+      "outcome": "terminal_breach"
+    },
+    {
+      "name": "unbound_pass",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "",
+          "digest": ""
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "judge",
+          "digest": "1d7751f2e6b0a2b0499dddf46eccd0ade92646dbeaf08ee1d3c0960d092ff930"
+        }
+      ],
+      "root": "8932351f3b594b5fb5f8c873cbe91e71ad50914f0d8d425bc27eabeb1818f2de",
+      "allowed": false,
+      "outcome": "pass"
+    },
+    {
+      "name": "seat_order_differs_from_run_order",
+      "seats": [
+        "DIT:judge",
+        "HERALD:source",
+        "HERALD:confidence"
+      ],
+      "verdicts": [
+        {
+          "gate": "source",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "source",
+          "digest": "9e5d27523beb501fd01c0fb0f785a97209b98c830e1ff23fb96d8deb64155089"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "judge",
+          "digest": "1d7751f2e6b0a2b0499dddf46eccd0ade92646dbeaf08ee1d3c0960d092ff930"
+        },
+        {
+          "gate": "confidence",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "confidence",
+          "digest": "ef77f00208b7ddbffd8b02110cc2d977148dc14dab5581c69a1392fde3481063"
+        }
+      ],
+      "root": "f4f46aad4a48a47ca6a780d307c488752857f7487d1103368728c36f2d1db228",
+      "allowed": true,
+      "outcome": "pass"
+    },
+    {
+      "name": "unicode_candidate",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "door",
+          "digest": "8b887f261a4398197ee72da8d86c3f4253b68adf725ca921c4d6f790e6f80a96"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "judge",
+          "digest": "783a3ce1de1021794bd3b004532c2d238b940dbc7e310a1c12ca62db08e5e1a0"
+        }
+      ],
+      "root": "da7efa1d47e429f38d31ed7b83fe98fdcf649a80dd05bf42a0d0dbb8400bc181",
+      "allowed": true,
+      "outcome": "pass"
+    }
+  ]
+}
