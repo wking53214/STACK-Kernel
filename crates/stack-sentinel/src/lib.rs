@@ -182,7 +182,8 @@ pub mod verdict;
 pub mod verify;
 
 pub use anchor::{
-    check_head_anchor, check_head_anchor_with, parse_head_anchor, verify_head_anchor, AnchorError, HeadAnchor,
+    check_anchor_file_with, check_head_anchor, check_head_anchor_with, parse_head_anchor, read_anchor_file,
+    verify_anchor_file, verify_head_anchor, AnchorError, AnchorFile, HeadAnchor,
 };
 pub use attest::{key_fingerprint, parse_key_file, AttestationStatus, KeyError, KeySet, SecretKey};
 pub use canonical::{canonical_form, hashed_columns, recompute_current_hash, RecomputeError};

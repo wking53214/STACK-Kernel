@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use crate::anchor::{anchor_summary, check_head_anchor_with, parse_head_anchor, HeadAnchor};
+use crate::anchor::{anchor_summary, check_anchor_file_with, read_anchor_file, AnchorFile};
 use crate::attest::{keyed_work_bytes, verify_seed, verify_signature, AttestationStatus, KeySet};
 use crate::canonical::{
     canonical_form_ref, content_prehash_ref, ledger_hash_ref, sha256_hex, Sha256Sink, ATTESTATION_POLICY_RECORD_KIND,
@@ -612,7 +612,7 @@ impl Verifier {
             };
             report(Some(f), None, None, 0, None)
         };
-        let parsed: HeadAnchor = match anchor {
+        let parsed: AnchorFile = match anchor {
             None => return Ok(early(Reason::AnchorMissing, "no head anchor was supplied".to_owned())),
             Some(bytes) => {
                 let s = tracing::info_span!(
@@ -626,7 +626,7 @@ impl Verifier {
                 if bytes.len() <= self.config.max_anchor_bytes {
                     s.record("anchor_sha256", sha256_hex(bytes).as_str());
                 }
-                match parse_head_anchor(bytes, self.config.max_anchor_bytes, self.config.json) {
+                match read_anchor_file(bytes, self.config.max_anchor_bytes, self.config.json) {
                     Ok(a) => a,
                     Err(e) => return Ok(early(Reason::AnchorUnreadable, format!("anchor cannot be read: {e}"))),
                 }
@@ -644,7 +644,7 @@ impl Verifier {
         let walk = verify_rows_with(&rows, &self.keys, &self.config);
         let anchored = {
             let _s = tracing::info_span!("stack.sentinel.check_anchor").entered();
-            check_head_anchor_with(&rows, &parsed, &self.keys, &self.config)
+            check_anchor_file_with(&rows, &parsed, &self.keys, &self.config)
         };
         let vouched = !anchored.as_ref().is_some_and(|f| {
             matches!(
@@ -652,7 +652,7 @@ impl Verifier {
                 Reason::AnchorInvalid | Reason::AnchorUnknownKey | Reason::AnchorUnverifiable | Reason::AnchorRetiredKey
             )
         });
-        let summary = Some(anchor_summary(&parsed, vouched));
+        let summary = Some(anchor_summary(&parsed.anchor, vouched));
         let (finding, also) = match (walk.finding, anchored) {
             (Some(row), anchor_finding) => (Some(row), anchor_finding),
             (None, anchor_finding) => (anchor_finding, None),
