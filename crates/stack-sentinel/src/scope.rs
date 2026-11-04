@@ -50,6 +50,11 @@ pub enum Limitation {
     AnchorNotVerified,
     /// The walk stopped before the last row.
     PartialRowsChecked,
+    /// Some `governance_decision` row carries no `subject_digest` and was not
+    /// judged for it (the requirement was off, or the row comes before any
+    /// evidence that the receipts layer had begun). Its verdict is not bound
+    /// to its content by a digest.
+    DecisionRowsWithoutSubjectDigest,
     /// The ledger records decisions, not their execution. Nothing in the
     /// export shows that any decision was carried out. Always present.
     NoExecutionRecord,
@@ -64,17 +69,19 @@ impl Limitation {
             Limitation::AnchorStalePossible => "anchor_stale_possible",
             Limitation::AnchorNotVerified => "anchor_not_verified",
             Limitation::PartialRowsChecked => "partial_rows_checked",
+            Limitation::DecisionRowsWithoutSubjectDigest => "decision_rows_without_subject_digest",
             Limitation::NoExecutionRecord => "no_execution_record",
         }
     }
 
     /// Every code, in the order a record lists them.
-    pub const ALL: [Limitation; 6] = [
+    pub const ALL: [Limitation; 7] = [
         Limitation::UnhashedColumnsPresent,
         Limitation::RowsAfterLastAnchorUnkeyed,
         Limitation::AnchorStalePossible,
         Limitation::AnchorNotVerified,
         Limitation::PartialRowsChecked,
+        Limitation::DecisionRowsWithoutSubjectDigest,
         Limitation::NoExecutionRecord,
     ];
 }
@@ -118,6 +125,9 @@ pub struct Scope {
     pub other_unhashed_columns: bool,
     /// Per record kind present in the export, in [`RECORD_KIND_LABELS`] order.
     pub by_record_kind: Vec<KindScope>,
+    /// Whether the run required `subject_digest` on decision rows after the
+    /// receipts layer began (`VerifierConfig::require_subject_digest`).
+    pub subject_digest_required: bool,
     /// What the verdict does not establish, in [`Limitation::ALL`] order.
     pub limitations: Vec<Limitation>,
 }
@@ -235,6 +245,7 @@ pub(crate) fn column_scope(rows: &[LedgerRow]) -> Scope {
         unhashed_columns: unhashed.iter().map(unhashed_name).collect(),
         other_unhashed_columns: other,
         by_record_kind,
+        subject_digest_required: false,
         limitations: Vec::new(),
     }
 }
@@ -255,7 +266,7 @@ fn anchored_rows(report: &Report) -> usize {
 }
 
 /// The limitation codes for `report`, computed from its data.
-pub(crate) fn limitations(report: &Report, unhashed_present: bool) -> Vec<Limitation> {
+pub(crate) fn limitations(report: &Report, unhashed_present: bool, unjudged_digest: bool) -> Vec<Limitation> {
     let vouched = report.anchor.as_ref().is_some_and(|a| a.vouched);
     Limitation::ALL
         .into_iter()
@@ -265,6 +276,7 @@ pub(crate) fn limitations(report: &Report, unhashed_present: bool) -> Vec<Limita
             Limitation::AnchorStalePossible => vouched,
             Limitation::AnchorNotVerified => !vouched,
             Limitation::PartialRowsChecked => report.rows_checked < report.rows_total,
+            Limitation::DecisionRowsWithoutSubjectDigest => unjudged_digest,
             Limitation::NoExecutionRecord => true,
         })
         .collect()
@@ -321,6 +333,7 @@ impl ScopedReport {
             Value::Array(sc.unhashed_columns.iter().map(|c| s(c)).collect()),
         );
         o.insert("other_unhashed_columns".into(), Value::Bool(sc.other_unhashed_columns));
+        o.insert("subject_digest_required".into(), Value::Bool(sc.subject_digest_required));
         o.insert(
             "by_record_kind".into(),
             Value::Array(

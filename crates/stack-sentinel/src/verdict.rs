@@ -178,6 +178,14 @@ pub enum Reason {
     SubjectDigestMismatch,
     /// `input_data` holds NaN or an infinity, which CNS refuses to digest.
     SubjectNotEncodable,
+    /// A `governance_decision` row written after the receipts layer began
+    /// carries no `subject_digest` (only under
+    /// `VerifierConfig::require_subject_digest`). Reported as `TRANSPLANTED`
+    /// because it is a failure of the subject binding, the check that word
+    /// names: the verdict on the row is no longer bound to its content. It
+    /// is not `UNATTESTED`, which concerns signatures and keys, and no key
+    /// or anchor the auditor supplies repairs it, so it is TERMINAL_BREACH.
+    SubjectDigestMissing,
     /// `shuffle_seed` does not re-derive under any held key.
     SeedNotDerived,
     /// `shuffle_seed` re-derives only under a retired key.
@@ -226,7 +234,7 @@ impl Reason {
         use Reason::*;
         match self {
             ChainBroken | HashMismatch | RecomputeFailed | SignatureInvalid => Verdict::Tampered,
-            SubjectDigestMismatch | SubjectNotEncodable => Verdict::Transplanted,
+            SubjectDigestMismatch | SubjectNotEncodable | SubjectDigestMissing => Verdict::Transplanted,
             SeedNotDerived | SeedRetiredKey | SeedUnverifiable => Verdict::SeedForged,
             UnsignedAfterPolicy
             | SignatureUnknownKey
@@ -268,6 +276,7 @@ impl Reason {
             SignatureInvalid => "signature_invalid",
             SubjectDigestMismatch => "subject_digest_mismatch",
             SubjectNotEncodable => "subject_not_encodable",
+            SubjectDigestMissing => "subject_digest_missing",
             SeedNotDerived => "seed_not_derived",
             SeedRetiredKey => "seed_retired_key",
             SeedUnverifiable => "seed_unverifiable",
@@ -289,13 +298,14 @@ impl Reason {
     }
 
     /// Every reason, for exhaustive tests and dashboards.
-    pub const ALL: [Reason; 23] = [
+    pub const ALL: [Reason; 24] = [
         Reason::ChainBroken,
         Reason::HashMismatch,
         Reason::RecomputeFailed,
         Reason::SignatureInvalid,
         Reason::SubjectDigestMismatch,
         Reason::SubjectNotEncodable,
+        Reason::SubjectDigestMissing,
         Reason::SeedNotDerived,
         Reason::SeedRetiredKey,
         Reason::SeedUnverifiable,

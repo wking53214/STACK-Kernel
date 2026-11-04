@@ -249,6 +249,24 @@ enum Checks {
     ExportOnly,
 }
 
+/// Position of the first row that shows the receipts layer had begun: an
+/// `attestation_policy` marker, or a `governance_decision` carrying a
+/// `subject_digest` (see `VerifierConfig::require_subject_digest`).
+pub(crate) fn receipts_boundary(rows: &[LedgerRow]) -> Option<usize> {
+    rows.iter().position(|r| {
+        let kind = r.columns.get("record_kind").and_then(Value::as_str);
+        kind == Some(ATTESTATION_POLICY_RECORD_KIND)
+            || (kind == Some("governance_decision") && get(&r.columns, "subject_digest").is_truthy())
+    })
+}
+
+/// Whether the row is a `governance_decision` with no `subject_digest`.
+pub(crate) fn decision_without_digest(row: &LedgerRow) -> bool {
+    row.columns.get("record_kind").and_then(Value::as_str) == Some("governance_decision")
+        && !get(&row.columns, "subject_digest").is_truthy()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_row(
     row: &LedgerRow,
     prev: &Value,
@@ -256,6 +274,7 @@ fn check_row(
     keys: &KeySet,
     config: &VerifierConfig,
     checks: Checks,
+    digest_required: bool,
 ) -> Option<(Reason, String)> {
     let cols = &row.columns;
     let link = get(cols, "previous_hash");
@@ -269,9 +288,19 @@ fn check_row(
             ),
         ));
     }
-    let verified = verify_row_content(row).and_then(|canonical| match checks {
-        Checks::All => verify_row_keyed(row, &canonical, keys, config),
-        Checks::ExportOnly => Ok(()),
+    let verified = verify_row_content(row).and_then(|canonical| {
+        if digest_required && decision_without_digest(row) {
+            return Err((
+                Reason::SubjectDigestMissing,
+                "governance_decision row carries no subject_digest, although the receipts layer had begun \
+                 earlier in the chain"
+                    .to_owned(),
+            ));
+        }
+        match checks {
+            Checks::All => verify_row_keyed(row, &canonical, keys, config),
+            Checks::ExportOnly => Ok(()),
+        }
     });
     if let Err((reason, detail)) = verified {
         // A fingerprint is text the row's writer chose. When the auditor
@@ -336,14 +365,20 @@ pub fn verify_rows_with(rows: &[LedgerRow], keys: &KeySet, config: &VerifierConf
     let mut first: Option<Finding> = None;
     let mut escalation: Option<Finding> = None;
     let mut rows_checked = 0;
+    let boundary = if config.require_subject_digest {
+        receipts_boundary(rows)
+    } else {
+        None
+    };
     for (pos, row) in rows.iter().enumerate() {
+        let digest_required = boundary.is_some_and(|b| pos > b);
         rows_checked = pos + 1;
         let checks = match (&first, &policy) {
             (None, _) => Checks::All,
             (Some(_), Some(p)) if p.enforced_key_held(keys) => Checks::All,
             (Some(_), _) => Checks::ExportOnly,
         };
-        if let Some((reason, detail)) = check_row(row, prev, policy.as_ref(), keys, config, checks) {
+        if let Some((reason, detail)) = check_row(row, prev, policy.as_ref(), keys, config, checks, digest_required) {
             let terminal = reason.gate_outcome() == GateOutcome::TerminalBreach;
             let finding = Finding {
                 reason,
@@ -546,6 +581,11 @@ impl Verifier {
         let columns = column_scope(&rows);
         let unhashed = columns.unhashed_columns.clone();
         let other_unhashed = columns.other_unhashed_columns;
+        // A decision row with no subject_digest that the walk does not judge.
+        let boundary = receipts_boundary(&rows);
+        let unjudged_digest = rows.iter().enumerate().any(|(pos, r)| {
+            decision_without_digest(r) && !(self.config.require_subject_digest && boundary.is_some_and(|b| pos > b))
+        });
         let report = |finding, also, escalation, rows_checked, anchor| {
             let report = Report {
                 finding,
@@ -559,7 +599,8 @@ impl Verifier {
                 other_unhashed_columns: other_unhashed,
             };
             let mut scope = columns.clone();
-            scope.limitations = limitations(&report, !unhashed.is_empty() || other_unhashed);
+            scope.subject_digest_required = self.config.require_subject_digest;
+            scope.limitations = limitations(&report, !unhashed.is_empty() || other_unhashed, unjudged_digest);
             ScopedReport { report, scope }
         };
         let early = |reason, detail: String| {

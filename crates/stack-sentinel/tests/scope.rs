@@ -392,3 +392,80 @@ fn a_decision_reports_its_hashed_data_keys_not_data() {
     let base = s.scope.by_record_kind.iter().find(|k| k.kind == "base").unwrap();
     assert!(base.hashed.contains(&"data".to_owned()), "a base row hashes all of data: {:?}", base.hashed);
 }
+
+// ---------------------------------------------------------------------------
+// Step 3 (D-20, Rust side): VerifierConfig::require_subject_digest
+// ---------------------------------------------------------------------------
+
+fn run_with(config: stack_sentinel::VerifierConfig, rel: &str, rows: &[Object], anchor_rows: &[Object]) -> ScopedReport {
+    let cols = common::columns(rel);
+    let anchor = common::anchor_bytes(anchor_rows, anchor_rows.len(), common::FIXTURE_KEY);
+    stack_sentinel::Verifier::new(config, common::verifier_keys())
+        .unwrap()
+        .verify_export_scoped(&common::export_bytes(&cols, rows), Some(&anchor))
+        .unwrap()
+}
+
+fn requiring(on: bool) -> stack_sentinel::VerifierConfig {
+    stack_sentinel::VerifierConfig {
+        require_subject_digest: on,
+        ..stack_sentinel::VerifierConfig::default()
+    }
+}
+
+/// The attack D-20 names: an anchor seals the chain up to the policy marker
+/// and the first signed decision; the next decision (id 4, unsigned) has its
+/// subject_digest stripped and every later hash recomputed. Later signed
+/// rows (id 6 on) cover previous_hash, so a writer without the key keeps
+/// only the unsigned tail (ids 1 to 5), which the stale anchor still allows.
+fn stripped() -> (Vec<Object>, Vec<Object>) {
+    let base = common::base_rows(POST);
+    let mut rows = base[..5].to_vec();
+    assert_eq!(rows[3]["record_kind"].as_str(), Some("governance_decision"));
+    assert!(!rows[3]["authorized_by_sig"].is_truthy(), "the decision is unsigned");
+    rows[3].insert("subject_digest".into(), Value::Null);
+    common::rechain(&mut rows, 3);
+    (rows, base[..3].to_vec())
+}
+
+#[test]
+fn a_stripped_subject_digest_passes_when_not_required_as_today() {
+    let (rows, anchored) = stripped();
+    let s = run_with(requiring(false), POST, &rows, &anchored);
+    assert_eq!(s.report.verdict(), Verdict::Verified, "{}", s.report.render());
+    let o = json(&s);
+    assert_eq!(o["subject_digest_required"], Value::Bool(false));
+    let lim = strings(&o["limitations"]);
+    assert!(lim.contains(&"decision_rows_without_subject_digest".to_owned()), "{lim:?}");
+    assert!(lim.contains(&"rows_after_last_anchor_unkeyed".to_owned()), "{lim:?}");
+}
+
+#[test]
+fn a_stripped_subject_digest_is_transplanted_when_required() {
+    let (rows, anchored) = stripped();
+    let s = run_with(requiring(true), POST, &rows, &anchored);
+    let f = s.report.finding.as_ref().unwrap();
+    assert_eq!(f.reason, stack_sentinel::Reason::SubjectDigestMissing);
+    assert_eq!(s.report.verdict(), Verdict::Transplanted);
+    assert_eq!(f.row_id, Some(4));
+    assert_eq!(s.report.gate_outcome(), stack_sentinel::GateOutcome::TerminalBreach);
+    let o = json(&s);
+    assert_eq!(o["subject_digest_required"], Value::Bool(true));
+    assert_eq!(o["reason"].as_str(), Some("subject_digest_missing"));
+    assert!(!strings(&o["limitations"]).contains(&"decision_rows_without_subject_digest".to_owned()));
+}
+
+#[test]
+fn requiring_the_digest_leaves_honest_and_pre_receipts_exports_verified() {
+    let post = common::base_rows(POST);
+    let s = run_with(requiring(true), POST, &post, &post);
+    assert_eq!(s.report.verdict(), Verdict::Verified, "{}", s.report.render());
+    assert!(!s.scope.limitations.contains(&Limitation::DecisionRowsWithoutSubjectDigest));
+    // Written before the receipts layer: no marker and no digest anywhere,
+    // so no row is judged, and the record says so.
+    let pre = common::base_rows(PRE);
+    let s = run_with(requiring(true), PRE, &pre, &pre);
+    assert_eq!(s.report.verdict(), Verdict::Verified, "{}", s.report.render());
+    assert!(s.scope.subject_digest_required);
+    assert!(s.scope.limitations.contains(&Limitation::DecisionRowsWithoutSubjectDigest));
+}
