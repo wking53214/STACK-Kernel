@@ -1264,6 +1264,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "stack-receipt"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "serde_json",
+ "sha2",
+ "stack-authority",
+ "subtle",
+ "thiserror",
+]
+
+[[package]]
 name = "stack-sentinel"
 version = "0.1.0"
 dependencies = [
