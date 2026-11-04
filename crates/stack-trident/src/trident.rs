@@ -15,7 +15,7 @@ use crate::canonical::{decode_hex_lower, parse_strict, sha256_hex, CanonicalErro
 use crate::clock::{Clock, SystemClock};
 use crate::config::{BreakerAttribution, ConfigError, DeploymentProfile, TridentConfig};
 use crate::envelope::{encode_payload_counted, hmac_sha256, HandoffEnvelope, Nonce, ENVELOPE_OWN_NODES, ENVELOPE_VERSION};
-use crate::keys::{Fingerprint, KeyRing};
+use crate::keys::{Fingerprint, KeyCheck, KeyRing};
 use crate::state::{ReplayCache, SenderTable, State};
 use crate::store::{AcceptRecord, MemoryStore, ReplayStore, StoreError};
 use crate::telemetry::{self as t, gauge_value, HaltCause};
@@ -69,6 +69,38 @@ pub enum StartError {
         /// `TridentConfig::max_tracked_senders`.
         capacity: usize,
     },
+}
+
+/// Why [`Trident::replace_keyring`] refused. The ring in force is
+/// unchanged on an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReplaceKeyringError {
+    /// The Trident is halted on a poisoned lock.
+    #[error(transparent)]
+    Halted(#[from] HaltedError),
+    /// The Production profile refuses a ring with keys that carry no
+    /// issuer metadata (`KeyRing::insert` entries).
+    #[error("the Production profile refuses a ring with {legacy} key(s) without issuer metadata")]
+    LegacyKeysInProduction {
+        /// How many such keys the offered ring holds.
+        legacy: usize,
+    },
+}
+
+/// The Production rule that every key carries issuer metadata, as a
+/// config error (field `keyring.legacy_keys`, required 0).
+fn refuse_legacy_keys(config: &TridentConfig, keyring: &KeyRing) -> Result<(), ConfigError> {
+    let legacy = keyring.legacy_count();
+    if config.profile == DeploymentProfile::Production && legacy > 0 {
+        tracing::error!(legacy, "stack.trident Production profile refuses keys without issuer metadata");
+        return Err(ConfigError {
+            field: "keyring.legacy_keys",
+            value: u64::try_from(legacy).unwrap_or(u64::MAX),
+            min: 0,
+            max: 0,
+        });
+    }
+    Ok(())
 }
 
 /// The receiver. Verifies [`HandoffEnvelope`]s against a caller-supplied
@@ -157,6 +189,7 @@ impl Trident {
             }
             .into());
         }
+        refuse_legacy_keys(&config, &keyring)?;
         let restored = store.load()?;
         let now = clock.now_unix_ms();
         if store.is_durable() {
@@ -505,28 +538,47 @@ impl Trident {
         if fp.as_ref().is_some_and(|f| st.senders.is_quarantined(f)) {
             return Self::quarantined_verdict();
         }
+        let now = self.clock.now_unix_ms();
         // `replace_keyring` swaps the ring while holding this lock, so the
-        // ring read here is the one in force. A sender whose key was
-        // removed since the snapshot is refused as unknown, and counts as
-        // unauthenticated from here on.
-        let still_trusted = match (key.is_some(), fp.as_ref()) {
+        // ring read here is the one in force, and the key's validity window
+        // and status are judged here, against the clock read for this
+        // commit. A sender whose key was removed since the snapshot is
+        // refused as unknown; one whose key is not yet valid, expired,
+        // retired or revoked is refused with that reason. Either way it
+        // counts as unauthenticated from here on.
+        let key_check = match (key.is_some(), fp.as_ref()) {
             (true, Some(f)) => match self.keyring.read() {
-                Ok(current) => Arc::ptr_eq(&current, &keyring) || current.contains(f),
+                Ok(current) => current.check(f, now),
                 Err(_) => {
                     drop(st);
                     self.enter_halt(HaltCause::Poisoned);
                     return Self::halted_verdict();
                 }
             },
-            _ => false,
+            _ => None,
         };
+        let still_trusted = key_check == Some(KeyCheck::Usable);
         if key.is_some() && !still_trusted {
-            // Prong 1 reasons come first; an authentic envelope had none.
-            reasons.retain(|r| *r != ReasonCode::MacMismatch);
-            reasons.insert(0, ReasonCode::UnknownSender);
+            match key_check {
+                None | Some(KeyCheck::Usable) => {
+                    // Prong 1 reasons come first; an authentic envelope had none.
+                    reasons.retain(|r| *r != ReasonCode::MacMismatch);
+                    reasons.insert(0, ReasonCode::UnknownSender);
+                }
+                Some(check) => {
+                    let reason = match check {
+                        KeyCheck::NotYetValid => ReasonCode::KeyNotYetValid,
+                        KeyCheck::Expired => ReasonCode::KeyExpired,
+                        KeyCheck::Retired => ReasonCode::KeyRetired,
+                        KeyCheck::Revoked | KeyCheck::Usable => ReasonCode::KeyRevoked,
+                    };
+                    // After a MacMismatch if one was reported: both are true.
+                    let at = usize::from(reasons.first() == Some(&ReasonCode::MacMismatch));
+                    reasons.insert(at, reason);
+                }
+            }
             authentic = false;
         }
-        let now = self.clock.now_unix_ms();
         if let Some(f) = fp.as_ref() {
             st.replay.expire_sender(f, now);
         }
@@ -801,10 +853,18 @@ impl Trident {
     ///
     /// The swap happens while holding the state lock, and every commit
     /// re-checks the ring under that lock, so once this returns no envelope
-    /// signed by a removed key is accepted, including one whose
-    /// verification was already under way.
-    pub fn replace_keyring(&self, keyring: KeyRing) -> Result<(), HaltedError> {
+    /// signed by a removed, expired, retired or revoked key is accepted,
+    /// including one whose verification was already under way.
+    ///
+    /// Under the Production profile a ring with legacy keys (no issuer
+    /// metadata) is refused and the ring in force is unchanged.
+    pub fn replace_keyring(&self, keyring: KeyRing) -> Result<(), ReplaceKeyringError> {
         let _span = tracing::info_span!(t::SPAN_REPLACE_KEYRING, keys = keyring.len()).entered();
+        if refuse_legacy_keys(&self.config, &keyring).is_err() {
+            return Err(ReplaceKeyringError::LegacyKeysInProduction {
+                legacy: keyring.legacy_count(),
+            });
+        }
         let ring = Arc::new(keyring);
         // Lock order everywhere: state, then key ring.
         let mut st = self.lock_state().ok_or(HaltedError)?;
@@ -814,7 +874,7 @@ impl Trident {
                 Err(_) => {
                     drop(st);
                     self.enter_halt(HaltCause::Poisoned);
-                    return Err(HaltedError);
+                    return Err(HaltedError.into());
                 }
             };
             *slot = Arc::clone(&ring);

@@ -235,11 +235,23 @@ pub enum ReasonCode {
     /// could not be made to survive a restart. Nothing changed; retry
     /// once storage recovers.
     StateUnavailable,
+
+    // Prong 1, key lifecycle (declared after the rest so that no earlier
+    // variant moves). Decided under the commit lock against the ring in
+    // force and the receiver clock; see `keys` for what they reveal.
+    /// The sender's key is in the ring but `now < not_before_ms`.
+    KeyNotYetValid,
+    /// The sender's key is in the ring but `now >= not_after_ms`.
+    KeyExpired,
+    /// The sender's key is marked retired.
+    KeyRetired,
+    /// The sender's key is marked revoked.
+    KeyRevoked,
 }
 
 impl ReasonCode {
     /// Every reason code, in declaration order.
-    pub const ALL: [ReasonCode; 29] = [
+    pub const ALL: [ReasonCode; 33] = [
         Self::EnvelopeTooLarge,
         Self::TooDeep,
         Self::TooManyNodes,
@@ -269,6 +281,10 @@ impl ReasonCode {
         Self::ReplayCacheFull,
         Self::SenderTableFull,
         Self::StateUnavailable,
+        Self::KeyNotYetValid,
+        Self::KeyExpired,
+        Self::KeyRetired,
+        Self::KeyRevoked,
     ];
 
     /// Metric label and log spelling.
@@ -303,6 +319,10 @@ impl ReasonCode {
             Self::ReplayCacheFull => "replay_cache_full",
             Self::SenderTableFull => "sender_table_full",
             Self::StateUnavailable => "state_unavailable",
+            Self::KeyNotYetValid => "key_not_yet_valid",
+            Self::KeyExpired => "key_expired",
+            Self::KeyRetired => "key_retired",
+            Self::KeyRevoked => "key_revoked",
         }
     }
 
@@ -319,9 +339,14 @@ impl ReasonCode {
             | Self::DuplicateKey
             | Self::MalformedEnvelope => Check::Admission,
             Self::Halted | Self::Quarantined => Check::Custody,
-            Self::MalformedSender | Self::UnknownSender | Self::MalformedMac | Self::MacMismatch => {
-                Check::Authenticity
-            }
+            Self::MalformedSender
+            | Self::UnknownSender
+            | Self::MalformedMac
+            | Self::MacMismatch
+            | Self::KeyNotYetValid
+            | Self::KeyExpired
+            | Self::KeyRetired
+            | Self::KeyRevoked => Check::Authenticity,
             Self::UnsupportedVersion
             | Self::UnknownGatePosition
             | Self::UnknownGateOutcome
@@ -342,10 +367,11 @@ impl ReasonCode {
     /// The rule: TERMINAL_BREACH when the envelope proves an integrity
     /// failure or a hostile act that no resubmission from an honest sender
     /// would ever need (a bad MAC, an unknown sender, a transplanted
-    /// digest, a replay, a duplicate key, a quarantined sender). RETRY when
-    /// an honest sender could plausibly produce it and fix it (an encoding
-    /// bug, clock drift, out-of-order sends, an over-size payload, a
-    /// receiver that is busy or halted).
+    /// digest, a replay, a duplicate key, a quarantined sender, a key that
+    /// is expired, retired or revoked). RETRY when an honest sender could
+    /// plausibly produce it and fix it (an encoding bug, clock drift,
+    /// out-of-order sends, an over-size payload, a key not yet valid, a
+    /// receiver that is busy, halted or without its store).
     pub const fn outcome(self) -> GateOutcome {
         match self {
             Self::DuplicateKey
@@ -353,7 +379,10 @@ impl ReasonCode {
             | Self::UnknownSender
             | Self::MacMismatch
             | Self::SubjectDigestMismatch
-            | Self::Replay => GateOutcome::TerminalBreach,
+            | Self::Replay
+            | Self::KeyExpired
+            | Self::KeyRetired
+            | Self::KeyRevoked => GateOutcome::TerminalBreach,
             Self::EnvelopeTooLarge
             | Self::TooDeep
             | Self::TooManyNodes
@@ -376,7 +405,8 @@ impl ReasonCode {
             | Self::SequenceNotIncreasing
             | Self::ReplayCacheFull
             | Self::SenderTableFull
-            | Self::StateUnavailable => GateOutcome::Retry,
+            | Self::StateUnavailable
+            | Self::KeyNotYetValid => GateOutcome::Retry,
         }
     }
 }

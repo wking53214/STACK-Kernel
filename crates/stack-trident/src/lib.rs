@@ -215,8 +215,8 @@ pub use envelope::{
     seal, seal_for, EnvelopeDraft, HandoffEnvelope, Nonce, SealError, ENVELOPE_OWN_NODES, ENVELOPE_VERSION,
     FIELD_NAMES, MAC_AUDIENCE_DOMAIN, MAC_DOMAIN, MAX_AUDIENCE_BYTES,
 };
-pub use keys::{Fingerprint, KeyError, KeyRing, SecretKey};
+pub use keys::{Fingerprint, KeyCheck, KeyError, KeyMeta, KeyPurpose, KeyRing, KeyStatus, SecretKey};
 pub use store::{AcceptRecord, FileStore, FileStoreOptions, MemoryStore, ReplayStore, RestoredState, StoreError};
-pub use trident::{HaltedError, StartError, Trident};
+pub use trident::{HaltedError, ReplaceKeyringError, StartError, Trident};
 pub use verdict::{Assurance, DevelopmentAssurance, Refusal, Verdict, VerifiedHandoff};
 pub use vocab::{Check, GateOutcome, GatePosition, ReasonCode, Resolution};
