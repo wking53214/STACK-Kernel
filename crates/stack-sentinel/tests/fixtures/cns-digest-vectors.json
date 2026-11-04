@@ -1,18 +1,55 @@
 {
-  "schema": "cns-digest-vectors/1",
-  "note": "digest is cns.gate.subject_digest(content); regenerate with python -m cns_composition.digest_vectors --write",
+  "schema": "cns-digest-vectors/2",
+  "digest_version": "cns-digest/1",
+  "note": "digest is cns.gate.subject_digest(content) and rendering is the string it hashes; restricted_v1 is computed by cns_composition.digest_vectors.restricted_v1; regenerate with python -m cns_composition.digest_vectors --write",
+  "domain": {
+    "content": "A map whose keys are text. This is what a verdict binds to and what every vector holds.",
+    "values": [
+      "null",
+      "boolean (distinct from the integers 0 and 1)",
+      "integer of any magnitude (a JSON number with no fraction and no exponent)",
+      "float: a finite IEEE 754 binary64 value (a JSON number with a fraction or an exponent); -0.0 renders as 0.0; NaN and the infinities are refused",
+      "text: a sequence of Unicode scalar values; a lone surrogate is refused",
+      "list of values",
+      "map from text keys to values; keys are distinct"
+    ],
+    "rendering": {
+      "null": "n:",
+      "boolean": "b:1 for true, b:0 for false",
+      "integer": "i:<base 10, a leading - when negative, no leading zeros>:",
+      "float": "f:<Python repr of the binary64 value, shortest round trip>:",
+      "text": "s:<number of code points, base 10>:<the text>",
+      "list": "l:<number of items>:<each item rendered, in order>",
+      "map": "d:<number of members>:<for each key in ascending code point order: the key rendered as text, then its value rendered>"
+    },
+    "digest": "SHA-256 of the UTF-8 bytes of the rendering, written as 64 lowercase hex characters",
+    "depth": "The normative domain sets no nesting limit. Container depth is 0 for a scalar and 1 plus the deepest member for a map or list, so a content map of scalars has depth 1. The Python reference raises RecursionError, not TypeError, at roughly 500 levels.",
+    "restricted_v1": {
+      "who": "STACK-Kernel stack-trident, envelope subject_digest, at its default limits (max_depth 32)",
+      "rule": "No float anywhere. Every integer within -(2^53 - 1) to 2^53 - 1 inclusive. Container depth of the content (counted as in `depth`) at most 31. Everything else as in the normative domain.",
+      "why_31": "The Trident counts the envelope object as nesting level 1, so the payload's top-level map is level 2 and a payload may nest max_depth - 1 = 31 levels. Calling stack_trident::cns_digest::subject_digest directly accepts depth up to max_depth (32); the envelope path (seal and verify) refuses depth 32 with TooDeep before the digest is computed.",
+      "max_container_depth": 31,
+      "max_abs_integer": 9007199254740991,
+      "outside": "The Trident refuses content outside restricted_v1 with a typed error. It never computes a different digest and never falls back to another canonicalization.",
+      "not_part_of_the_domain": "Envelope size (65,536 canonical JSON bytes) and value-count (16,384) caps are transport limits of a deployment, not of the digest. Every vector here is within them."
+    }
+  },
   "vectors": [
     {
       "name": "empty",
       "content": {},
-      "digest": "c348e1722fbda6fbdd0ce8ec7831067eeff989c54b833673b8ebf6890883f012"
+      "rendering": "d:0:",
+      "digest": "c348e1722fbda6fbdd0ce8ec7831067eeff989c54b833673b8ebf6890883f012",
+      "restricted_v1": true
     },
     {
       "name": "one_int",
       "content": {
         "a": 1
       },
-      "digest": "32a98aef7315bc917ac0b650017f846e82bab90385cfe71b6fb53313ddf0006a"
+      "rendering": "d:1:s:1:ai:1:",
+      "digest": "32a98aef7315bc917ac0b650017f846e82bab90385cfe71b6fb53313ddf0006a",
+      "restricted_v1": true
     },
     {
       "name": "null_bool_int",
@@ -22,7 +59,9 @@
         "f": false,
         "z": 0
       },
-      "digest": "f1f5dffeacf4d615ddb4871add870412420b31353cdcd47bcc6df60974e86bde"
+      "rendering": "d:4:s:1:fb:0s:1:nn:s:1:tb:1s:1:zi:0:",
+      "digest": "f1f5dffeacf4d615ddb4871add870412420b31353cdcd47bcc6df60974e86bde",
+      "restricted_v1": true
     },
     {
       "name": "bool_is_not_one",
@@ -30,21 +69,27 @@
         "v": true,
         "w": 1
       },
-      "digest": "525e4bb8f6ca1c3131980e369c25797ee4ba7f596b47e68471cad15e3d5d2aee"
+      "rendering": "d:2:s:1:vb:1s:1:wi:1:",
+      "digest": "525e4bb8f6ca1c3131980e369c25797ee4ba7f596b47e68471cad15e3d5d2aee",
+      "restricted_v1": true
     },
     {
       "name": "separator_collision_left",
       "content": {
         "ab": "c"
       },
-      "digest": "9c91082e6a9ec1dc9b26d6e16a13cf8e3786769e441760af4ddb93be4818670b"
+      "rendering": "d:1:s:2:abs:1:c",
+      "digest": "9c91082e6a9ec1dc9b26d6e16a13cf8e3786769e441760af4ddb93be4818670b",
+      "restricted_v1": true
     },
     {
       "name": "separator_collision_right",
       "content": {
         "a": "bc"
       },
-      "digest": "e4be55f20a1f111137a912fb3434b422b392060a6fec2111830f179da02765a1"
+      "rendering": "d:1:s:1:as:2:bc",
+      "digest": "e4be55f20a1f111137a912fb3434b422b392060a6fec2111830f179da02765a1",
+      "restricted_v1": true
     },
     {
       "name": "keys_sort_by_code_point",
@@ -58,7 +103,9 @@
         "z": 7,
         "É": 8
       },
-      "digest": "bbf67385935d6d25443b1b3752c5ac50ac16d0fd121d60f708f5b1a9f8816bbf"
+      "rendering": "d:8:s:1:Ai:4:s:1:Bi:2:s:1:_i:5:s:1:ai:3:s:1:bi:1:s:1:zi:7:s:1:Éi:8:s:1:éi:6:",
+      "digest": "bbf67385935d6d25443b1b3752c5ac50ac16d0fd121d60f708f5b1a9f8816bbf",
+      "restricted_v1": true
     },
     {
       "name": "key_order_ba",
@@ -66,7 +113,9 @@
         "b": 1,
         "a": 2
       },
-      "digest": "acd0be1d57187dae28a701535f4d6ac035f647d79281337902d0c55d60d5738a"
+      "rendering": "d:2:s:1:ai:2:s:1:bi:1:",
+      "digest": "acd0be1d57187dae28a701535f4d6ac035f647d79281337902d0c55d60d5738a",
+      "restricted_v1": true
     },
     {
       "name": "key_order_ab",
@@ -74,14 +123,18 @@
         "a": 2,
         "b": 1
       },
-      "digest": "acd0be1d57187dae28a701535f4d6ac035f647d79281337902d0c55d60d5738a"
+      "rendering": "d:2:s:1:ai:2:s:1:bi:1:",
+      "digest": "acd0be1d57187dae28a701535f4d6ac035f647d79281337902d0c55d60d5738a",
+      "restricted_v1": true
     },
     {
       "name": "length_counts_code_points_not_bytes",
       "content": {
         "s": "café ✓ 🙂"
       },
-      "digest": "b1436e6d2c4c8b8ac453885da0ada4fe58a9ede9640f9f79fab7f6bae699719b"
+      "rendering": "d:1:s:1:ss:8:café ✓ 🙂",
+      "digest": "b1436e6d2c4c8b8ac453885da0ada4fe58a9ede9640f9f79fab7f6bae699719b",
+      "restricted_v1": true
     },
     {
       "name": "combining_is_not_normalised",
@@ -89,7 +142,9 @@
         "composed": "é",
         "combining": "é"
       },
-      "digest": "9e01fd509d6ef3e164d9da946f309866c9c2f52d2307c8dc81200a8a035bed5e"
+      "rendering": "d:2:s:9:combinings:2:és:8:composeds:1:é",
+      "digest": "9e01fd509d6ef3e164d9da946f309866c9c2f52d2307c8dc81200a8a035bed5e",
+      "restricted_v1": true
     },
     {
       "name": "empty_string_and_list",
@@ -98,7 +153,9 @@
         "l": [],
         "d": {}
       },
-      "digest": "d857a7913538d8d7b81e16c2644d717698c99970a007ac69e047cb92a1ab833e"
+      "rendering": "d:3:s:1:dd:0:s:1:ll:0:s:1:ss:0:",
+      "digest": "d857a7913538d8d7b81e16c2644d717698c99970a007ac69e047cb92a1ab833e",
+      "restricted_v1": true
     },
     {
       "name": "string_that_looks_like_the_encoding",
@@ -107,7 +164,9 @@
         "t": "d:0:",
         "u": "i:5:"
       },
-      "digest": "61ca0e132aae235dba24b9dc8f7c0e915a8a6209de363235484b39fac646b7f9"
+      "rendering": "d:3:s:1:ss:5:s:1:as:1:ts:4:d:0:s:1:us:4:i:5:",
+      "digest": "61ca0e132aae235dba24b9dc8f7c0e915a8a6209de363235484b39fac646b7f9",
+      "restricted_v1": true
     },
     {
       "name": "nested",
@@ -129,7 +188,9 @@
           }
         }
       },
-      "digest": "61567fcfc252385f02c87806eb3f58eabb56312e798a099794a7acc012c01937"
+      "rendering": "d:2:s:1:wd:1:s:1:vd:1:s:1:ul:0:s:1:xl:3:i:1:i:2:d:1:s:1:yl:3:b:1n:s:1:z",
+      "digest": "61567fcfc252385f02c87806eb3f58eabb56312e798a099794a7acc012c01937",
+      "restricted_v1": true
     },
     {
       "name": "floats_simple",
@@ -139,7 +200,9 @@
         "c": 100.0,
         "d": -2.25
       },
-      "digest": "8c8f904c2f8e018e3537b98c6ba2cfa512b051b60c9411e4b9faa3e1bcd5feb0"
+      "rendering": "d:4:s:1:af:1.5:s:1:bf:0.1:s:1:cf:100.0:s:1:df:-2.25:",
+      "digest": "8c8f904c2f8e018e3537b98c6ba2cfa512b051b60c9411e4b9faa3e1bcd5feb0",
+      "restricted_v1": false
     },
     {
       "name": "float_one_is_not_int_one",
@@ -147,21 +210,27 @@
         "i": 1,
         "f": 1.0
       },
-      "digest": "cd25f1bc921dc98bd2028b2205f7a13a0a3e68110d5027b0890bc4250779febc"
+      "rendering": "d:2:s:1:ff:1.0:s:1:ii:1:",
+      "digest": "cd25f1bc921dc98bd2028b2205f7a13a0a3e68110d5027b0890bc4250779febc",
+      "restricted_v1": false
     },
     {
       "name": "negative_zero",
       "content": {
         "z": -0.0
       },
-      "digest": "893c683e0df0e4b902f166af65e70080691630f7ebd75b1fcb9c4998548b9b87"
+      "rendering": "d:1:s:1:zf:0.0:",
+      "digest": "893c683e0df0e4b902f166af65e70080691630f7ebd75b1fcb9c4998548b9b87",
+      "restricted_v1": false
     },
     {
       "name": "positive_zero",
       "content": {
         "z": 0.0
       },
-      "digest": "893c683e0df0e4b902f166af65e70080691630f7ebd75b1fcb9c4998548b9b87"
+      "rendering": "d:1:s:1:zf:0.0:",
+      "digest": "893c683e0df0e4b902f166af65e70080691630f7ebd75b1fcb9c4998548b9b87",
+      "restricted_v1": false
     },
     {
       "name": "float_exponents",
@@ -172,7 +241,9 @@
         "d": 5e-324,
         "e": 1.7976931348623157e+308
       },
-      "digest": "9d83d02a537fc0355339432fca0136c4a05329096d31e2012817831598e46e1d"
+      "rendering": "d:5:s:1:af:1e-07:s:1:bf:1e+22:s:1:cf:1.5e+300:s:1:df:5e-324:s:1:ef:1.7976931348623157e+308:",
+      "digest": "9d83d02a537fc0355339432fca0136c4a05329096d31e2012817831598e46e1d",
+      "restricted_v1": false
     },
     {
       "name": "float_shortest_round_trip",
@@ -181,7 +252,9 @@
         "b": 2.5e-05,
         "c": 123456789.12345679
       },
-      "digest": "808450da8cee8799e3e69b35de4525e8f61315d142d92dbd8133b755c49fc8d2"
+      "rendering": "d:3:s:1:af:0.30000000000000004:s:1:bf:2.5e-05:s:1:cf:123456789.12345679:",
+      "digest": "808450da8cee8799e3e69b35de4525e8f61315d142d92dbd8133b755c49fc8d2",
+      "restricted_v1": false
     },
     {
       "name": "ints_at_the_edges",
@@ -191,7 +264,9 @@
         "c": 0,
         "d": -1
       },
-      "digest": "49894986fa1b292624bae24b94efd64377ddd00579e73b89e4776bb9d0d46e95"
+      "rendering": "d:4:s:1:ai:9223372036854775807:s:1:bi:-9223372036854775808:s:1:ci:0:s:1:di:-1:",
+      "digest": "49894986fa1b292624bae24b94efd64377ddd00579e73b89e4776bb9d0d46e95",
+      "restricted_v1": false
     },
     {
       "name": "ints_past_64_bits",
@@ -200,7 +275,9 @@
         "b": 18446744073709551616,
         "c": -123456789012345678901234567890
       },
-      "digest": "6c630763356972faf026213d9a2f4bdc4b2c8400163a252699d2f7bbde8964c0"
+      "rendering": "d:3:s:1:ai:9223372036854775808:s:1:bi:18446744073709551616:s:1:ci:-123456789012345678901234567890:",
+      "digest": "6c630763356972faf026213d9a2f4bdc4b2c8400163a252699d2f7bbde8964c0",
+      "restricted_v1": false
     },
     {
       "name": "long_list",
@@ -233,7 +310,9 @@
           24
         ]
       },
-      "digest": "d0f6e218e56137266d133f461395b9c3d54a23b618abe1ce1885e72b18974d80"
+      "rendering": "d:1:s:1:ll:25:i:0:i:1:i:2:i:3:i:4:i:5:i:6:i:7:i:8:i:9:i:10:i:11:i:12:i:13:i:14:i:15:i:16:i:17:i:18:i:19:i:20:i:21:i:22:i:23:i:24:",
+      "digest": "d0f6e218e56137266d133f461395b9c3d54a23b618abe1ce1885e72b18974d80",
+      "restricted_v1": true
     },
     {
       "name": "deep",
@@ -252,7 +331,537 @@
           }
         }
       },
-      "digest": "37adf00cf0b4bc2eb90324f8c8d63900af03002bfe90de82ca3d52b3c61a63ab"
+      "rendering": "d:1:s:1:ad:1:s:1:bd:1:s:1:cd:1:s:1:dd:1:s:1:ed:1:s:1:fd:1:s:1:gs:6:bottom",
+      "digest": "37adf00cf0b4bc2eb90324f8c8d63900af03002bfe90de82ca3d52b3c61a63ab",
+      "restricted_v1": true
+    },
+    {
+      "name": "astral_keys_sort_after_high_bmp_keys",
+      "content": {
+        "": 1,
+        "｡": 2,
+        "￿": 3,
+        "𐀀": 4,
+        "😀": 5
+      },
+      "rendering": "d:5:s:1:i:1:s:1:｡i:2:s:1:￿i:3:s:1:𐀀i:4:s:1:😀i:5:",
+      "digest": "97f5061663e3f77556f827f9fb0b85996a46dcedfbcea7be88d4029a7b0e7f65",
+      "restricted_v1": true
+    },
+    {
+      "name": "empty_string_key",
+      "content": {
+        "": "empty key",
+        "a": ""
+      },
+      "rendering": "d:2:s:0:s:9:empty keys:1:as:0:",
+      "digest": "fecd06b722ee5b16822745efd47231196a1c03618a2786439de61132cb1dd6c5",
+      "restricted_v1": true
+    },
+    {
+      "name": "nul_and_control_characters",
+      "content": {
+        "nul": "\u0000",
+        "c0": "\u0001\u0007\b\t\n\u000b\f\r\u001b\u001f",
+        "del_c1": "",
+        "separators": "  ",
+        "key\u0000nul": 1,
+        "\n": "newline key"
+      },
+      "rendering": "d:6:s:1:\ns:11:newline keys:2:c0s:10:\u0001\u0007\b\t\n\u000b\f\r\u001b\u001fs:6:del_c1s:4:s:7:key\u0000nuli:1:s:3:nuls:1:\u0000s:10:separatorss:2:  ",
+      "digest": "f8778d3f18a4af69adc87c40dfdbf17d3dc6a7da2ac1a266c024df9c3f05872d",
+      "restricted_v1": true
+    },
+    {
+      "name": "mixed_multilingual_text",
+      "content": {
+        "ja": "日本語のテキスト",
+        "ar": "مرحبا بالعالم",
+        "he": "שלום",
+        "hi": "नमस्ते",
+        "zh": "中文",
+        "ko": "한국어",
+        "ru": "Привет",
+        "family": "👩‍👩‍👧",
+        "flag": "🇺🇸",
+        "fraktur": "𝔘𝔫𝔦",
+        "bom": "﻿"
+      },
+      "rendering": "d:11:s:2:ars:13:مرحبا بالعالمs:3:boms:1:﻿s:6:familys:5:👩‍👩‍👧s:4:flags:2:🇺🇸s:7:frakturs:3:𝔘𝔫𝔦s:2:hes:4:שלוםs:2:his:6:नमस्तेs:2:jas:8:日本語のテキストs:2:kos:3:한국어s:2:rus:6:Приветs:2:zhs:2:中文",
+      "digest": "be7319d22090e072740ba1a813de4b455d7fe45d3d06fe4d73afb906e67a6c2f",
+      "restricted_v1": true
+    },
+    {
+      "name": "int_at_the_safe_limit",
+      "content": {
+        "max": 9007199254740991,
+        "min": -9007199254740991
+      },
+      "rendering": "d:2:s:3:maxi:9007199254740991:s:3:mini:-9007199254740991:",
+      "digest": "a8c4e2d37a2ea3f71bfb03eb8d519d30dd18fa18447cd6b062da7c5890b615a5",
+      "restricted_v1": true
+    },
+    {
+      "name": "int_one_past_the_safe_limit",
+      "content": {
+        "a": 9007199254740992
+      },
+      "rendering": "d:1:s:1:ai:9007199254740992:",
+      "digest": "a570a98d629bd738a789fe9647fd6e8fdbbaa954f325c30354c1543b66451645",
+      "restricted_v1": false
+    },
+    {
+      "name": "negative_int_one_past_the_safe_limit",
+      "content": {
+        "a": -9007199254740992
+      },
+      "rendering": "d:1:s:1:ai:-9007199254740992:",
+      "digest": "21e2e9440b15f6c6891eb076e3321e53ee1aa3075f5e06e6dcf829a6032fb642",
+      "restricted_v1": false
+    },
+    {
+      "name": "negative_ints",
+      "content": {
+        "a": -1,
+        "b": -10,
+        "c": -100000,
+        "d": [
+          -2,
+          -3
+        ]
+      },
+      "rendering": "d:4:s:1:ai:-1:s:1:bi:-10:s:1:ci:-100000:s:1:dl:2:i:-2:i:-3:",
+      "digest": "068ae2683693a40f0995618b8b4ba870296f33144ed1ca532da03a4d9bbb047e",
+      "restricted_v1": true
+    },
+    {
+      "name": "depth_at_the_restricted_limit",
+      "content": {
+        "m": [
+          {
+            "m": [
+              {
+                "m": [
+                  {
+                    "m": [
+                      {
+                        "m": [
+                          {
+                            "m": [
+                              {
+                                "m": [
+                                  {
+                                    "m": [
+                                      {
+                                        "m": [
+                                          {
+                                            "m": [
+                                              {
+                                                "m": [
+                                                  {
+                                                    "m": [
+                                                      {
+                                                        "m": [
+                                                          {
+                                                            "m": [
+                                                              {
+                                                                "m": [
+                                                                  {
+                                                                    "m": "bottom"
+                                                                  }
+                                                                ]
+                                                              }
+                                                            ]
+                                                          }
+                                                        ]
+                                                      }
+                                                    ]
+                                                  }
+                                                ]
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "rendering": "d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ms:6:bottom",
+      "digest": "bf3fff58629a5bd1afe8d3f0420054e4bd3a789ba331c838305e0b665bc49801",
+      "restricted_v1": true
+    },
+    {
+      "name": "depth_one_past_the_restricted_limit",
+      "content": {
+        "m": [
+          {
+            "m": [
+              {
+                "m": [
+                  {
+                    "m": [
+                      {
+                        "m": [
+                          {
+                            "m": [
+                              {
+                                "m": [
+                                  {
+                                    "m": [
+                                      {
+                                        "m": [
+                                          {
+                                            "m": [
+                                              {
+                                                "m": [
+                                                  {
+                                                    "m": [
+                                                      {
+                                                        "m": [
+                                                          {
+                                                            "m": [
+                                                              {
+                                                                "m": [
+                                                                  {
+                                                                    "m": [
+                                                                      "bottom"
+                                                                    ]
+                                                                  }
+                                                                ]
+                                                              }
+                                                            ]
+                                                          }
+                                                        ]
+                                                      }
+                                                    ]
+                                                  }
+                                                ]
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "rendering": "d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:d:1:s:1:ml:1:s:6:bottom",
+      "digest": "acac7daa104ce49e23b894ea6105a1e17533b9fa2f712384ef0b33a460490190",
+      "restricted_v1": false
+    },
+    {
+      "name": "long_string",
+      "content": {
+        "s": "abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀"
+      },
+      "rendering": "d:1:s:1:ss:10000:abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀abcé😀",
+      "digest": "4f882bdabc79f465e438612ce8ba23bf14d31dbe4e69fcb4d21da5777db018de",
+      "restricted_v1": true
+    },
+    {
+      "name": "many_keys_scrambled_insertion_order",
+      "content": {
+        "k000": 0,
+        "k073": 73,
+        "k146": 146,
+        "k019": 19,
+        "k092": 92,
+        "k165": 165,
+        "k038": 38,
+        "k111": 111,
+        "k184": 184,
+        "k057": 57,
+        "k130": 130,
+        "k003": 3,
+        "k076": 76,
+        "k149": 149,
+        "k022": 22,
+        "k095": 95,
+        "k168": 168,
+        "k041": 41,
+        "k114": 114,
+        "k187": 187,
+        "k060": 60,
+        "k133": 133,
+        "k006": 6,
+        "k079": 79,
+        "k152": 152,
+        "k025": 25,
+        "k098": 98,
+        "k171": 171,
+        "k044": 44,
+        "k117": 117,
+        "k190": 190,
+        "k063": 63,
+        "k136": 136,
+        "k009": 9,
+        "k082": 82,
+        "k155": 155,
+        "k028": 28,
+        "k101": 101,
+        "k174": 174,
+        "k047": 47,
+        "k120": 120,
+        "k193": 193,
+        "k066": 66,
+        "k139": 139,
+        "k012": 12,
+        "k085": 85,
+        "k158": 158,
+        "k031": 31,
+        "k104": 104,
+        "k177": 177,
+        "k050": 50,
+        "k123": 123,
+        "k196": 196,
+        "k069": 69,
+        "k142": 142,
+        "k015": 15,
+        "k088": 88,
+        "k161": 161,
+        "k034": 34,
+        "k107": 107,
+        "k180": 180,
+        "k053": 53,
+        "k126": 126,
+        "k199": 199,
+        "k072": 72,
+        "k145": 145,
+        "k018": 18,
+        "k091": 91,
+        "k164": 164,
+        "k037": 37,
+        "k110": 110,
+        "k183": 183,
+        "k056": 56,
+        "k129": 129,
+        "k002": 2,
+        "k075": 75,
+        "k148": 148,
+        "k021": 21,
+        "k094": 94,
+        "k167": 167,
+        "k040": 40,
+        "k113": 113,
+        "k186": 186,
+        "k059": 59,
+        "k132": 132,
+        "k005": 5,
+        "k078": 78,
+        "k151": 151,
+        "k024": 24,
+        "k097": 97,
+        "k170": 170,
+        "k043": 43,
+        "k116": 116,
+        "k189": 189,
+        "k062": 62,
+        "k135": 135,
+        "k008": 8,
+        "k081": 81,
+        "k154": 154,
+        "k027": 27,
+        "k100": 100,
+        "k173": 173,
+        "k046": 46,
+        "k119": 119,
+        "k192": 192,
+        "k065": 65,
+        "k138": 138,
+        "k011": 11,
+        "k084": 84,
+        "k157": 157,
+        "k030": 30,
+        "k103": 103,
+        "k176": 176,
+        "k049": 49,
+        "k122": 122,
+        "k195": 195,
+        "k068": 68,
+        "k141": 141,
+        "k014": 14,
+        "k087": 87,
+        "k160": 160,
+        "k033": 33,
+        "k106": 106,
+        "k179": 179,
+        "k052": 52,
+        "k125": 125,
+        "k198": 198,
+        "k071": 71,
+        "k144": 144,
+        "k017": 17,
+        "k090": 90,
+        "k163": 163,
+        "k036": 36,
+        "k109": 109,
+        "k182": 182,
+        "k055": 55,
+        "k128": 128,
+        "k001": 1,
+        "k074": 74,
+        "k147": 147,
+        "k020": 20,
+        "k093": 93,
+        "k166": 166,
+        "k039": 39,
+        "k112": 112,
+        "k185": 185,
+        "k058": 58,
+        "k131": 131,
+        "k004": 4,
+        "k077": 77,
+        "k150": 150,
+        "k023": 23,
+        "k096": 96,
+        "k169": 169,
+        "k042": 42,
+        "k115": 115,
+        "k188": 188,
+        "k061": 61,
+        "k134": 134,
+        "k007": 7,
+        "k080": 80,
+        "k153": 153,
+        "k026": 26,
+        "k099": 99,
+        "k172": 172,
+        "k045": 45,
+        "k118": 118,
+        "k191": 191,
+        "k064": 64,
+        "k137": 137,
+        "k010": 10,
+        "k083": 83,
+        "k156": 156,
+        "k029": 29,
+        "k102": 102,
+        "k175": 175,
+        "k048": 48,
+        "k121": 121,
+        "k194": 194,
+        "k067": 67,
+        "k140": 140,
+        "k013": 13,
+        "k086": 86,
+        "k159": 159,
+        "k032": 32,
+        "k105": 105,
+        "k178": 178,
+        "k051": 51,
+        "k124": 124,
+        "k197": 197,
+        "k070": 70,
+        "k143": 143,
+        "k016": 16,
+        "k089": 89,
+        "k162": 162,
+        "k035": 35,
+        "k108": 108,
+        "k181": 181,
+        "k054": 54,
+        "k127": 127
+      },
+      "rendering": "d:200:s:4:k000i:0:s:4:k001i:1:s:4:k002i:2:s:4:k003i:3:s:4:k004i:4:s:4:k005i:5:s:4:k006i:6:s:4:k007i:7:s:4:k008i:8:s:4:k009i:9:s:4:k010i:10:s:4:k011i:11:s:4:k012i:12:s:4:k013i:13:s:4:k014i:14:s:4:k015i:15:s:4:k016i:16:s:4:k017i:17:s:4:k018i:18:s:4:k019i:19:s:4:k020i:20:s:4:k021i:21:s:4:k022i:22:s:4:k023i:23:s:4:k024i:24:s:4:k025i:25:s:4:k026i:26:s:4:k027i:27:s:4:k028i:28:s:4:k029i:29:s:4:k030i:30:s:4:k031i:31:s:4:k032i:32:s:4:k033i:33:s:4:k034i:34:s:4:k035i:35:s:4:k036i:36:s:4:k037i:37:s:4:k038i:38:s:4:k039i:39:s:4:k040i:40:s:4:k041i:41:s:4:k042i:42:s:4:k043i:43:s:4:k044i:44:s:4:k045i:45:s:4:k046i:46:s:4:k047i:47:s:4:k048i:48:s:4:k049i:49:s:4:k050i:50:s:4:k051i:51:s:4:k052i:52:s:4:k053i:53:s:4:k054i:54:s:4:k055i:55:s:4:k056i:56:s:4:k057i:57:s:4:k058i:58:s:4:k059i:59:s:4:k060i:60:s:4:k061i:61:s:4:k062i:62:s:4:k063i:63:s:4:k064i:64:s:4:k065i:65:s:4:k066i:66:s:4:k067i:67:s:4:k068i:68:s:4:k069i:69:s:4:k070i:70:s:4:k071i:71:s:4:k072i:72:s:4:k073i:73:s:4:k074i:74:s:4:k075i:75:s:4:k076i:76:s:4:k077i:77:s:4:k078i:78:s:4:k079i:79:s:4:k080i:80:s:4:k081i:81:s:4:k082i:82:s:4:k083i:83:s:4:k084i:84:s:4:k085i:85:s:4:k086i:86:s:4:k087i:87:s:4:k088i:88:s:4:k089i:89:s:4:k090i:90:s:4:k091i:91:s:4:k092i:92:s:4:k093i:93:s:4:k094i:94:s:4:k095i:95:s:4:k096i:96:s:4:k097i:97:s:4:k098i:98:s:4:k099i:99:s:4:k100i:100:s:4:k101i:101:s:4:k102i:102:s:4:k103i:103:s:4:k104i:104:s:4:k105i:105:s:4:k106i:106:s:4:k107i:107:s:4:k108i:108:s:4:k109i:109:s:4:k110i:110:s:4:k111i:111:s:4:k112i:112:s:4:k113i:113:s:4:k114i:114:s:4:k115i:115:s:4:k116i:116:s:4:k117i:117:s:4:k118i:118:s:4:k119i:119:s:4:k120i:120:s:4:k121i:121:s:4:k122i:122:s:4:k123i:123:s:4:k124i:124:s:4:k125i:125:s:4:k126i:126:s:4:k127i:127:s:4:k128i:128:s:4:k129i:129:s:4:k130i:130:s:4:k131i:131:s:4:k132i:132:s:4:k133i:133:s:4:k134i:134:s:4:k135i:135:s:4:k136i:136:s:4:k137i:137:s:4:k138i:138:s:4:k139i:139:s:4:k140i:140:s:4:k141i:141:s:4:k142i:142:s:4:k143i:143:s:4:k144i:144:s:4:k145i:145:s:4:k146i:146:s:4:k147i:147:s:4:k148i:148:s:4:k149i:149:s:4:k150i:150:s:4:k151i:151:s:4:k152i:152:s:4:k153i:153:s:4:k154i:154:s:4:k155i:155:s:4:k156i:156:s:4:k157i:157:s:4:k158i:158:s:4:k159i:159:s:4:k160i:160:s:4:k161i:161:s:4:k162i:162:s:4:k163i:163:s:4:k164i:164:s:4:k165i:165:s:4:k166i:166:s:4:k167i:167:s:4:k168i:168:s:4:k169i:169:s:4:k170i:170:s:4:k171i:171:s:4:k172i:172:s:4:k173i:173:s:4:k174i:174:s:4:k175i:175:s:4:k176i:176:s:4:k177i:177:s:4:k178i:178:s:4:k179i:179:s:4:k180i:180:s:4:k181i:181:s:4:k182i:182:s:4:k183i:183:s:4:k184i:184:s:4:k185i:185:s:4:k186i:186:s:4:k187i:187:s:4:k188i:188:s:4:k189i:189:s:4:k190i:190:s:4:k191i:191:s:4:k192i:192:s:4:k193i:193:s:4:k194i:194:s:4:k195i:195:s:4:k196i:196:s:4:k197i:197:s:4:k198i:198:s:4:k199i:199:",
+      "digest": "cb01dc4f5a269a4c6e308452f6575246469c5347a515e3e8ce1cf353e22ef3d8",
+      "restricted_v1": true
+    },
+    {
+      "name": "json_escapes_are_not_cns_escapes",
+      "content": {
+        "quote": "\"",
+        "backslash": "\\",
+        "slash": "/",
+        "tab": "\t",
+        "newline": "\n",
+        "e_acute": "é",
+        "unicode_escape_text": "\\u00e9"
+      },
+      "rendering": "d:7:s:9:backslashs:1:\\s:7:e_acutes:1:és:7:newlines:1:\ns:5:quotes:1:\"s:5:slashs:1:/s:3:tabs:1:\ts:19:unicode_escape_texts:6:\\u00e9",
+      "digest": "1e6e506d95cd404fb685ff68935088dbbc7a6d4c87304a7e148dc73ed340351e",
+      "restricted_v1": true
+    },
+    {
+      "name": "text_that_looks_like_json",
+      "content": {
+        "obj": "{\"a\":1}",
+        "null": "null",
+        "true": "true",
+        "one": "1",
+        "list": "[]"
+      },
+      "rendering": "d:5:s:4:lists:2:[]s:4:nulls:4:nulls:3:objs:7:{\"a\":1}s:3:ones:1:1s:4:trues:4:true",
+      "digest": "92f7bd0266350e59a9202a45381d732cec7966bc9d7d3c88030e0a36bbc0d33e",
+      "restricted_v1": true
+    }
+  ],
+  "refusals": [
+    {
+      "name": "nan",
+      "what": "map {\"x\": float NaN}",
+      "lenient_json": "{\"x\": NaN}",
+      "why": "NaN is not a value a verdict can be bound to"
+    },
+    {
+      "name": "positive_infinity",
+      "what": "map {\"x\": float +infinity}",
+      "lenient_json": "{\"x\": Infinity}",
+      "why": "an infinity is not a value"
+    },
+    {
+      "name": "negative_infinity",
+      "what": "map {\"x\": float -infinity}",
+      "lenient_json": "{\"x\": -Infinity}",
+      "why": "an infinity is not a value"
+    },
+    {
+      "name": "lone_high_surrogate",
+      "what": "map {\"x\": text holding U+D800 alone}",
+      "lenient_json": "{\"x\": \"\\ud800\"}",
+      "why": "text holding a lone surrogate is not Unicode and has no UTF-8 encoding"
+    },
+    {
+      "name": "lone_low_surrogate",
+      "what": "map {\"x\": text holding U+DC00 alone}",
+      "lenient_json": "{\"x\": \"\\udc00\"}",
+      "why": "text holding a lone surrogate is not Unicode and has no UTF-8 encoding"
+    },
+    {
+      "name": "non_text_key",
+      "what": "map {1: \"a\"} (an integer key)",
+      "lenient_json": null,
+      "why": "map keys must be text; JSON cannot write any other key"
+    },
+    {
+      "name": "bytes",
+      "what": "map {\"x\": the bytes 0x61 0x62}",
+      "lenient_json": null,
+      "why": "binary data has no rendering; encode it as text first. JSON has no bytes type"
     }
   ]
 }
