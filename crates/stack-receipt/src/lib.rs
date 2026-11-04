@@ -23,16 +23,22 @@
 //! | [`record`] | the record and event types, their bounds and validation |
 //! | [`encode`] | the one canonical encoding, the record hash, the genesis hash |
 //! | [`sign`] | the receipt signer, signed records and frames, the trusted receipt key set |
+//! | [`cns`] | the CNS canonical rendering and subject digest over this crate's value type |
+//! | [`decision`] | decision root recomputation and the verifier's roster policy |
 //!
-//! Later steps add the CNS decision root and roster policy, the durable
-//! file log and the write-ahead recorder, and the verifier.
+//! Later steps add the durable file log and the write-ahead recorder,
+//! and the verifier.
 
 #![forbid(unsafe_code)]
 
+pub mod cns;
+pub mod decision;
 pub mod encode;
 pub mod record;
 pub mod sign;
 
+pub use cns::{canonical_rendering, subject_digest, CnsValue};
+pub use decision::{check_authorized_decision, decision_root, root_content, seat_gate, DecisionFinding, RosterPolicy};
 pub use sign::{
     signed_message, BadSignature, FrameError, ReceiptKeyAnchor, ReceiptKeyStatus, ReceiptPublicKey, ReceiptSigner,
     ResolveError, SignError, SignedRecord, TrustError, TrustedReceiptKeys, WeakKey, FRAME_OVERHEAD,
