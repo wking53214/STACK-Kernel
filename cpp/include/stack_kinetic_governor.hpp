@@ -194,6 +194,15 @@ private:
 
 public:
     /**
+     * Current accrued debt of a domain in ticks (0 for an out-of-range id).
+     * Read access for hosts and tests (I-03).
+     */
+    [[nodiscard]] uint64_t Accrued(uint64_t domain_id) const noexcept {
+        if (domain_id >= MaxDomains) return 0;
+        return domains_[domain_id].accrued_ticks.load(std::memory_order_acquire);
+    }
+
+    /**
      * Accrue execution debt for a domain.
      *
      * Atomically increments the domain's debt counter by the given ticks.

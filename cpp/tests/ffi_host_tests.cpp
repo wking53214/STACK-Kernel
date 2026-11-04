@@ -314,6 +314,34 @@ TEST_CASE("FFI host: a request above the largest allowed request and an unknown 
     REQUIRE(completed <= static_cast<int>(kSpendable / kLargestRequest) + elapsed_ms / 100 + 1);
 }
 
+TEST_CASE("FFI host: an overrun transaction keeps its tokens", "[ffi][I-03]") {
+    // A software budget of one tick is always exceeded. The payload ran, so
+    // its 100 tokens are spent: 8 more requests of 100 follow, not 9.
+    const uint64_t domain = 8;
+    constexpr int kSoftwareDeadline = -7;
+    int caps_rc = 99, overrun = 99, last = 99;
+    int completed = 0;
+    long elapsed_ms = -1;
+    uint64_t runs_before = 0, runs_after = 0;
+    const int seal = OnSealedThread([&] {
+        caps_rc = stack_host_set_capabilities(0xFF, 0, 0, 0);
+        const auto t0 = Clock::now();
+        runs_before = stack_host_payload_count();
+        overrun = stack_execute_governed_transaction(domain, 0x01, kLargestRequest, 1, kOneSecondNs);
+        runs_after = stack_host_payload_count();
+        completed = ConsumeUntilRateLimited(domain, kLargestRequest, 50, &last);
+        elapsed_ms = ElapsedMs(t0);
+    });
+    REQUIRE(seal == 0);
+    REQUIRE(caps_rc == 0);
+    REQUIRE(overrun == kSoftwareDeadline);
+    REQUIRE(runs_after == runs_before + 1);
+    REQUIRE(last == kRateLimited);
+    INFO("completed " << completed << " in " << elapsed_ms << " ms");
+    REQUIRE(completed >= static_cast<int>(kSpendable / kLargestRequest) - 1);
+    REQUIRE(completed <= static_cast<int>(kSpendable / kLargestRequest) - 1 + elapsed_ms / 100 + 1);
+}
+
 TEST_CASE("FFI host: a failed transaction produces no success audit record", "[ffi][I-01]") {
     const uint64_t domain = 7;
     int caps_rc = 99, denied = 99, limited = 99, ok = 99;

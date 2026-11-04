@@ -883,6 +883,32 @@ mod tests {
         run_in_child("tests::test_failed_transaction_leaves_no_success_audit_record_through_the_ffi", CHILD_ENV);
     }
 
+    /// I-03: a transaction whose payload ran but overran its software budget
+    /// keeps its tokens: 8 more requests of 100 follow instead of 9.
+    #[test]
+    fn test_overrun_keeps_its_tokens_through_the_ffi() {
+        const CHILD_ENV: &str = "STACK_FFI_OVERRUN_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let (overrun, runs_delta, completed, last, elapsed_ms) = on_sealed_thread(|| {
+                assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+                let t0 = std::time::Instant::now();
+                let before = host_payload_count();
+                let overrun = execute_governed_transaction(6, 0x01, LARGEST_REQUEST, 1, ONE_SECOND_NS);
+                let runs_delta = host_payload_count() - before;
+                let (completed, last) = consume_until_rate_limited(6, LARGEST_REQUEST, 50);
+                (overrun, runs_delta, completed, last, t0.elapsed().as_millis() as usize)
+            });
+            assert_eq!(overrun, Err(TransactionError::SoftwareDeadline));
+            assert_eq!(runs_delta, 1, "the overrun payload ran");
+            assert_eq!(last, Err(TransactionError::RateLimited));
+            let expected = (SPENDABLE / LARGEST_REQUEST) as usize - 1; // 8
+            assert!(completed >= expected, "completed {completed}");
+            assert!(completed <= expected + elapsed_ms / 100 + 1, "completed {completed} in {elapsed_ms} ms");
+            return;
+        }
+        run_in_child("tests::test_overrun_keeps_its_tokens_through_the_ffi", CHILD_ENV);
+    }
+
     /// I-02 (decision B): a transaction on a thread that has not sealed
     /// itself is refused with ThreadNotSealed and the thread is left as it
     /// was (it can still open files, which a sealed thread cannot). A

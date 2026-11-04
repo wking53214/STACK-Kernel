@@ -20,9 +20,13 @@
  *
  * Execution flow through ExecuteGovernedTransaction():
  *   Check capabilities → consume tokens → arm timer → run payload →
- *   check preemption → check deadline → accrue debt → commit
+ *   commit tokens and accrue debt → check preemption → check deadline →
+ *   check the debt ceiling
  *
  * If any gate rejects, execution halts and error returns to caller.
+ * Accounting (I-03): a transaction rejected before its payload ran costs
+ * nothing (its tokens are refunded, no debt); once the payload has run its
+ * tokens are spent and its ticks charged whatever the outcome.
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ARCHITECTURAL NOTE: Single-Responsibility Violation
@@ -384,6 +388,14 @@ public:
     [[nodiscard]] const SeccompAuditRing<8192>& AuditRing() const noexcept { return audit_ring_; }
 
     /**
+     * The per-domain compute debt (I-03). The non-const accessor is for an
+     * administrator that forgives or preloads debt; transactions charge it
+     * themselves through ExecuteGovernedTransaction.
+     */
+    [[nodiscard]] ComputeDebtTracker<MaxDomains>& DebtTracker() noexcept { return debt_tracker_; }
+    [[nodiscard]] const ComputeDebtTracker<MaxDomains>& DebtTracker() const noexcept { return debt_tracker_; }
+
+    /**
      * Set active capability mask. Guarded against mid-transaction changes.
      * Returns false if transaction is in flight, preventing capability mutation.
      *
@@ -530,6 +542,19 @@ public:
 
         const uint64_t elapsed_ticks = HardwareClock::ReadTicks() - start_tick;
 
+        // ACCOUNTING RULE (I-03, R2-K-05/06). Everything above this line
+        // that returned did so before the payload ran, and the rollback
+        // guard refunded its tokens: a rejected transaction costs nothing.
+        // From here on the payload has run, so its tokens are spent whatever
+        // the outcome, and its CPU ticks are charged as debt, an overrun
+        // included. The charge is best effort against the ceiling: when it
+        // does not fit, the debt stays where it is and nothing is refunded.
+        // Before this, an overrun or preempted payload was refunded in full,
+        // and a payload that hit the ceiling had the ticks AccrueDebt had
+        // just refused refunded through the guard, so the debt went down.
+        guard.Commit();
+        const bool debt_charged = debt_tracker_.AccrueDebt(domain_id, elapsed_ticks).has_value();
+
         if (timer_guard.WasPreempted()) [[unlikely]] {
             // LAYER 5 FIX: Record hardware timer preemption event
             audit_ring_.Push(AuditEventType::HardwareTimerPreempted, domain_id, required_tokens);
@@ -543,15 +568,11 @@ public:
         }
 
         // Component 8-9 Check: Compute Debt
-        guard.accrued_ticks = elapsed_ticks;
-        auto debt_res = debt_tracker_.AccrueDebt(domain_id, elapsed_ticks);
-        if (!debt_res.has_value()) [[unlikely]] {
+        if (!debt_charged) [[unlikely]] {
             // LAYER 5 FIX: Record debt ceiling exceeded event
             audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, required_tokens);
             return std::unexpected(HostExecutionError::DebtCeilingExceeded);
         }
-
-        guard.Commit();
 
         // LAYER 5 FIX: Record successful transaction completion
         audit_ring_.Push(AuditEventType::TransactionCompleted, domain_id, required_tokens);

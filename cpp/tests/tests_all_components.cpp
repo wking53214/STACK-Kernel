@@ -786,6 +786,161 @@ TEST_CASE("Component 12: Layer 4 - a failed transaction records no TransactionCo
     REQUIRE_FALSE(host.AuditRing().ReadSlot(3, rec));
 }
 
+// I-03 (R2-K-05, R2-K-06): accounting rules of ExecuteGovernedTransaction.
+//   1. Rejected before the payload ran: nothing consumed, nothing accrued.
+//   2. The payload ran: its tokens are spent whatever follows, and its CPU
+//      ticks are charged as debt (an overrun is charged too; at the ceiling
+//      the debt stays where it is and is never refunded).
+// The exact counts use the no-refill rate: 90 requests of 10 tokens are the
+// 900 spendable tokens of one domain.
+namespace {
+constexpr uint64_t kDebtCeiling = 100'000'000'000ULL;
+constexpr uint32_t kTen = 10;
+
+// Requests of 10 tokens with a generous budget until the first RateLimited;
+// returns how many ran (completed or failed after running).
+int DrainTensUntilRateLimited(FfiPolicyHost& host, uint64_t domain, int* completed, int* ceiling_hit) {
+    SIMDCapabilityToken token(domain, CapabilityMask256(0x01, 0, 0, 0));
+    int ran = 0;
+    *completed = 0;
+    *ceiling_hit = 0;
+    for (int i = 0; i < 200; ++i) {
+        auto r = host.ExecuteGovernedTransaction(token, kTen, ~0ULL, 1'000'000'000ULL, []() {});
+        if (!r.has_value() && r.error() == HostExecutionError::RateLimitExceeded) break;
+        ++ran;
+        if (r.has_value()) ++*completed;
+        else if (r.error() == HostExecutionError::DebtCeilingExceeded) ++*ceiling_hit;
+    }
+    return ran;
+}
+}  // namespace
+
+TEST_CASE("Component 12: Layer 4 - at the debt ceiling nothing is refunded (R2-K-05)", "[layer-4][I-03]") {
+    // The observed case: with the debt preloaded one tick below the ceiling,
+    // a transaction hits the ceiling after its payload ran, and the rollback
+    // guard refunded the elapsed ticks that AccrueDebt had refused, so the
+    // debt went down (by 7610 ticks in the baseline run). The ceiling then
+    // defeats itself: every later transaction gets the same discount.
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+    const uint64_t domain = 2;
+    REQUIRE(host.DebtTracker().AccrueDebt(domain, kDebtCeiling - 1).has_value());
+    const uint64_t debt_before = host.DebtTracker().Accrued(domain);
+
+    HostExecutionError first = HostExecutionError::None;
+    bool payload_ran = false;
+    uint64_t debt_after_first = 0;
+    int ran = 0, completed = 0, ceiling_hit = 0;
+    std::thread([&]() {
+        SIMDCapabilityToken token(domain, CapabilityMask256(0x01, 0, 0, 0));
+        auto r = host.ExecuteGovernedTransaction(token, kTen, ~0ULL, 1'000'000'000ULL, [&]() { payload_ran = true; });
+        if (!r.has_value()) first = r.error();
+        debt_after_first = host.DebtTracker().Accrued(domain);
+        ran = DrainTensUntilRateLimited(host, domain, &completed, &ceiling_hit);
+    }).join();
+
+    REQUIRE(payload_ran);
+    REQUIRE(first == HostExecutionError::DebtCeilingExceeded);
+    INFO("debt before " << debt_before << " after " << debt_after_first
+         << " (delta " << static_cast<long long>(debt_after_first - debt_before) << ")");
+    REQUIRE(debt_after_first == debt_before);
+    // The payload ran, so the 10 tokens are spent: 89 more run (all at the
+    // ceiling) and the 91st is RateLimited. The debt never moved.
+    REQUIRE(ran == 89);
+    REQUIRE(completed == 0);
+    REQUIRE(ceiling_hit == 89);
+    REQUIRE(host.DebtTracker().Accrued(domain) == debt_before);
+}
+
+TEST_CASE("Component 12: Layer 4 - an overrun keeps its tokens and is charged its ticks (R2-K-06)", "[layer-4][I-03]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    // Software deadline: a budget of one tick is always exceeded.
+    const uint64_t software_domain = 3;
+    HostExecutionError software = HostExecutionError::None;
+    uint64_t software_debt = 0;
+    int software_ran = 0, software_completed = 0, software_ceiling = 0;
+    std::thread([&]() {
+        SIMDCapabilityToken token(software_domain, CapabilityMask256(0x01, 0, 0, 0));
+        auto r = host.ExecuteGovernedTransaction(token, kTen, 1ULL, 1'000'000'000ULL, []() { BurnCpuForMilliseconds(1); });
+        if (!r.has_value()) software = r.error();
+        software_debt = host.DebtTracker().Accrued(software_domain);
+        software_ran = DrainTensUntilRateLimited(host, software_domain, &software_completed, &software_ceiling);
+    }).join();
+    REQUIRE(software == HostExecutionError::DeadlineExceeded);
+    REQUIRE(software_debt > 0);
+    REQUIRE(software_ran == 89);       // the overrun's 10 tokens were not refunded
+    REQUIRE(software_completed == 89);
+
+    // Hard (CPU-time) deadline: 20 ms of CPU, the payload burns 200 ms.
+    const uint64_t hard_domain = 4;
+    HostExecutionError hard = HostExecutionError::None;
+    uint64_t hard_debt = 0;
+    int hard_ran = 0, hard_completed = 0, hard_ceiling = 0;
+    std::thread([&]() {
+        SIMDCapabilityToken token(hard_domain, CapabilityMask256(0x01, 0, 0, 0));
+        auto r = host.ExecuteGovernedTransaction(token, kTen, ~0ULL, 20'000'000ULL, []() { BurnCpuForMilliseconds(200); });
+        if (!r.has_value()) hard = r.error();
+        hard_debt = host.DebtTracker().Accrued(hard_domain);
+        hard_ran = DrainTensUntilRateLimited(host, hard_domain, &hard_completed, &hard_ceiling);
+    }).join();
+    REQUIRE(hard == HostExecutionError::PreemptionTriggered);
+    REQUIRE(hard_debt > 0);
+    REQUIRE(hard_ran == 89);
+    REQUIRE(hard_completed == 89);
+}
+
+TEST_CASE("Component 12: Layer 4 - a transaction rejected before running consumes and accrues nothing", "[layer-4][I-03]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    // Capability denied and an oversized request: refused before the payload.
+    const uint64_t refused_domain = 5;
+    int denied = 0, oversized = 0;
+    bool payload_ran = false;
+    uint64_t debt_after_refusals = 1;
+    int ran = 0, completed = 0, ceiling = 0;
+    std::thread([&]() {
+        SIMDCapabilityToken bad(refused_domain, CapabilityMask256(0x100, 0, 0, 0));
+        SIMDCapabilityToken good(refused_domain, CapabilityMask256(0x01, 0, 0, 0));
+        for (int i = 0; i < 10; ++i) {
+            auto r = host.ExecuteGovernedTransaction(bad, kTen, ~0ULL, 1'000'000'000ULL, [&]() { payload_ran = true; });
+            if (!r.has_value() && r.error() == HostExecutionError::CapabilityValidationFailed) ++denied;
+            auto o = host.ExecuteGovernedTransaction(good, 101, ~0ULL, 1'000'000'000ULL, [&]() { payload_ran = true; });
+            if (!o.has_value() && o.error() == HostExecutionError::RateLimitExceeded) ++oversized;
+        }
+        debt_after_refusals = host.DebtTracker().Accrued(refused_domain);
+        ran = DrainTensUntilRateLimited(host, refused_domain, &completed, &ceiling);
+    }).join();
+    REQUIRE(denied == 10);
+    REQUIRE(oversized == 10);
+    REQUIRE_FALSE(payload_ran);
+    REQUIRE(debt_after_refusals == 0);
+    REQUIRE(ran == 90);
+    REQUIRE(completed == 90);
+
+    // A timer that cannot be armed: tokens were consumed and are refunded,
+    // the payload never ran, no debt. Forged timer id as in the D-03 case.
+    const uint64_t arm_domain = 6;
+    HostExecutionError arm = HostExecutionError::None;
+    bool arm_payload_ran = false;
+    std::thread([&]() {
+        g_thread_timer_state.timer_id = reinterpret_cast<timer_t>(static_cast<uintptr_t>(0x7fffffff));
+        g_thread_timer_state.timer_initialized = true;
+        SIMDCapabilityToken token(arm_domain, CapabilityMask256(0x01, 0, 0, 0));
+        auto r = host.ExecuteGovernedTransaction(token, kTen, ~0ULL, 20'000'000ULL, [&]() { arm_payload_ran = true; });
+        if (!r.has_value()) arm = r.error();
+    }).join();
+    REQUIRE(arm == HostExecutionError::TimerArmFailed);
+    REQUIRE_FALSE(arm_payload_ran);
+    REQUIRE(host.DebtTracker().Accrued(arm_domain) == 0);
+    int arm_ran = 0, arm_completed = 0, arm_ceiling = 0;
+    std::thread([&]() { arm_ran = DrainTensUntilRateLimited(host, arm_domain, &arm_completed, &arm_ceiling); }).join();
+    REQUIRE(arm_ran == 90);
+    REQUIRE(arm_completed == 90);
+}
+
 TEST_CASE("Component 16 & 17: Integration & Chaos Stress", "[components][16-17]") {
     constexpr int num_threads = 4;
     std::vector<std::thread> threads;
