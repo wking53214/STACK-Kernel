@@ -171,7 +171,10 @@ impl Trident {
     /// Every acceptance is committed to `store` before it is committed in
     /// memory and before the verdict is returned; a commit the store
     /// refuses makes the envelope `StateUnavailable` (RETRY, reject) and
-    /// changes nothing.
+    /// changes nothing. A commit the store refuses as a check-and-commit
+    /// conflict ([`StoreError::Conflict`]) refuses the envelope with the
+    /// matching freshness reason (`IssuedBeforeEpoch`, `Replay`,
+    /// `SequenceNotIncreasing`) and also changes nothing in memory.
     pub fn new_with_store(
         config: TridentConfig,
         keyring: KeyRing,
@@ -214,7 +217,9 @@ impl Trident {
             }
         }
         let high_water_ms = restored.high_water_ms.max(config.restored_high_water_ms);
-        let epoch_floor_ms = Self::epoch_floor(&config, clock.as_ref(), 0, high_water_ms);
+        // A floor an operator reset stored (possibly on another verifier
+        // sharing the store) is honoured from the start.
+        let epoch_floor_ms = Self::epoch_floor(&config, clock.as_ref(), restored.epoch_floor_ms, high_water_ms);
         let mut replay = ReplayCache::new(config.replay_cache_capacity);
         // Restored in expiry order so that in-order expiry keeps working.
         // Every nonce still inside its window is kept, even beyond the
@@ -657,6 +662,41 @@ impl Trident {
                     nonce_expires_at_unix_ms: expires_at,
                 };
                 match st.store.commit(&record) {
+                    Err(StoreError::Conflict {
+                        nonce_consumed,
+                        stored_sequence,
+                        epoch_floor_ms,
+                    }) => {
+                        // The store's view (another writer, or state this
+                        // process no longer holds in memory) already
+                        // consumed this envelope. Refuse with the reason
+                        // the in-memory check would have given; memory is
+                        // left as it was, so the refusal changes nothing.
+                        counter!(t::STORE_CONFLICTS_TOTAL).increment(1);
+                        tracing::warn!(
+                            sender = %f,
+                            nonce_consumed,
+                            ?stored_sequence,
+                            ?epoch_floor_ms,
+                            "stack.trident replay store refused the commit: already consumed"
+                        );
+                        if fresh_entry {
+                            st.senders.remove(&f);
+                        }
+                        if epoch_floor_ms.is_some() {
+                            reasons.push(ReasonCode::IssuedBeforeEpoch);
+                        }
+                        if nonce_consumed {
+                            reasons.push(ReasonCode::Replay);
+                        }
+                        if stored_sequence.is_some() {
+                            reasons.push(ReasonCode::SequenceNotIncreasing);
+                        }
+                        if reasons.is_empty() {
+                            // A conflict that names no cause: fail closed.
+                            reasons.push(ReasonCode::StateUnavailable);
+                        }
+                    }
                     Err(e) => {
                         Self::store_failed("accept", &e);
                         if fresh_entry {
@@ -836,6 +876,14 @@ impl Trident {
         st.replay.clear();
         st.senders.reset_keep_quarantine();
         st.epoch_floor_ms = floor;
+        // Publish the floor so that every writer on a shared store refuses
+        // what this reset declared dead. If it is not stored, this
+        // verifier's own floor still stands.
+        if floor > 0 {
+            if let Err(e) = st.store.raise_epoch_floor(floor) {
+                Self::store_failed("epoch floor", &e);
+            }
+        }
         gauge!(t::REPLAY_CACHE_ENTRIES).set(0.0);
         gauge!(t::QUARANTINED_SENDERS).set(gauge_value(st.senders.quarantined_count()));
         drop(st);

@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use common::*;
 use stack_trident::{
     seal, AcceptRecord, Clock, EnvelopeDraft, Fingerprint, GateOutcome, GatePosition, HandoffEnvelope, KeyRing,
-    ManualClock, Nonce, ReplayStore, RestoredState, SecretKey, StoreError, Trident, TridentConfig, Verdict,
+    ManualClock, Nonce, ReasonCode, ReplayStore, RestoredState, SecretKey, StoreError, Trident, TridentConfig, Verdict,
 };
 use stack_trident::store::{RestoredNonce, RestoredSender};
 
@@ -35,6 +35,7 @@ use stack_trident::store::{RestoredNonce, RestoredSender};
 struct SharedState {
     records: Vec<AcceptRecord>,
     quarantined: HashMap<Fingerprint, u64>,
+    epoch_floor_ms: u64,
 }
 
 /// A handle to shared replay state. Cloning it gives a second handle to
@@ -75,6 +76,7 @@ impl SharedStore {
                 .collect(),
             high_water_ms,
             quarantined: st.quarantined.iter().map(|(k, v)| (*k, *v)).collect(),
+            epoch_floor_ms: st.epoch_floor_ms,
         }
     }
 
@@ -89,9 +91,24 @@ impl ReplayStore for SharedStore {
     }
 
     fn commit(&mut self, record: &AcceptRecord) -> Result<(), StoreError> {
-        // The contract before decision D: make the acceptance durable.
-        // There is no way to say "another writer already consumed this".
-        self.0.lock().unwrap().records.push(*record);
+        // Check-and-commit under ONE lock of the shared state, written
+        // independently of the crate's own stores: a linear scan of every
+        // record ever committed.
+        let mut st = self.0.lock().unwrap();
+        let mine = st.records.iter().filter(|r| r.sender == record.sender);
+        let nonce_consumed = mine
+            .clone()
+            .any(|r| r.nonce == record.nonce && r.nonce_expires_at_unix_ms > record.accepted_at_unix_ms);
+        let stored_sequence = mine.map(|r| r.sequence).max().filter(|s| record.sequence <= *s);
+        let epoch_floor_ms = Some(st.epoch_floor_ms).filter(|f| record.issued_at_unix_ms < *f);
+        if nonce_consumed || stored_sequence.is_some() || epoch_floor_ms.is_some() {
+            return Err(StoreError::Conflict {
+                nonce_consumed,
+                stored_sequence,
+                epoch_floor_ms,
+            });
+        }
+        st.records.push(*record);
         Ok(())
     }
 
@@ -106,6 +123,12 @@ impl ReplayStore for SharedStore {
 
     fn record_release(&mut self, sender: &Fingerprint) -> Result<(), StoreError> {
         self.0.lock().unwrap().quarantined.remove(sender);
+        Ok(())
+    }
+
+    fn raise_epoch_floor(&mut self, floor_ms: u64) -> Result<(), StoreError> {
+        let mut st = self.0.lock().unwrap();
+        st.epoch_floor_ms = st.epoch_floor_ms.max(floor_ms);
         Ok(())
     }
 }
@@ -182,4 +205,104 @@ fn two_verifiers_sharing_one_store_accept_the_same_envelope_at_most_once() {
     );
     assert_eq!(store.accepted(), 1, "the store recorded more than one acceptance");
     assert!(matches!(second, Verdict::Refused(_)));
+}
+
+// ---------------------------------------------------------------------------
+// Step 2: the shared test store meets the check-and-commit contract
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shared_store_conforms() {
+    common::conformance::replay_store_conformance(|| Box::new(SharedStore::default()));
+}
+
+#[test]
+fn shared_store_conforms_when_reached_through_many_handles() {
+    common::conformance::replay_store_shared_conformance(|n| {
+        let store = SharedStore::default();
+        (0..n).map(|_| Box::new(store.clone()) as Box<dyn ReplayStore>).collect()
+    });
+}
+
+/// Many threads, two verifiers, one envelope: the store lets exactly one
+/// acceptance through, whichever verifier gets there first.
+#[test]
+fn two_verifiers_racing_one_envelope_accept_it_exactly_once() {
+    for round in 0..20 {
+        let (clock, store, a, b) = pair();
+        let (a, b) = (Arc::new(a), Arc::new(b));
+        let env = Arc::new(sealed(1, &clock));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let tr = if i % 2 == 0 { Arc::clone(&a) } else { Arc::clone(&b) };
+                let (env, barrier) = (Arc::clone(&env), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    tr.verify(&env).is_accepted()
+                })
+            })
+            .collect();
+        let accepted = threads.into_iter().map(|t| t.join().unwrap()).filter(|x| *x).count();
+        assert_eq!(accepted, 1, "round {round}: accepted {accepted} times across two verifiers");
+        assert_eq!(store.accepted(), 1, "round {round}");
+    }
+}
+
+/// A conflict is refused with the reason the in-memory check would give,
+/// as a terminal breach, and leaves the refusing verifier's memory as it
+/// was: its high-water mark does not move and fresh work still passes.
+#[test]
+fn a_store_conflict_refuses_with_the_matching_reason_and_does_not_poison_memory() {
+    let (clock, _store, a, b) = pair();
+    let env = sealed(1, &clock);
+    assert!(a.verify(&env).is_accepted());
+    let hw_before = b.high_water_ms().unwrap();
+    let v = b.verify(&env);
+    assert_eq!(v.reasons(), &[ReasonCode::Replay, ReasonCode::SequenceNotIncreasing], "{v:?}");
+    assert_eq!(v.outcome(), GateOutcome::TerminalBreach);
+    assert_eq!(b.high_water_ms().unwrap(), hw_before, "a refused envelope moved the high-water mark");
+    // The refusal did not teach B a false sequence or nonce: the next
+    // envelope from the same sender is accepted by B.
+    clock.advance(1);
+    assert!(b.verify(&sealed(2, &clock)).is_accepted());
+    // And A, which never saw sequence 2, refuses it through the store.
+    let v = a.verify(&sealed(2, &clock));
+    assert!(!v.is_accepted(), "{v:?}");
+}
+
+/// An operator reset on one verifier publishes its epoch floor; the other
+/// verifier, whose own floor is lower, is held to it by the store.
+#[test]
+fn an_epoch_floor_raised_by_one_verifier_binds_the_other_through_the_store() {
+    let (clock, store, a, b) = pair();
+    let before = sealed(1, &clock);
+    clock.advance(1_000);
+    a.operator_halt();
+    a.operator_reset();
+    let v = b.verify(&before);
+    assert_eq!(v.reasons(), &[ReasonCode::IssuedBeforeEpoch], "{v:?}");
+    // A verifier started later on the same store starts at that floor.
+    let c = start(&store, &clock);
+    assert!(c.verify(&before).refusal().unwrap().has(ReasonCode::IssuedBeforeEpoch));
+    clock.advance(cfg().max_future_skew_ms + 1);
+    assert!(b.verify(&sealed(2, &clock)).is_accepted());
+}
+
+/// Behaviour change made by the check-and-commit contract, pinned here so
+/// it is visible: an operator reset clears this verifier's memory of
+/// sequences, but not the store's. A lower sequence after a reset was
+/// accepted before Step 2 (on `Trident::new`, whose `MemoryStore` kept
+/// nothing); it is now refused by the store, which is also what a
+/// `FileStore` restart already did.
+#[test]
+fn a_sequence_lowered_after_an_operator_reset_is_refused_by_the_store() {
+    let fx = setup();
+    assert!(fx.trident.verify(&fx.sealed(5)).is_accepted());
+    fx.trident.operator_halt();
+    fx.trident.operator_reset();
+    fx.clock.advance(fx.cfg.max_future_skew_ms + 1);
+    let v = fx.trident.verify(&fx.sealed(4));
+    assert_eq!(v.reasons(), &[ReasonCode::SequenceNotIncreasing], "{v:?}");
+    assert!(fx.trident.verify(&fx.sealed(6)).is_accepted());
 }

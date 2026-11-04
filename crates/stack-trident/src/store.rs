@@ -11,9 +11,32 @@
 //! in-memory state untouched, so a later retry is accepted exactly once
 //! when storage recovers.
 //!
-//! Two stores are provided. [`MemoryStore`] keeps nothing: it is the
-//! behaviour the crate had before durable state existed and is for
-//! development only (`is_durable() == false`). [`FileStore`] is an
+//! ## Check-and-commit (decision D, R2-E-04)
+//!
+//! `commit` is an atomic CHECK-AND-COMMIT, not an append. Atomically with
+//! making the record durable, the store refuses it with
+//! [`StoreError::Conflict`] when, in the store's own view:
+//!
+//! * the (sender, nonce) pair is already recorded and its retention has
+//!   not ended at the record's `accepted_at_unix_ms`;
+//! * the record's sequence is not strictly greater than the sender's
+//!   stored sequence (a sender sequence high-water regression); or
+//! * the record's `issued_at_unix_ms` is below the stored epoch floor
+//!   ([`ReplayStore::raise_epoch_floor`]).
+//!
+//! A refused record leaves no trace in the store. This is what lets a
+//! store shared by more than one verifier enforce "at most once" even when
+//! the verifier that receives an envelope has never seen it: the Trident
+//! still decides acceptance, and the store's answer can only turn an
+//! acceptance into a refusal, never the other way round. The two stores
+//! in this crate are single-writer and implement the same semantics. A
+//! store shared across hosts is PLANNED, not implemented (see
+//! `SHARED_STORE_DESIGN.md`).
+//!
+//! Two stores are provided. [`MemoryStore`] keeps nothing across a
+//! restart: it is the behaviour the crate had before durable state existed
+//! and is for development only (`is_durable() == false`). Within one
+//! process it holds the check-and-commit view. [`FileStore`] is an
 //! append-only, hash-chained, fsynced log under an exclusive advisory lock.
 //!
 //! ## Supported topology
@@ -42,7 +65,7 @@
 //! * The hash chain is SHA-256 with no key. It proves consistency, not
 //!   authorship.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -105,6 +128,9 @@ pub struct RestoredState {
     /// Senders quarantined when the previous process stopped, with the
     /// receiver clock at which each quarantine began.
     pub quarantined: Vec<(Fingerprint, u64)>,
+    /// Highest epoch floor ever stored ([`ReplayStore::raise_epoch_floor`]).
+    /// 0 when none was.
+    pub epoch_floor_ms: u64,
 }
 
 /// Why a store operation failed. Every variant is a reason to refuse: the
@@ -149,6 +175,21 @@ pub enum StoreError {
     /// a log it has not verified.
     #[error("replay store was not loaded before use")]
     NotLoaded,
+    /// The check half of check-and-commit refused the record: another
+    /// writer (or an earlier commit) already consumed what it claims. At
+    /// least one field says why. Nothing was recorded.
+    #[error("replay store conflict: nonce consumed {nonce_consumed}, stored sequence {stored_sequence:?}, epoch floor {epoch_floor_ms:?}")]
+    Conflict {
+        /// The (sender, nonce) pair is already recorded and still inside
+        /// its retention window.
+        nonce_consumed: bool,
+        /// `Some(stored)` when the record's sequence is not strictly
+        /// greater than the sender's stored sequence `stored`.
+        stored_sequence: Option<u64>,
+        /// `Some(floor)` when the record's `issued_at_unix_ms` is below the
+        /// stored epoch floor `floor`.
+        epoch_floor_ms: Option<u64>,
+    },
 }
 
 impl StoreError {
@@ -165,15 +206,22 @@ impl StoreError {
 ///
 /// Every method is called by the Trident while it holds its state lock,
 /// so an implementation needs no locking of its own against the Trident.
-/// It must still refuse a second process (see [`FileStore`]).
+/// It must still refuse a second process (see [`FileStore`]), or, if its
+/// state is shared by several verifiers, make `commit`'s check and its
+/// write one atomic step against every other writer.
 pub trait ReplayStore: Send + Sync + fmt::Debug {
     /// Reads and verifies the whole store. Called once, before any commit.
     /// An error here is fatal at start: the Trident does not build.
     fn load(&mut self) -> Result<RestoredState, StoreError>;
 
-    /// Makes one acceptance durable. Returns only after the record would
-    /// survive a crash, or with an error, in which case nothing may have
-    /// been kept and the Trident refuses the envelope.
+    /// Atomically checks one acceptance against the store's view and makes
+    /// it durable (see the module docs, "Check-and-commit"). Returns `Ok`
+    /// only after the record would survive a crash. Returns
+    /// [`StoreError::Conflict`] when the nonce is already consumed, the
+    /// sequence is not strictly greater than the sender's stored sequence,
+    /// or `issued_at_unix_ms` is below the stored epoch floor; then nothing
+    /// was recorded. Any other error means nothing may have been kept.
+    /// Either way the Trident refuses the envelope.
     fn commit(&mut self, record: &AcceptRecord) -> Result<(), StoreError>;
 
     /// Whether what `commit` returned `Ok` for survives a restart of the
@@ -195,15 +243,133 @@ pub trait ReplayStore: Send + Sync + fmt::Debug {
         let _ = sender;
         Ok(())
     }
+
+    /// Raises the stored epoch floor to `floor_ms` (never lowers it). From
+    /// then on `commit` refuses a record issued before the floor, whichever
+    /// writer offers it. The Trident calls this from `operator_reset`. The
+    /// default keeps nothing, which leaves the floor to each verifier's
+    /// memory, as before the check-and-commit contract.
+    fn raise_epoch_floor(&mut self, floor_ms: u64) -> Result<(), StoreError> {
+        let _ = floor_ms;
+        Ok(())
+    }
 }
 
-/// A store that keeps nothing. Restart safety then rests on the clock and
-/// on `TridentConfig::restored_high_water_ms`, exactly as before durable
-/// state existed. Development only: `is_durable()` is `false`, and the
-/// Production profile refuses it.
+/// The view a store checks a record against: per-sender sequence, live
+/// nonces, high-water mark and epoch floor. Shared by [`MemoryStore`] and
+/// [`FileStore`] so both have identical check-and-commit semantics.
+#[derive(Debug, Default)]
+struct Index {
+    /// Per sender: last sequence and the receiver clock at the last
+    /// acceptance.
+    senders: HashMap<Fingerprint, (u64, u64)>,
+    /// (sender, nonce) to the instant the pair may be forgotten.
+    nonces: HashMap<(Fingerprint, Nonce), u64>,
+    /// The same pairs ordered by expiry, for pruning.
+    expiry: BTreeSet<(u64, Fingerprint, [u8; 16])>,
+    high_water_ms: u64,
+    epoch_floor_ms: u64,
+}
+
+impl Index {
+    fn from_restored(st: &RestoredState) -> Self {
+        let mut ix = Self {
+            high_water_ms: st.high_water_ms,
+            epoch_floor_ms: st.epoch_floor_ms,
+            ..Self::default()
+        };
+        for s in &st.senders {
+            ix.sender(s.sender, s.last_sequence, s.last_accepted_at_unix_ms);
+        }
+        for n in &st.nonces {
+            ix.nonce(n.sender, n.nonce, n.expires_at_unix_ms);
+        }
+        ix
+    }
+
+    fn sender(&mut self, fp: Fingerprint, seq: u64, at: u64) {
+        let e = self.senders.entry(fp).or_insert((seq, at));
+        e.0 = e.0.max(seq);
+        e.1 = e.1.max(at);
+    }
+
+    fn nonce(&mut self, fp: Fingerprint, nonce: Nonce, expires_at: u64) {
+        let bytes = *nonce.as_bytes();
+        match self.nonces.get(&(fp, nonce)).copied() {
+            Some(old) if old >= expires_at => {}
+            old => {
+                if let Some(old) = old {
+                    self.expiry.remove(&(old, fp, bytes));
+                }
+                self.nonces.insert((fp, nonce), expires_at);
+                self.expiry.insert((expires_at, fp, bytes));
+            }
+        }
+    }
+
+    /// Forgets pairs whose retention ended at or before `now`, the same
+    /// rule the Trident's replay cache uses.
+    fn prune(&mut self, now: u64) {
+        while let Some(&(expires_at, fp, nonce)) = self.expiry.first() {
+            if expires_at > now {
+                break;
+            }
+            self.expiry.pop_first();
+            self.nonces.remove(&(fp, Nonce::from_bytes(nonce)));
+        }
+    }
+
+    /// The check half of check-and-commit. Changes nothing but pruning.
+    fn check(&mut self, r: &AcceptRecord) -> Result<(), StoreError> {
+        self.prune(r.accepted_at_unix_ms);
+        let nonce_consumed = self.nonces.contains_key(&(r.sender, r.nonce));
+        let stored_sequence = self
+            .senders
+            .get(&r.sender)
+            .map(|s| s.0)
+            .filter(|stored| r.sequence <= *stored);
+        let epoch_floor_ms = Some(self.epoch_floor_ms).filter(|floor| r.issued_at_unix_ms < *floor);
+        if nonce_consumed || stored_sequence.is_some() || epoch_floor_ms.is_some() {
+            return Err(StoreError::Conflict {
+                nonce_consumed,
+                stored_sequence,
+                epoch_floor_ms,
+            });
+        }
+        Ok(())
+    }
+
+    /// The commit half: called only once the record is durable.
+    fn apply(&mut self, r: &AcceptRecord) {
+        self.sender(r.sender, r.sequence, r.accepted_at_unix_ms);
+        self.nonce(r.sender, r.nonce, r.nonce_expires_at_unix_ms);
+        self.high_water_ms = self.high_water_ms.max(r.issued_at_unix_ms);
+    }
+
+    fn view(&self) -> RestoredState {
+        let mut fold = Fold {
+            high_water_ms: self.high_water_ms,
+            epoch_floor_ms: self.epoch_floor_ms,
+            ..Fold::default()
+        };
+        fold.senders.clone_from(&self.senders);
+        fold.nonces.clone_from(&self.nonces);
+        fold.finish()
+    }
+}
+
+/// A store that keeps nothing across a restart. Restart safety then rests
+/// on the clock and on `TridentConfig::restored_high_water_ms`, exactly as
+/// before durable state existed. Development only: `is_durable()` is
+/// `false`, and the Production profile refuses it.
+///
+/// Within one process it keeps the view check-and-commit needs (sender
+/// sequences, nonces until their retention ends, the epoch floor), so its
+/// `commit` has the same semantics as [`FileStore`]'s.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     loaded: bool,
+    index: Index,
 }
 
 impl MemoryStore {
@@ -216,19 +382,28 @@ impl MemoryStore {
 impl ReplayStore for MemoryStore {
     fn load(&mut self) -> Result<RestoredState, StoreError> {
         self.loaded = true;
-        Ok(RestoredState::default())
+        Ok(self.index.view())
     }
 
-    fn commit(&mut self, _record: &AcceptRecord) -> Result<(), StoreError> {
-        if self.loaded {
-            Ok(())
-        } else {
-            Err(StoreError::NotLoaded)
+    fn commit(&mut self, record: &AcceptRecord) -> Result<(), StoreError> {
+        if !self.loaded {
+            return Err(StoreError::NotLoaded);
         }
+        self.index.check(record)?;
+        self.index.apply(record);
+        Ok(())
     }
 
     fn is_durable(&self) -> bool {
         false
+    }
+
+    fn raise_epoch_floor(&mut self, floor_ms: u64) -> Result<(), StoreError> {
+        if !self.loaded {
+            return Err(StoreError::NotLoaded);
+        }
+        self.index.epoch_floor_ms = self.index.epoch_floor_ms.max(floor_ms);
+        Ok(())
     }
 }
 
@@ -266,6 +441,7 @@ const TAG_QUARANTINE: u8 = 2;
 const TAG_RELEASE: u8 = 3;
 const TAG_SENDER: u8 = 4;
 const TAG_HIGH_WATER: u8 = 5;
+const TAG_EPOCH_FLOOR: u8 = 6;
 
 /// Tunables of a [`FileStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +560,7 @@ enum Record {
     Release(Fingerprint),
     Sender(RestoredSender),
     HighWater(u64),
+    EpochFloor(u64),
 }
 
 impl Record {
@@ -418,6 +595,10 @@ impl Record {
                 b.push(TAG_HIGH_WATER);
                 b.extend_from_slice(&hw.to_be_bytes());
             }
+            Self::EpochFloor(floor) => {
+                b.push(TAG_EPOCH_FLOOR);
+                b.extend_from_slice(&floor.to_be_bytes());
+            }
         }
         b
     }
@@ -442,6 +623,7 @@ impl Record {
                 last_accepted_at_unix_ms: r.u64()?,
             }),
             TAG_HIGH_WATER => Self::HighWater(r.u64()?),
+            TAG_EPOCH_FLOOR => Self::EpochFloor(r.u64()?),
             _ => return None,
         };
         if r.1 == body.len() {
@@ -483,6 +665,7 @@ struct Fold {
     nonces: HashMap<(Fingerprint, Nonce), u64>,
     high_water_ms: u64,
     quarantined: HashMap<Fingerprint, u64>,
+    epoch_floor_ms: u64,
 }
 
 impl Fold {
@@ -508,6 +691,7 @@ impl Fold {
             }
             Record::Sender(s) => self.sender(s.sender, s.last_sequence, s.last_accepted_at_unix_ms),
             Record::HighWater(hw) => self.high_water_ms = self.high_water_ms.max(hw),
+            Record::EpochFloor(floor) => self.epoch_floor_ms = self.epoch_floor_ms.max(floor),
         }
     }
 
@@ -539,6 +723,7 @@ impl Fold {
             nonces,
             high_water_ms: self.high_water_ms,
             quarantined,
+            epoch_floor_ms: self.epoch_floor_ms,
         }
     }
 }
@@ -565,6 +750,8 @@ pub struct FileStore {
     committed_len: u64,
     head: [u8; 32],
     high_water_ms: u64,
+    /// The check-and-commit view, rebuilt at every load.
+    index: Index,
     /// Bytes past `committed_len` may exist on disk and must be cut off
     /// before the next append.
     dirty_tail: bool,
@@ -615,6 +802,7 @@ impl FileStore {
             committed_len: HEADER_LEN,
             head: genesis_head(),
             high_water_ms: 0,
+            index: Index::default(),
             dirty_tail: false,
             next_compact_at: options.compact_after_bytes,
         };
@@ -918,6 +1106,9 @@ impl FileStore {
                 }),
         );
         out.extend(state.quarantined.iter().map(|(fp, since)| Record::Quarantine(*fp, *since)));
+        if state.epoch_floor_ms > 0 {
+            out.push(Record::EpochFloor(state.epoch_floor_ms));
+        }
 
         let tmp_path = {
             let mut p = self.path.clone().into_os_string();
@@ -1034,6 +1225,7 @@ impl ReplayStore for FileStore {
             fold.apply(r);
         }
         let state = fold.finish();
+        self.index = Index::from_restored(&state);
         self.generation = slot.generation;
         self.committed_len = committed_len;
         self.head = head;
@@ -1045,7 +1237,14 @@ impl ReplayStore for FileStore {
     }
 
     fn commit(&mut self, record: &AcceptRecord) -> Result<(), StoreError> {
+        if !self.loaded {
+            return Err(StoreError::NotLoaded);
+        }
+        // Check, then append, then apply: a conflict or a failed append
+        // leaves the view exactly as it was.
+        self.index.check(record)?;
         self.append(&Record::Accept(*record))?;
+        self.index.apply(record);
         self.high_water_ms = self.high_water_ms.max(record.issued_at_unix_ms);
         if self.committed_len >= self.next_compact_at {
             if let Err(e) = self.compact(record.accepted_at_unix_ms) {
@@ -1068,6 +1267,18 @@ impl ReplayStore for FileStore {
 
     fn record_release(&mut self, sender: &Fingerprint) -> Result<(), StoreError> {
         self.append(&Record::Release(*sender))
+    }
+
+    fn raise_epoch_floor(&mut self, floor_ms: u64) -> Result<(), StoreError> {
+        if !self.loaded {
+            return Err(StoreError::NotLoaded);
+        }
+        if floor_ms <= self.index.epoch_floor_ms {
+            return Ok(());
+        }
+        self.append(&Record::EpochFloor(floor_ms))?;
+        self.index.epoch_floor_ms = floor_ms;
+        Ok(())
     }
 }
 

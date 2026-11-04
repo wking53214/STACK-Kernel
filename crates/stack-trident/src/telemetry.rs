@@ -47,6 +47,12 @@ pub const BREAKER_UNTRACKED_TOTAL: &str = "stack_trident_breaker_untracked_total
 /// force. Any non-zero rate means the verifier is refusing valid work or
 /// will lose quarantines on restart; alert on it. No labels.
 pub const STORE_FAILURES_TOTAL: &str = "stack_trident_store_failures_total";
+/// Counter. Acceptance commits the replay store refused as already
+/// consumed (check-and-commit conflict: nonce, sequence or epoch floor).
+/// Each one refused an envelope with `replay`, `sequence_not_increasing`
+/// or `issued_before_epoch`. On a store shared by several verifiers a
+/// non-zero rate is a replay caught by the store. No labels.
+pub const STORE_CONFLICTS_TOTAL: &str = "stack_trident_store_conflicts_total";
 
 /// Span around one verification.
 pub const SPAN_VERIFY: &str = "stack.trident.verify";
