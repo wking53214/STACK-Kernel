@@ -237,7 +237,16 @@ public:
      *
      * If budget_nanoseconds is 0, returns success without arming (allows zero-
      * budget transactions to proceed undeadlined). armed_ flag is NOT set for
-     * zero-budget (WasPreempted() will report no preemption).
+     * zero-budget (WasPreempted() will report no preemption). This is a
+     * primitive-level convenience only: GovernedMinotaurHost refuses a zero
+     * hard timeout with InvalidHardTimeout before it reaches here (D-03),
+     * because a transaction with no deadline is not governed.
+     *
+     * COOPERATIVE ONLY, NOT ISOLATION. The timer counts this thread's CPU
+     * time and its expiry sets a flag; nothing stops the payload. On a sealed
+     * thread the payload can disarm this timer with the allowed timer_settime
+     * or ignore GOVERNOR_PREEMPT_SIG with the allowed rt_sigaction. The
+     * handler's return needs rt_sigreturn on the allowlist (D-01).
      *
      * FIX LAYER 2: Sets armed_=true only after successful timer_settime().
      * This prevents WasPreempted() from being called before Arm() completes.
@@ -249,7 +258,10 @@ public:
      *   budget_nanoseconds:  Deadline budget in nanoseconds. 0 = no deadline.
      *
      * Returns: std::errc::invalid_argument if timer_settime() fails
-     *          (usually: invalid timer or invalid timespec).
+     *          (usually: invalid timer or invalid timespec), or
+     *          std::errc::resource_unavailable_try_again if the timer had to
+     *          be created here and timer_create() failed. Either way the
+     *          guard stays unarmed; the caller must not run the payload.
      */
     [[nodiscard]] std::expected<void, std::errc> Arm(uint64_t budget_nanoseconds) noexcept {
         armed_ = false;  // Reset to prevent stale WasPreempted() checks
