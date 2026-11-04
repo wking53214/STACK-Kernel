@@ -25,18 +25,30 @@
 //! | [`sign`] | the receipt signer, signed records and frames, the trusted receipt key set |
 //! | [`cns`] | the CNS canonical rendering and subject digest over this crate's value type |
 //! | [`decision`] | decision root recomputation and the verifier's roster policy |
+//! | [`log`] | the `ReceiptLog` trait, the durable `FileReceiptLog`, the log file parser |
+//! | [`recorder`] | the write-ahead `Recorder` and its typestate `Execution` handles |
 //!
-//! Later steps add the durable file log and the write-ahead recorder,
-//! and the verifier.
+//! The last step adds the verifier.
 
 #![forbid(unsafe_code)]
 
 pub mod cns;
 pub mod decision;
 pub mod encode;
+pub mod log;
 pub mod record;
+pub mod recorder;
 pub mod sign;
 
+pub use log::{
+    check_chains, parse_log, FileReceiptLog, Head, LogError, MemoryReceiptLog, ParsedLog, ReceiptLog, HEADER_LEN,
+    MAGIC, MAX_FRAME_BYTES, MAX_LOG_BYTES, SLOT_LEN,
+};
+pub use recorder::{
+    AttemptUnrecorded, AttemptedStage, AuthorizedStage, Closed, Execution, ProposedStage, RecordError, Recorder,
+    TerminalUnrecorded,
+};
+pub use stack_authority::{Clock, ManualClock, SystemClock};
 pub use cns::{canonical_rendering, subject_digest, CnsValue};
 pub use decision::{check_authorized_decision, decision_root, root_content, seat_gate, DecisionFinding, RosterPolicy};
 pub use sign::{
