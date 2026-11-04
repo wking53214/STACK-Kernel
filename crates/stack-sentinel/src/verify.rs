@@ -8,14 +8,14 @@ use std::time::Instant;
 use crate::anchor::{anchor_summary, check_head_anchor_with, parse_head_anchor, HeadAnchor};
 use crate::attest::{keyed_work_bytes, verify_seed, verify_signature, AttestationStatus, KeySet};
 use crate::canonical::{
-    canonical_form_ref, content_prehash_ref, hashed_columns, ledger_hash_ref, sha256_hex, Sha256Sink,
-    ATTESTATION_POLICY_RECORD_KIND, OPTIONAL_HASHED_FIELDS, SHIPPED_COLUMNS, SIGNATURE_FIELD,
+    canonical_form_ref, content_prehash_ref, ledger_hash_ref, sha256_hex, Sha256Sink, ATTESTATION_POLICY_RECORD_KIND,
+    SIGNATURE_FIELD,
 };
 use crate::cns::subject_digest;
 use crate::config::VerifierConfig;
 use crate::error::VerifyError;
 use crate::pyjson::{parse_object_keeping, write_value, Object, Separators, Value};
-use crate::scope::{hashed_column_names, limitations, Scope, ScopedReport};
+use crate::scope::{column_scope, limitations, ScopedReport};
 use crate::telemetry;
 use crate::verdict::{Finding, GateOutcome, Reason, Report};
 
@@ -381,37 +381,6 @@ pub fn verify_rows_with(rows: &[LedgerRow], keys: &KeySet, config: &VerifierConf
     }
 }
 
-/// Which [`SHIPPED_COLUMNS`] some row carried outside its hashed form, and
-/// whether some row carried a column outside that list altogether.
-fn unhashed_columns(rows: &[LedgerRow]) -> (Vec<&'static str>, bool) {
-    let mut seen = [false; SHIPPED_COLUMNS.len()];
-    let mut other = false;
-    for row in rows {
-        let (read, optional) = hashed_columns(&row.columns);
-        for (col, v) in &row.columns {
-            let col = col.as_str();
-            if col == "current_hash" || read.contains(&col) {
-                continue;
-            }
-            // A falsy optional field is hashed exactly like an absent one.
-            if OPTIONAL_HASHED_FIELDS.contains(&col) && (optional || !v.is_truthy()) {
-                continue;
-            }
-            match SHIPPED_COLUMNS.iter().position(|c| *c == col) {
-                Some(i) => seen[i] = true,
-                None => other = true,
-            }
-        }
-    }
-    let names = SHIPPED_COLUMNS
-        .iter()
-        .zip(seen)
-        .filter(|(_, s)| *s)
-        .map(|(c, _)| *c)
-        .collect();
-    (names, other)
-}
-
 /// `verify_receipts.load_export`: parse, check the format, and return the
 /// rows sorted by `id` (a stable sort, as Python's `sorted` is). Reordering
 /// the rows array therefore changes nothing; changing ids does.
@@ -574,8 +543,9 @@ impl Verifier {
     ) -> Result<ScopedReport, VerifyError> {
         let rows = parse_export(export, &self.config)?;
         let rows_total = rows.len();
-        let (unhashed, other_unhashed) = unhashed_columns(&rows);
-        let hashed = hashed_column_names(&rows);
+        let columns = column_scope(&rows);
+        let unhashed = columns.unhashed_columns.clone();
+        let other_unhashed = columns.other_unhashed_columns;
         let report = |finding, also, escalation, rows_checked, anchor| {
             let report = Report {
                 finding,
@@ -588,12 +558,8 @@ impl Verifier {
                 unhashed_columns: unhashed.clone(),
                 other_unhashed_columns: other_unhashed,
             };
-            let scope = Scope {
-                hashed_columns: hashed.clone(),
-                unhashed_columns: unhashed.clone(),
-                other_unhashed_columns: other_unhashed,
-                limitations: limitations(&report, !unhashed.is_empty() || other_unhashed),
-            };
+            let mut scope = columns.clone();
+            scope.limitations = limitations(&report, !unhashed.is_empty() || other_unhashed);
             ScopedReport { report, scope }
         };
         let early = |reason, detail: String| {

@@ -567,9 +567,15 @@ pub fn hashed_columns(row: &Object) -> (&'static [&'static str], bool) {
 }
 
 /// Whether `col` on `row` enters the row's hash: read by its kind's
-/// canonical form, or an optional hashed field present with a truthy value.
-/// An optional field that is present but falsy (null, empty) counts as
-/// covered, because the hash treats it exactly like an absent one.
+/// canonical form, or an optional hashed field on a kind that applies them.
+/// On such a kind an optional field that is present but falsy (null, empty)
+/// counts as covered, because the hash treats it exactly like an absent one
+/// and giving it a truthy value changes the hash. On a kind that applies no
+/// optional fields (a base row, `observed_event`, `attestation_policy`) the
+/// field never enters the hash, whatever its value, so it is not covered.
+///
+/// A column read as a mapping counts as hashed here even when only some of
+/// its keys are; [`hashed_mapping_keys`] names those keys.
 pub fn column_is_hashed(row: &Object, col: &str) -> bool {
     if col == "current_hash" {
         return true;
@@ -578,9 +584,94 @@ pub fn column_is_hashed(row: &Object, col: &str) -> bool {
     if read.contains(&col) {
         return true;
     }
-    if OPTIONAL_HASHED_FIELDS.contains(&col) {
-        let truthy = row.get(col).is_some_and(Value::is_truthy);
-        return optional || !truthy;
-    }
-    false
+    optional && OPTIONAL_HASHED_FIELDS.contains(&col)
+}
+
+/// `data` keys a `governance_decision` hashes, and only as `bool(...)`:
+/// `twin_custody.py:319` (`"parameter_changed": bool((row.get("data") or
+/// {}).get("parameter_changed"))`). Only the truthiness of the value is
+/// covered, not the value.
+pub const GOVERNANCE_DECISION_DATA_FIELDS: [&str; 1] = ["parameter_changed"];
+
+/// `data` keys a `regulatory_cassette_inserted` or `_removed` row hashes:
+/// `twin_custody.py:342-347`.
+pub const REGULATORY_CASSETTE_DATA_FIELDS: [&str; 2] = ["mode", "regulation"];
+
+/// `data` keys a `regulatory_disclosure` row hashes: `twin_custody.py:359-366`.
+pub const REGULATORY_DISCLOSURE_DATA_FIELDS: [&str; 4] = ["regulation", "check", "action", "subject"];
+
+/// `data` keys an `outcome_harm_event` row hashes: `twin_custody.py:377-384`.
+pub const OUTCOME_HARM_EVENT_DATA_FIELDS: [&str; 4] = ["harmed_decision", "harm_kind", "subject", "discovered_at"];
+
+/// `data` keys a `recommendation_shadow_run` row hashes:
+/// `twin_custody.py:430-435`.
+pub const RECOMMENDATION_SHADOW_RUN_DATA_FIELDS: [&str; 2] = ["recommendation_kind", "subject"];
+
+/// `data` keys a `human_selection` row hashes: `twin_custody.py:461-466`.
+pub const HUMAN_SELECTION_DATA_FIELDS: [&str; 2] = ["human_selection", "rationale"];
+
+/// For a record kind whose canonical form reads only named keys of one
+/// mapping column, that column and the keys. Every other key of the mapping
+/// is outside the hash. `None` when the kind hashes no mapping column, or
+/// hashes one whole (a base row's `data`, `twin_custody.py:492`).
+///
+/// Sources, per kind: the constants above; the contract kinds,
+/// `canonical_fields.py:149` (`CONTRACT_CANONICAL_FIELDS`, read from `data`
+/// at `twin_custody.py:397-404`); `observed_event`, `canonical_fields.py:193`
+/// (`OBSERVED_EVENT_CANONICAL_FIELDS`, read from `input_data` at
+/// `twin_custody.py:477-478`); `attestation_policy`, `canonical_fields.py:233`
+/// (`ATTESTATION_POLICY_CANONICAL_FIELDS`, read from `data` at
+/// `twin_custody.py:483-484`). A key listed here is hashed even when absent
+/// (it hashes as null), so adding it to a row changes the hash.
+pub fn hashed_mapping_keys(row: &Object) -> Option<(&'static str, &'static [&'static str])> {
+    let kind = row.get("record_kind").and_then(Value::as_str)?;
+    Some(match kind {
+        "governance_decision" => ("data", &GOVERNANCE_DECISION_DATA_FIELDS),
+        "regulatory_cassette_inserted" | "regulatory_cassette_removed" => ("data", &REGULATORY_CASSETTE_DATA_FIELDS),
+        "regulatory_disclosure" => ("data", &REGULATORY_DISCLOSURE_DATA_FIELDS),
+        "outcome_harm_event" => ("data", &OUTCOME_HARM_EVENT_DATA_FIELDS),
+        "recommendation_shadow_run" => ("data", &RECOMMENDATION_SHADOW_RUN_DATA_FIELDS),
+        "human_selection" => ("data", &HUMAN_SELECTION_DATA_FIELDS),
+        "observed_event" => ("input_data", &OBSERVED_EVENT_CANONICAL_FIELDS),
+        ATTESTATION_POLICY_RECORD_KIND => ("data", &ATTESTATION_POLICY_CANONICAL_FIELDS),
+        k => {
+            let (_, fields) = CONTRACT_CANONICAL_FIELDS.iter().find(|(name, _)| *name == k)?;
+            ("data", fields)
+        }
+    })
+}
+
+/// The record kinds [`canonical_form`] knows, in a fixed order, followed by
+/// `base` for every other row (no `record_kind`, or one it does not know,
+/// such as `legacy`), which is hashed by the base form.
+pub const RECORD_KIND_LABELS: [&str; 17] = [
+    "governance_decision",
+    "cassette_binding",
+    "regulatory_cassette_inserted",
+    "regulatory_cassette_removed",
+    "regulatory_disclosure",
+    "outcome_harm_event",
+    "contract_ingest",
+    "contract_egress",
+    "contract_approval",
+    "contract_deletion",
+    "decision_supersession",
+    "recommendation_shadow_run",
+    "recommendation_shadow_score",
+    "human_selection",
+    "observed_event",
+    ATTESTATION_POLICY_RECORD_KIND,
+    "base",
+];
+
+/// The [`RECORD_KIND_LABELS`] entry that names how `row` is hashed. Never
+/// the row's own text, so it is safe to report.
+pub fn record_kind_label(row: &Object) -> &'static str {
+    let kind = row.get("record_kind").and_then(Value::as_str);
+    RECORD_KIND_LABELS
+        .iter()
+        .take(RECORD_KIND_LABELS.len() - 1)
+        .find(|k| Some(**k) == kind)
+        .copied()
+        .unwrap_or("base")
 }

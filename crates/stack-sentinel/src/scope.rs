@@ -14,7 +14,11 @@
 //! raw export content and no attacker-chosen column name is ever written.
 //! See `SCOPE.md` beside this crate for the schema and how to consume it.
 
-use crate::canonical::{hashed_columns, OPTIONAL_HASHED_FIELDS, SHIPPED_COLUMNS};
+use std::collections::BTreeSet;
+
+use crate::canonical::{
+    hashed_columns, hashed_mapping_keys, record_kind_label, OPTIONAL_HASHED_FIELDS, RECORD_KIND_LABELS, SHIPPED_COLUMNS,
+};
 use crate::pyjson::{dumps, Object, PyInt, Separators, Value};
 use crate::verdict::{Finding, Report};
 use crate::verify::LedgerRow;
@@ -75,19 +79,45 @@ impl Limitation {
     ];
 }
 
+/// The hashed and unhashed columns of the rows of one record kind.
+///
+/// A column path is a [`SHIPPED_COLUMNS`] name (the whole value is or is
+/// not hashed), `<column>.<key>` for a named key of a mapping column that
+/// the kind hashes (see [`crate::canonical::hashed_mapping_keys`]), or
+/// `<column>.*` in the unhashed list for "keys of this mapping other than
+/// the hashed ones". Key names in paths come from this crate's constants,
+/// never from the export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KindScope {
+    /// A [`RECORD_KIND_LABELS`] entry (`base` for rows hashed by the base form).
+    pub kind: &'static str,
+    /// How many rows of the export have this kind.
+    pub rows: usize,
+    /// Column paths that enter these rows' hash, in [`SHIPPED_COLUMNS`]
+    /// order, keys sorted within a column. A path is listed when the kind
+    /// reads it, whether or not a row carries a value for it (an absent
+    /// value hashes as null); an optional hashed field is listed when a row
+    /// of the kind carries it.
+    pub hashed: Vec<String>,
+    /// Column paths some row of this kind carried outside its hash.
+    pub unhashed: Vec<&'static str>,
+}
+
 /// What the verdict of one export covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
-    /// Columns that entered the hash on at least one row, in
-    /// [`SHIPPED_COLUMNS`] order.
+    /// The union over every kind of [`KindScope::hashed`].
     pub hashed_columns: Vec<String>,
-    /// Columns that at least one row carried outside its hashed form, in
-    /// [`SHIPPED_COLUMNS`] order (the same list as
-    /// [`Report::unhashed_columns`]). A name can appear in both lists when
-    /// different record kinds treat it differently.
+    /// The union over every kind of [`KindScope::unhashed`] (the same list
+    /// as [`Report::unhashed_columns`]). A name can appear in both lists when
+    /// different record kinds treat it differently; [`Scope::by_record_kind`]
+    /// says which.
     pub unhashed_columns: Vec<&'static str>,
-    /// Whether some row carried a column outside [`SHIPPED_COLUMNS`].
+    /// Whether some row carried a column outside [`SHIPPED_COLUMNS`]. Its
+    /// name is attacker-chosen text, so it is not reported.
     pub other_unhashed_columns: bool,
+    /// Per record kind present in the export, in [`RECORD_KIND_LABELS`] order.
+    pub by_record_kind: Vec<KindScope>,
     /// What the verdict does not establish, in [`Limitation::ALL`] order.
     pub limitations: Vec<Limitation>,
 }
@@ -101,24 +131,112 @@ pub struct ScopedReport {
     pub scope: Scope,
 }
 
-/// The column-level hashed set over every row, in [`SHIPPED_COLUMNS`] order.
-pub(crate) fn hashed_column_names(rows: &[LedgerRow]) -> Vec<String> {
-    let mut seen = [false; SHIPPED_COLUMNS.len()];
-    for row in rows {
-        let (read, optional) = hashed_columns(&row.columns);
-        for (i, col) in SHIPPED_COLUMNS.iter().enumerate() {
-            let truthy = row.columns.get(*col).is_some_and(Value::is_truthy);
-            if read.contains(col) || (optional && truthy && OPTIONAL_HASHED_FIELDS.contains(col)) {
-                seen[i] = true;
+/// A column path: an index into [`SHIPPED_COLUMNS`] and a key (`""` for
+/// the whole column, `"*"` for the unhashed remainder of a mapping).
+type Path = (usize, &'static str);
+
+/// The column paths of one record kind, accumulated over its rows.
+#[derive(Default)]
+struct Paths {
+    rows: usize,
+    hashed: BTreeSet<Path>,
+    unhashed: BTreeSet<Path>,
+}
+
+fn path_string(p: &Path) -> String {
+    let col = SHIPPED_COLUMNS[p.0];
+    if p.1.is_empty() {
+        col.to_owned()
+    } else {
+        format!("{col}.{}", p.1)
+    }
+}
+
+fn unhashed_name(p: &Path) -> &'static str {
+    match (SHIPPED_COLUMNS[p.0], p.1) {
+        (col, "") => col,
+        ("data", _) => "data.*",
+        ("input_data", _) => "input_data.*",
+        // Only data and input_data are ever read by key.
+        _ => "other.*",
+    }
+}
+
+/// Add one row's paths to `acc`. Returns whether it carried a column outside
+/// [`SHIPPED_COLUMNS`].
+fn add_row(acc: &mut Paths, row: &crate::pyjson::Object) -> bool {
+    acc.rows += 1;
+    let (read, optional) = hashed_columns(row);
+    let partial = hashed_mapping_keys(row);
+    for (i, col) in SHIPPED_COLUMNS.iter().enumerate() {
+        let value = row.get(*col);
+        if *col == "current_hash" {
+            continue;
+        }
+        if let Some((pcol, keys)) = partial.filter(|(c, _)| c == col) {
+            acc.hashed.extend(keys.iter().map(|k| (i, *k)));
+            let extra = match value {
+                Some(Value::Object(m)) => m.keys().any(|k| !keys.contains(&k.as_str())),
+                Some(v) => v.is_truthy(),
+                None => false,
+            };
+            if extra {
+                debug_assert!(pcol == "data" || pcol == "input_data");
+                acc.unhashed.insert((i, "*"));
             }
+            continue;
+        }
+        if read.contains(col) {
+            acc.hashed.insert((i, ""));
+            continue;
+        }
+        if value.is_none() {
+            continue;
+        }
+        if optional && OPTIONAL_HASHED_FIELDS.contains(col) {
+            acc.hashed.insert((i, ""));
+        } else {
+            acc.unhashed.insert((i, ""));
         }
     }
-    SHIPPED_COLUMNS
-        .iter()
-        .zip(seen)
-        .filter(|(_, s)| *s)
-        .map(|(c, _)| (*c).to_owned())
-        .collect()
+    row.keys().any(|k| !SHIPPED_COLUMNS.contains(&k.as_str()))
+}
+
+/// The column scope of an export: every field of [`Scope`] but the
+/// limitations.
+pub(crate) fn column_scope(rows: &[LedgerRow]) -> Scope {
+    let mut per_kind: Vec<Paths> = RECORD_KIND_LABELS.iter().map(|_| Paths::default()).collect();
+    let mut other = false;
+    for row in rows {
+        let label = record_kind_label(&row.columns);
+        let at = RECORD_KIND_LABELS.iter().position(|k| *k == label).unwrap_or(RECORD_KIND_LABELS.len() - 1);
+        if let Some(acc) = per_kind.get_mut(at) {
+            other |= add_row(acc, &row.columns);
+        }
+    }
+    let mut hashed: BTreeSet<Path> = BTreeSet::new();
+    let mut unhashed: BTreeSet<Path> = BTreeSet::new();
+    let mut by_record_kind = Vec::new();
+    for (kind, p) in RECORD_KIND_LABELS.iter().zip(per_kind) {
+        if p.rows == 0 {
+            continue;
+        }
+        hashed.extend(p.hashed.iter().copied());
+        unhashed.extend(p.unhashed.iter().copied());
+        by_record_kind.push(KindScope {
+            kind,
+            rows: p.rows,
+            hashed: p.hashed.iter().map(path_string).collect(),
+            unhashed: p.unhashed.iter().map(unhashed_name).collect(),
+        });
+    }
+    Scope {
+        hashed_columns: hashed.iter().map(path_string).collect(),
+        unhashed_columns: unhashed.iter().map(unhashed_name).collect(),
+        other_unhashed_columns: other,
+        by_record_kind,
+        limitations: Vec::new(),
+    }
 }
 
 /// How many leading rows a vouched anchor seals, capped at `rows_total`.
@@ -203,6 +321,22 @@ impl ScopedReport {
             Value::Array(sc.unhashed_columns.iter().map(|c| s(c)).collect()),
         );
         o.insert("other_unhashed_columns".into(), Value::Bool(sc.other_unhashed_columns));
+        o.insert(
+            "by_record_kind".into(),
+            Value::Array(
+                sc.by_record_kind
+                    .iter()
+                    .map(|k| {
+                        let mut m = Object::new();
+                        m.insert("kind".into(), s(k.kind));
+                        m.insert("rows".into(), int(k.rows));
+                        m.insert("hashed".into(), Value::Array(k.hashed.iter().map(|c| s(c)).collect()));
+                        m.insert("unhashed".into(), Value::Array(k.unhashed.iter().map(|c| s(c)).collect()));
+                        Value::Object(m)
+                    })
+                    .collect(),
+            ),
+        );
         o.insert(
             "anchor".into(),
             r.anchor.as_ref().map_or(Value::Null, |a| {

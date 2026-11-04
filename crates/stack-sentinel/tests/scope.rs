@@ -187,3 +187,208 @@ fn the_cli_json_flag_prints_the_scope_line_with_the_same_exit_codes() {
     assert_eq!(out.lines().count(), 1);
     assert!(out.contains("\"verdict\":\"TAMPERED\""), "{out}");
 }
+
+// ---------------------------------------------------------------------------
+// Step 2 (D-08): the hashed and unhashed lists are exact, per record kind
+// ---------------------------------------------------------------------------
+
+/// A row of `kind` carrying every shipped column, so every canonical form
+/// can be rebuilt; `data` and `input_data` are empty mappings.
+fn synthetic_row(kind: &str) -> Object {
+    let mut row = Object::new();
+    for col in stack_sentinel::canonical::SHIPPED_COLUMNS {
+        row.insert(col.into(), Value::Null);
+    }
+    row.insert("data".into(), Value::Object(Object::new()));
+    row.insert("input_data".into(), Value::Object(Object::new()));
+    if kind != "base" {
+        row.insert("record_kind".into(), Value::Str(kind.into()));
+    }
+    row
+}
+
+fn hash(row: &Object) -> String {
+    stack_sentinel::recompute_current_hash(row).unwrap()
+}
+
+/// The key lists the scope reports are checked against the hash itself, for
+/// every record kind: each listed key moves the hash, any other key does
+/// not; each whole column the kind reads moves it, every other shipped
+/// column does not (optional hashed fields only on kinds that apply them).
+#[test]
+fn the_reported_hashed_paths_are_exactly_what_moves_the_hash() {
+    use stack_sentinel::canonical::{
+        column_is_hashed, hashed_columns, hashed_mapping_keys, OPTIONAL_HASHED_FIELDS, RECORD_KIND_LABELS,
+        SHIPPED_COLUMNS,
+    };
+    for kind in RECORD_KIND_LABELS {
+        let row = synthetic_row(kind);
+        let before = hash(&row);
+        let partial = hashed_mapping_keys(&row);
+        if let Some((col, keys)) = partial {
+            for key in keys {
+                let mut r = row.clone();
+                let mut m = Object::new();
+                m.insert((*key).into(), Value::Str("moved".into()));
+                r.insert(col.into(), Value::Object(m));
+                assert_ne!(hash(&r), before, "{kind}: {col}.{key} is listed as hashed but does not move the hash");
+            }
+            let mut r = row.clone();
+            let mut m = Object::new();
+            m.insert("zz_not_a_canonical_key".into(), Value::Str("moved".into()));
+            r.insert(col.into(), Value::Object(m));
+            assert_eq!(hash(&r), before, "{kind}: an extra {col} key moved the hash");
+        }
+        let (read, optional) = hashed_columns(&row);
+        for col in SHIPPED_COLUMNS {
+            if col == "current_hash" || partial.is_some_and(|(c, _)| c == col) {
+                continue;
+            }
+            let mut r = row.clone();
+            r.insert(col.into(), Value::Str("moved".into()));
+            let Ok(after) = stack_sentinel::recompute_current_hash(&r) else {
+                // Making a mapping column a string fails the recompute: covered.
+                assert!(read.contains(&col), "{kind}: {col}");
+                continue;
+            };
+            let moves = after != before;
+            let listed = read.contains(&col) || (optional && OPTIONAL_HASHED_FIELDS.contains(&col));
+            assert_eq!(moves, listed, "{kind}: column {col} moves={moves} listed={listed}");
+            assert_eq!(column_is_hashed(&row, col), listed, "{kind}: column_is_hashed({col})");
+        }
+    }
+}
+
+struct Gap {
+    what: &'static str,
+    row: usize,
+    edit: fn(&mut Object),
+    kind: &'static str,
+    token: &'static str,
+}
+
+fn set(row: &mut Object, col: &str, v: Value) {
+    row.insert(col.into(), v);
+}
+
+fn data_mut(row: &mut Object, col: &str) -> Object {
+    match row.get(col) {
+        Some(Value::Object(m)) => m.clone(),
+        _ => Object::new(),
+    }
+}
+
+/// Each known unhashed column, edited on the post-receipts fixture under a
+/// full anchor: the verdict stays VERIFIED (the known gap, as
+/// redteam_unhashed_columns_change_under_verified records for timestamp),
+/// and the scope record lists the column as unhashed for that row's kind,
+/// and not as hashed for it, so a consumer can see the gap.
+#[test]
+fn every_known_unhashed_column_changes_under_verified_and_is_listed() {
+    let gaps = [
+        Gap {
+            what: "timestamp on a decision (obligation horizon)",
+            row: 7,
+            edit: |r| set(r, "timestamp", Value::Str("1999-01-01T00:00:00+00:00".into())),
+            kind: "governance_decision",
+            token: "timestamp",
+        },
+        Gap {
+            what: "call_sid on a decision (idempotency)",
+            row: 2,
+            edit: |r| set(r, "call_sid", Value::Str("CA-replayed".into())),
+            kind: "governance_decision",
+            token: "call_sid",
+        },
+        Gap {
+            what: "cassette_snapshot on a decision",
+            row: 2,
+            edit: |r| set(r, "cassette_snapshot", Value::Str("{\"limit\": 999}".into())),
+            kind: "governance_decision",
+            token: "cassette_snapshot",
+        },
+        Gap {
+            what: "reason on a typed non-decision row",
+            row: 10,
+            edit: |r| set(r, "reason", Value::Str("rewritten".into())),
+            kind: "cassette_binding",
+            token: "reason",
+        },
+        Gap {
+            what: "node on a typed non-decision row",
+            row: 10,
+            edit: |r| set(r, "node", Value::Str("elsewhere".into())),
+            kind: "cassette_binding",
+            token: "node",
+        },
+        Gap {
+            what: "an extra data key on a decision",
+            row: 2,
+            edit: |r| {
+                let mut d = data_mut(r, "data");
+                d.insert("note".into(), Value::Str("rewritten".into()));
+                set(r, "data", Value::Object(d));
+            },
+            kind: "governance_decision",
+            token: "data.*",
+        },
+        Gap {
+            what: "an extra input_data key on an observed event",
+            row: 4,
+            edit: |r| {
+                let mut d = data_mut(r, "input_data");
+                d.insert("injected".into(), Value::Str("rewritten".into()));
+                set(r, "input_data", Value::Object(d));
+            },
+            kind: "observed_event",
+            token: "input_data.*",
+        },
+        Gap {
+            what: "record_kind on a legacy row",
+            row: 0,
+            edit: |r| set(r, "record_kind", Value::Str("legacy-rewritten".into())),
+            kind: "base",
+            token: "record_kind",
+        },
+        Gap {
+            what: "authorized_by (null) on a legacy row, which applies no optional field",
+            row: 0,
+            edit: |r| set(r, "authorized_by", Value::Str("mallory".into())),
+            kind: "base",
+            token: "authorized_by",
+        },
+    ];
+    let base = common::base_rows(POST);
+    for g in gaps {
+        let mut rows = base.clone();
+        (g.edit)(&mut rows[g.row]);
+        let s = scoped(POST, &rows, &base);
+        assert_eq!(s.report.verdict(), Verdict::Verified, "{}: {}", g.what, s.report.render());
+        assert!(s.report.unhashed_columns.contains(&g.token), "{}: {:?}", g.what, s.report.unhashed_columns);
+        let o = json(&s);
+        assert!(strings(&o["unhashed_columns"]).contains(&g.token.to_owned()), "{}", g.what);
+        let Value::Array(kinds) = &o["by_record_kind"] else { panic!() };
+        let k = kinds
+            .iter()
+            .map(|k| k.as_object().unwrap())
+            .find(|k| k["kind"].as_str() == Some(g.kind))
+            .unwrap_or_else(|| panic!("{}: kind {} missing", g.what, g.kind));
+        assert!(strings(&k["unhashed"]).contains(&g.token.to_owned()), "{}: {:?}", g.what, k["unhashed"]);
+        assert!(!strings(&k["hashed"]).contains(&g.token.to_owned()), "{}: {:?}", g.what, k["hashed"]);
+        assert!(strings(&o["limitations"]).contains(&"unhashed_columns_present".to_owned()));
+    }
+}
+
+/// `data` is no longer reported as hashed for the kinds that hash only named
+/// keys of it: the record names the keys instead.
+#[test]
+fn a_decision_reports_its_hashed_data_keys_not_data() {
+    let rows = common::base_rows(POST);
+    let s = scoped(POST, &rows, &rows);
+    let d = s.scope.by_record_kind.iter().find(|k| k.kind == "governance_decision").unwrap();
+    assert!(d.hashed.contains(&"data.parameter_changed".to_owned()), "{:?}", d.hashed);
+    assert!(!d.hashed.contains(&"data".to_owned()), "{:?}", d.hashed);
+    assert!(d.unhashed.contains(&"data.*"), "the fixture decisions carry data.note: {:?}", d.unhashed);
+    let base = s.scope.by_record_kind.iter().find(|k| k.kind == "base").unwrap();
+    assert!(base.hashed.contains(&"data".to_owned()), "a base row hashes all of data: {:?}", base.hashed);
+}

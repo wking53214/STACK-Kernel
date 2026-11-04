@@ -393,8 +393,12 @@ pub struct Report {
     /// The anchor that was checked, when one was supplied and readable.
     pub anchor: Option<AnchorSummary>,
     /// Columns from [`crate::canonical::SHIPPED_COLUMNS`] that at least one
-    /// row carried outside its hashed form, in that list's order. `VERIFIED`
-    /// says nothing about their values.
+    /// row carried outside its hashed form, in that list's order, with
+    /// `data.*` (after `data`) and `input_data.*` (after `input_data`) when
+    /// some row's mapping carried keys its kind does not hash (see
+    /// [`crate::canonical::hashed_mapping_keys`]). `VERIFIED` says nothing
+    /// about their values. [`crate::Verifier::verify_export_scoped`] gives
+    /// the same list per record kind.
     pub unhashed_columns: Vec<&'static str>,
     /// Whether some row carried a column that is not in
     /// [`crate::canonical::SHIPPED_COLUMNS`] at all (never hashed). Its name
