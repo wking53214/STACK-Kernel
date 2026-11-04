@@ -70,12 +70,16 @@
 //!      must not be in the bounded replay cache, and `sequence` must be
 //!      strictly greater than the last one accepted from that sender.
 //! 4. **Commit or breaker.** Under the state lock, custody is re-checked
-//!    (halt, quarantine, key still in the ring); the operator calls and
-//!    breaker trips that change those facts take the same lock, so none of
-//!    them can be overtaken by a verification already under way. If
-//!    everything passed, the sender's sequence and the nonce are recorded,
-//!    in the same critical section as the prong 3 lookups, and a
-//!    [`VerifiedHandoff`] with typed fields is returned. If not, and the failure is a terminal breach attributable
+//!    (halt, quarantine, key still in the ring and usable: not before its
+//!    window, not expired, not retired or revoked, see [`keys`]); the
+//!    operator calls and breaker trips that change those facts take the
+//!    same lock, so none of them can be overtaken by a verification
+//!    already under way. If everything passed, the acceptance is first
+//!    committed to the [`store::ReplayStore`] (a refused commit makes the
+//!    envelope `StateUnavailable` and changes nothing), then the sender's
+//!    sequence and the nonce are recorded, in the same critical section
+//!    as the prong 3 lookups, and a [`VerifiedHandoff`] with typed fields
+//!    and an [`Assurance`] is returned. If not, and the failure is a terminal breach attributable
 //!    to a known sender, it counts toward that sender's circuit breaker:
 //!    `breaker_threshold` (K) counted breaches inside `breaker_window_ms`
 //!    quarantine the sender until an operator calls [`Trident::release`].
@@ -175,22 +179,42 @@
 //!    Python digests it. Keys are ordered by code point (as CNS does),
 //!    not by UTF-16 unit (as the canonical JSON does).
 //! 2. Whether the reply should collapse `UnknownSender` and `MacMismatch`.
-//! 3. Freshness state lives in memory. The epoch floor closes the replay
-//!    window after an operator reset exactly (it is raised above the
-//!    highest `issued_at_unix_ms` ever accepted). After a restart it is
-//!    exact only if the caller persisted [`Trident::high_water_ms`] and
-//!    passes it back as `TridentConfig::restored_high_water_ms`; otherwise
-//!    it assumes the wall clock has not gone backwards across the restart.
-//!    A multi-replica receiver needs shared replay state or sender
-//!    affinity.
-//! 4. **Symmetric keys.** HMAC keys are shared secrets: any receiver that
-//!    holds a sender's key can also forge envelopes as that sender, and
-//!    `audience` binding only stops honest receivers from accepting a
-//!    redirected envelope. Prefer one key per (sender, receiver) pair, or
-//!    move to signatures. `audience` is required: an empty one is refused at
-//!    start unless `allow_unbound_audience` is set (see
+//!    The key lifecycle reasons (`KeyNotYetValid`, `KeyExpired`,
+//!    `KeyRetired`, `KeyRevoked`) reveal the same fact plus the key's
+//!    state; see [`keys`] for why that is accepted.
+//! 3. **Freshness state across a restart.** Resolved by
+//!    [`store::ReplayStore`] and [`Trident::new_with_store`]: every
+//!    acceptance is committed to the store before it is committed in
+//!    memory, and at start the store's sequences, live nonces, high-water
+//!    mark and quarantines are restored, so a restarted verifier refuses
+//!    everything the previous one accepted even if the clock went
+//!    backwards (then it refuses to start at all unless
+//!    `TridentConfig::dangerously_allow_clock_behind_store` is set).
+//!    [`store::FileStore`] is the durable implementation: one active
+//!    verifier per store, enforced by an exclusive file lock. The old
+//!    behaviour is [`store::MemoryStore`], which [`Trident::new`] uses and
+//!    the Production profile refuses. A multi-replica receiver still needs
+//!    sender affinity: the crate does not share state between hosts and
+//!    does not pretend to. An older full copy of the store is detectable
+//!    only through `TridentConfig::restored_high_water_ms`, kept outside
+//!    the store. The supported topology, the checklist and the limits are
+//!    in `DEPLOYMENT.md`.
+//! 4. **Symmetric keys.** HMAC keys are shared secrets: a valid MAC proves
+//!    possession of the key, not who held it and not that the action was
+//!    legitimate. Any receiver that holds a sender's key can also forge
+//!    envelopes as that sender, and `audience` binding only stops honest
+//!    receivers from accepting a redirected envelope. Prefer one key per
+//!    (sender, receiver) pair, or move to signatures. `audience` is
+//!    required: an empty one is refused at start unless
+//!    `allow_unbound_audience` is set (see
 //!    [`TridentConfig::unbound_audience`]), so binding no receiver is a
-//!    decision and never an accident.
+//!    decision and never an accident; under
+//!    [`DeploymentProfile::Production`] the opt-out itself is refused, and
+//!    every accepted handoff carries the profile as its [`Assurance`] so a
+//!    consumer can refuse a development-assurance acceptance. Keys carry
+//!    an issuer, a purpose and a validity window ([`keys::KeyMeta`]);
+//!    rotation overlap is expressed with windows, never by accepting
+//!    retired keys.
 
 #![forbid(unsafe_code)]
 
