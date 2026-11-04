@@ -37,7 +37,7 @@ bool test_domain_isolation() {
     TestGovernor gov;
 
     // Domain 0: Exhaust tokens
-    for (int i = 0; i < TEST_MAX_CAPACITY / 10; ++i) {
+    for (uint32_t i = 0; i < TEST_MAX_CAPACITY / 10; ++i) {
         auto res = gov.Consume(0, 10, PriorityClass::Root);
         if (!res.has_value()) {
             std::cout << "  FAIL: Domain 0 exhausted at iteration " << i << "\n";
@@ -155,7 +155,7 @@ bool test_refund_correctness() {
     TestGovernor gov;
 
     // Domain 0: Consume all tokens
-    for (int i = 0; i < TEST_MAX_CAPACITY / 10; ++i) {
+    for (uint32_t i = 0; i < TEST_MAX_CAPACITY / 10; ++i) {
         auto res = gov.Consume(0, 10, PriorityClass::Root);
         if (!res.has_value()) {
             std::cout << "  FAIL: Could not exhaust Domain 0\n";
@@ -203,7 +203,7 @@ bool test_priority_isolation() {
     TestGovernor gov;
 
     // Domain 0: Exhaust all tokens except reserved
-    for (int i = 0; i < (TEST_MAX_CAPACITY - TEST_RESERVED) / 10; ++i) {
+    for (uint32_t i = 0; i < (TEST_MAX_CAPACITY - TEST_RESERVED) / 10; ++i) {
         auto res = gov.Consume(0, 10, PriorityClass::Root);
         if (!res.has_value()) {
             std::cout << "  FAIL: Could not exhaust Domain 0 tokens\n";

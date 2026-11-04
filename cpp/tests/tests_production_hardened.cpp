@@ -53,18 +53,23 @@ TEST_CASE("PRODUCTION FIRE-TEST: ≡TACK Kernel Components") {
     std::cout << "✅ [5/5] GovernedMinotaurHost::InitializeAndSeal()\n"
               << "         SECCOMP BPF filter installed (kernel enforced)\n";
     
+    // The banner is tied to the checks above: it prints only when every one
+    // of them held in this run, and it claims nothing beyond this test case.
+    const bool all_checks_passed = (t2 >= t1) && timer_result.has_value() && valid && seal.has_value();
+    REQUIRE(all_checks_passed);
     std::cout << "\n" << std::string(72, '-') << "\n";
-    std::cout << "FIRE-TEST RESULT: ✅ ALL COMPONENTS OPERATIONAL\n";
-    std::cout << "\nKey Validations:\n";
-    std::cout << "  • Hardware clock: RDTSCP counter functional\n";
-    std::cout << "  • Preemption: POSIX timer + SIGRTMIN+2 signal registered\n";
-    std::cout << "  • Capabilities: 256-bit SIMD validation working\n";
-    std::cout << "  • Audit: Lock-free ring buffer (seqlock protected)\n";
-    std::cout << "  • SECCOMP: BPF filter installed, syscalls restricted\n";
-    std::cout << "\nIntegration Status:\n";
-    std::cout << "  • C++23 components compiled: ✅ LOCKED\n";
-    std::cout << "  • All test cases passing: ✅ VERIFIED\n";
-    std::cout << "  • Production readiness: ✅ GREEN FOR ROLLOUT\n";
+    if (all_checks_passed) {
+        std::cout << "FIRE-TEST RESULT: ✅ ALL COMPONENTS OPERATIONAL (this test case's 5 checks)\n";
+        std::cout << "\nKey Validations:\n";
+        std::cout << "  • Hardware clock: RDTSCP counter functional\n";
+        std::cout << "  • Preemption: POSIX timer + SIGRTMIN+2 signal registered\n";
+        std::cout << "  • Capabilities: 256-bit SIMD validation working\n";
+        std::cout << "  • Audit: Lock-free ring buffer (seqlock protected)\n";
+        std::cout << "  • SECCOMP: BPF filter installed, syscalls restricted\n";
+        std::cout << "\nScope: one test case. Other suites and ctest report their own results.\n";
+    } else {
+        std::cout << "FIRE-TEST RESULT: FAILED\n";
+    }
     std::cout << std::string(72, '=') << "\n\n";
 }
 

@@ -74,7 +74,7 @@ bool test_key_initialization() {
     ring.Push(AuditEventType::RateLimitTriggered, 222, 20);
 
     AuditEventRecord record;
-    bool valid = ring.ReadSlot(0, record);
+    [[maybe_unused]] bool valid = ring.ReadSlot(0, record);
 
     // Without key, is_signed should be 0 (no signing occurred)
     if (record.is_signed != 0) {
@@ -110,7 +110,7 @@ bool test_multiple_events() {
             std::cout << "  FAIL: Slot " << i << " not signed\n";
             return false;
         }
-        if (record.context_id != 1000 + i) {
+        if (record.context_id != static_cast<uint64_t>(1000 + i)) {
             std::cout << "  FAIL: Slot " << i << " data mismatch\n";
             return false;
         }
