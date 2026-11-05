@@ -111,6 +111,71 @@ produced by the real `cns_composition.super_gate.SuperGate.decide`
 committed script under `python3 -I` at CNS commit
 `4acd8f958a091900d43f553eba7fe83f7d33c4d6`; `tests/decision.rs`).
 
+### Format version 2: supervisor-observed facts (D1-C)
+
+Status: implemented and tested in this crate and in `stack-admission`'s executor;
+NOT yet written by a real admission run (see "Not wired" below).
+
+A terminal event may carry the two facts the supervisor observed
+(`cpp/CONTAINMENT.md`, "Supervisor-observed facts and payload claims"):
+`exit_observed` (`not_observed`, `exited` with a code, `signaled` with a signal,
+`killed_by_supervisor` with a signal, `unreaped`) and `frame_status`
+(`not_read`, `valid`, `missing`, `malformed`, `oversized`, `trailing`,
+`conflicting`). They are written under their own tag so version 1 is untouched:
+
+| | Version 1 | Version 2 |
+|---|---|---|
+| record tag | `stack-receipt/1\n` | `stack-receipt/2\n` |
+| event | every event, terminal tag 5 (`Event::Terminal`) | only the terminal tag 6 (`Event::TerminalObserved`): the version 1 terminal body, then `exit_observed` (u8, plus i32 for exited, signaled, killed) and `frame_status` (u8) |
+| written by | `Recorder::finish` (unchanged) | `Recorder::finish_observed` |
+
+A record has one encoding: the decoder refuses a version 2 body under the
+version 1 tag and the reverse (`tests/observed_v2.rs`
+`a_record_has_one_encoding_so_the_version_and_the_event_must_agree`), and a tag
+it does not know (`stack-receipt/3`) is `BadTag`. A log may hold both versions.
+
+Compatibility: a version 1 log verifies unchanged. `tests/fixtures/v1_log.bin` was
+written by the version 1 writer before this format existed; `tests/compat_v1.rs`
+asserts that the current writer still produces those exact bytes for version 1
+events, that the log verifies as `VERIFIED_WITH_LIMITATIONS` with no finding, and
+that the facts it cannot show come out as the limitation
+`supervisor_observed_facts_not_recorded`, not as a failure.
+
+Verification of a version 2 terminal (`Check::ObservedFactsConsistentWithOutcome`):
+`completed` needs `exited` 0 and `valid`; `result_missing` needs `exited` 0 and a
+frame that is not `valid`; `unreaped` goes with `termination_unconfirmed` and
+with nothing else. A violation is the rejecting finding
+`observed_facts_contradict_outcome`. `valid` beside `timed_out`, `crashed` or
+`exited_non_zero` is allowed: the frame is a fact about the pipe, not about success.
+The facts are the supervisor's observation. Nothing in a receipt, version 2 or
+not, makes the result bytes anything but the worker's own claim
+(`result_is_self_reported` stays a limitation of every `completed`).
+
+Not wired: `stack-admission`'s `admission.rs` still records its terminal with
+`Recorder::finish`, so an admission run today writes a version 1 terminal and its
+verification carries `supervisor_observed_facts_not_recorded`.
+`Executor::run_observed` and `Recorder::finish_observed` are the two calls that
+close the gap; the change belongs in `admission.rs`.
+
+### Outcome vocabulary
+
+The campaign names map onto the existing outcomes without a rename
+(`OutcomeKind::campaign_name`; the full table, with the stage names and the
+in-memory `RUNNING`, is in `cpp/CONTAINMENT.md`). `as_str` is unchanged.
+
+| Campaign | Receipt outcome kind(s) |
+|---|---|
+| `COMPLETED` | `completed` |
+| `TIMED_OUT` | `timed_out` |
+| `TERMINATED` | `terminated` |
+| `TERMINATION_UNCONFIRMED` | `termination_unconfirmed` |
+| `CRASHED` | `crashed`, `seccomp_violation`, `resource_limit`, `exited_non_zero` |
+| `RESULT_INVALID` | `result_missing` (exit 0, frame not valid), `result_oversized` |
+| `INTERRUPTED` | `interrupted` (a recorded deliberate stop) and, for a host that died mid-run, an `attempted` with no terminal event, which the verifier reports as `INCOMPLETE`, outcome `unknown` (`terminal_missing`) |
+| `UNKNOWN` | `unknown` |
+| `RUNNING` | none: an in-memory state, never a terminal receipt event |
+| `PROPOSED`, `AUTHORIZED`, `REJECTED`, `ATTEMPTED` | stages `proposed`, `authorized`, `rejected`, `attempted` |
+
 ## 4. The log file, `stack-receipt/log/1`
 
 Magic (32 bytes), two hashed header slots (generation, committed length,
