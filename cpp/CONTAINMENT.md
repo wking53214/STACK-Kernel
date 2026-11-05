@@ -94,6 +94,22 @@ tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
   `Completed`, and cannot expose the caller's memory (it is not mapped in the
   worker). What it can do is say whatever it likes in a run that really did exit
   0 in time; that is what "self-reported" means. The receipt layer records it so.
+- The worker image is trusted before it runs (R2-K-21; implemented and tested in
+  `cpp/tests/worker_image_tests.cpp`, ctest `STACKWorkerImage`, and through the FFI
+  in `ffi_supervised_tests.cpp`). A symlink in the path is refused (`openat2` with
+  `RESOLVE_NO_SYMLINKS`; where that call is missing only the final component is
+  refused, via `O_NOFOLLOW`, and that fallback is not tested). Setuid, setgid,
+  group-writable and world-writable images are refused, as are owners other than
+  root or the effective user. The child sets `PR_SET_NO_NEW_PRIVS` before the
+  exec (it used to be set only inside the worker). When the configuration pins
+  a SHA-256 (`WorkerSpec::expected_sha256`; REQUIRED by the FFI) the supervisor
+  hashes the bytes it reads through the opened descriptor and executes a sealed
+  memfd copy of exactly those bytes, so a swap of the file after the check
+  (in place or by rename) changes nothing and a program that is not the pinned
+  one never runs. Without a pin the opened descriptor itself is executed: a write
+  into the same inode between open and exec would run, and a non-worker program
+  would run with no seccomp filter (the worker installs its own). That mode is
+  for callers who accept it; it is not what the FFI offers.
 - The wait after SIGKILL is bounded (`reap_timeout_ns`, default 2 s). A worker
   that is not reaped in time is `TerminationUnconfirmed`: never a success, still
   tracked (`UnconfirmedCount`, `ReapUnconfirmed`).
@@ -103,8 +119,7 @@ tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
 - Found while testing it, R2-K-19, fixed: the fork-path child never closed the
   descriptors above the highest one it kept (a signed comparison with -1 in
   `CloseRange`). The seccomp filter already stopped the payload from using one.
-- Not done: no digest pin on the worker image; no compute-debt charge; no
-  argument delivery; ELF workers only. Still true: same uid, filesystem view and
+- Not done: no compute-debt charge; no argument delivery; ELF workers only. Still true: same uid, filesystem view and
   network namespace as the caller.
 
 ## What the executor does not do

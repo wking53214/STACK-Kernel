@@ -48,12 +48,14 @@ extern "C" {
         required_tokens: u32,
         payload_kind: u32,
         worker_path: *const core::ffi::c_char,
+        worker_sha256: *const u8,
         limits: *const SupervisedLimitsFfi,
         reap_timeout_ns: u64,
         out: *mut u8,
         out_capacity: usize,
         report: *mut SupervisedReportFfi,
     ) -> i32;
+    pub fn stack_supervised_image_sha256(path: *const core::ffi::c_char, out: *mut u8) -> i32;
     pub fn stack_supervised_unconfirmed_count() -> u64;
     pub fn stack_supervised_reap_unconfirmed() -> u64;
 }
@@ -413,8 +415,14 @@ pub struct GovernedSupervisedRequest<'a> {
     pub required_tokens: u32,
     /// Which built-in worker kind to run.
     pub kind: PayloadKind,
-    /// ABSOLUTE path of the worker program, from kernel configuration.
+    /// ABSOLUTE path of the worker program, from kernel configuration. No
+    /// symlink may be in the path (where the kernel has `openat2`).
     pub worker_path: &'a core::ffi::CStr,
+    /// The SHA-256 the configuration pins for the worker image (R2-K-21).
+    /// REQUIRED: `None` is refused ([`GovernedSupervisedError::WorkerDigestRequired`])
+    /// and nothing is spawned. Take it from a release record; see
+    /// [`worker_image_sha256`] for provisioning and tests.
+    pub worker_sha256: Option<[u8; 32]>,
     /// Bound on the wait for a killed worker to be reaped; 0 means 2 s.
     pub reap_timeout_ns: u64,
 }
@@ -439,14 +447,31 @@ pub enum GovernedSupervisedError {
     InvalidDeadline,
     /// A capability change is pending; retry.
     CapabilityChangePending,
-    /// The worker path is null, relative, missing, not a regular executable
-    /// file, world-writable, or owned by someone else.
+    /// The worker path is null, relative, missing, a symlink (anywhere in the
+    /// path), not a regular executable file, setuid, setgid, group-writable,
+    /// world-writable, or owned by someone else.
     WorkerUnavailable,
     /// The other limits are invalid (deadline above an hour, output above the
     /// buffer or 1 MiB, reap bound above a minute).
     InvalidLimits,
+    /// No worker image digest was supplied. The governed path fails closed.
+    WorkerDigestRequired,
+    /// The image at the worker path does not hash to the pinned digest.
+    WorkerDigestMismatch,
     /// A code this crate does not know.
     Unrecognized(i32),
+}
+
+/// SHA-256 of the file at `path`, for provisioning a configuration and for
+/// tests. It applies no trust policy: it hashes any readable regular file. A
+/// production deployment pins a digest from its release record, not one
+/// computed from the file it is about to trust. `None` if the file cannot be
+/// read.
+pub fn worker_image_sha256(path: &core::ffi::CStr) -> Option<[u8; 32]> {
+    let mut out = [0u8; 32];
+    // SAFETY: `path` is NUL terminated and `out` is 32 writable bytes.
+    let rc = unsafe { stack_supervised_image_sha256(path.as_ptr(), out.as_mut_ptr()) };
+    (rc == 0).then_some(out)
 }
 
 /// Runs a built-in worker kind in a separate worker PROGRAM (fork then exec;
@@ -483,6 +508,7 @@ pub fn supervised_run_governed(
             request.required_tokens,
             request.kind.code(),
             request.worker_path.as_ptr(),
+            request.worker_sha256.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()),
             &ffi_limits,
             request.reap_timeout_ns,
             out.as_mut_ptr(),
@@ -512,6 +538,8 @@ pub fn supervised_run_governed(
         -13 => Err(GovernedSupervisedError::CapabilityChangePending),
         -14 => Err(GovernedSupervisedError::WorkerUnavailable),
         -15 => Err(GovernedSupervisedError::InvalidLimits),
+        -16 => Err(GovernedSupervisedError::WorkerDigestRequired),
+        -17 => Err(GovernedSupervisedError::WorkerDigestMismatch),
         other => Err(GovernedSupervisedError::Unrecognized(other)),
     }
 }
@@ -1447,6 +1475,11 @@ mod tests {
         std::ffi::CString::new(WORKER_BUILD_PATH).expect("worker path has no NUL")
     }
 
+    /// The digest the configuration pins for the build's worker (R2-K-21).
+    fn worker_digest() -> [u8; 32] {
+        worker_image_sha256(&worker_path()).expect("hash the worker build")
+    }
+
     fn governed_request<'a>(
         path: &'a std::ffi::CStr,
         domain: u64,
@@ -1459,8 +1492,60 @@ mod tests {
             required_tokens: LARGEST_REQUEST,
             kind,
             worker_path: path,
+            worker_sha256: Some(worker_digest()),
             reap_timeout_ns: 0,
         }
+    }
+
+    /// R2-K-21: the governed call requires the digest of the worker image and
+    /// refuses a program that is not the pinned one; nothing is spawned.
+    #[test]
+    fn test_governed_supervised_requires_the_worker_digest_and_refuses_another_program() {
+        const CHILD_ENV: &str = "STACK_FFI_GOVERNED_DIGEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let lim = governed_limits(1_000_000_000);
+            let mut out = [0u8; 64];
+            let mut req = governed_request(&path, 4, 0x01, PayloadKind::ReturnBytes);
+            // Unset: fail closed.
+            req.worker_sha256 = None;
+            assert_eq!(
+                supervised_run_governed(&req, &lim, &mut out).unwrap_err(),
+                GovernedSupervisedError::WorkerDigestRequired
+            );
+            // Wrong digest, and another program under the right digest.
+            let mut wrong = worker_digest();
+            wrong[0] ^= 0x80;
+            req.worker_sha256 = Some(wrong);
+            assert_eq!(
+                supervised_run_governed(&req, &lim, &mut out).unwrap_err(),
+                GovernedSupervisedError::WorkerDigestMismatch
+            );
+            let touch = std::ffi::CString::new("/usr/bin/touch").expect("no NUL");
+            let other = governed_request(&touch, 4, 0x01, PayloadKind::ReturnBytes);
+            assert_eq!(
+                supervised_run_governed(&other, &lim, &mut out).unwrap_err(),
+                GovernedSupervisedError::WorkerDigestMismatch
+            );
+            // The pinned image runs, and the tokens were not kept by the refusals.
+            let (ok, ms) = served_runs(&path, 4);
+            assert!(ok >= 9 && ok <= 9 + (ms / 100) as u32 + 1, "served {ok} in {ms} ms");
+            return;
+        }
+        run_in_child("tests::test_governed_supervised_requires_the_worker_digest_and_refuses_another_program", CHILD_ENV);
+    }
+
+    #[test]
+    fn test_worker_image_sha256_matches_sha256sum_and_fails_for_a_missing_file() {
+        let digest = worker_digest();
+        let hex: std::string::String = digest.iter().map(|b| std::format!("{b:02x}")).collect();
+        let out = std::process::Command::new("sha256sum").arg(WORKER_BUILD_PATH).output().expect("sha256sum");
+        let text = std::string::String::from_utf8(out.stdout).expect("utf8");
+        assert_eq!(&text[..64], hex);
+        let missing = std::ffi::CString::new("/nonexistent/stack_worker").expect("no NUL");
+        assert_eq!(worker_image_sha256(&missing), None);
     }
 
     fn governed_limits(deadline_ns: u64) -> SupervisedLimits {

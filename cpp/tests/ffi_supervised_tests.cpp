@@ -26,10 +26,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include <dirent.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -64,8 +67,9 @@ struct stack_supervised_report {
     uint8_t result_self_reported;
     uint8_t reserved[2];
 };
-int stack_supervised_run_governed(uint64_t, uint64_t, uint32_t, uint32_t, const char*, const stack_supervised_limits*,
-                                  uint64_t, uint8_t*, size_t, stack_supervised_report*);
+int stack_supervised_run_governed(uint64_t, uint64_t, uint32_t, uint32_t, const char*, const uint8_t*,
+                                  const stack_supervised_limits*, uint64_t, uint8_t*, size_t, stack_supervised_report*);
+int stack_supervised_image_sha256(const char*, uint8_t*);
 }
 
 #ifndef STACK_WORKER_PATH
@@ -77,7 +81,8 @@ namespace {
 constexpr uint64_t kMs = 1'000'000ULL;
 // Return codes (ffi_wrapper.cpp).
 constexpr int kRan = 0, kNotInitialized = -1, kUnknownKind = -2, kNullArgument = -3, kCapabilityDenied = -4,
-              kRateLimited = -5, kZeroDeadline = -9, kWorkerUnusable = -14, kLimitsInvalid = -15;
+              kRateLimited = -5, kZeroDeadline = -9, kWorkerUnusable = -14, kLimitsInvalid = -15,
+              kDigestRequired = -16, kDigestMismatch = -17;
 // Outcome values (stack::supervised::Outcome).
 constexpr int kCompleted = 0, kTimedOut = 1, kSigchldIgnored = 11, kTerminationUnconfirmed = 12;
 // AuditEventType values (stack_audit.hpp).
@@ -96,14 +101,18 @@ struct Result {
     uint8_t out[64]{};
 };
 
+// The SHA-256 of STACK_WORKER_PATH, computed once before any thread is sealed.
+// The governed call requires the digest of the image (R2-K-21).
+uint8_t g_worker_digest[32];
+
 Result Governed(uint64_t domain, uint64_t caps, uint32_t tokens, uint32_t kind, uint64_t deadline_ns = 2'000 * kMs,
-                const char* path = STACK_WORKER_PATH, uint64_t reap_ns = 0) {
+                const char* path = STACK_WORKER_PATH, uint64_t reap_ns = 0, const uint8_t* digest = g_worker_digest) {
     Result r;
     stack_supervised_limits l{};
     l.wall_clock_deadline_ns = deadline_ns;
     l.address_space_bytes = 1ULL << 30;
     l.max_output_bytes = sizeof r.out;
-    r.rc = stack_supervised_run_governed(domain, caps, tokens, kind, path, &l, reap_ns, r.out, sizeof r.out, &r.report);
+    r.rc = stack_supervised_run_governed(domain, caps, tokens, kind, path, digest, &l, reap_ns, r.out, sizeof r.out, &r.report);
     return r;
 }
 
@@ -115,6 +124,7 @@ void Setup() {
         sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
         REQUIRE(::sigaction(SIGCHLD, &sa, nullptr) == 0);
         REQUIRE(stack_host_initialize() == 0);
+        REQUIRE(stack_supervised_image_sha256(STACK_WORKER_PATH, g_worker_digest) == 0);
         REQUIRE(stack_host_set_capabilities(kCap, 0, 0, 0) == 0);
         return true;
     }();
@@ -284,16 +294,77 @@ TEST_CASE("Governed supervised: refusals before governance consume nothing", "[g
         stack_supervised_limits l{};
         l.wall_clock_deadline_ns = 1'000 * kMs;
         l.max_output_bytes = 128;  // above the 64-byte buffer
-        r.rc = stack_supervised_run_governed(domain, kCap, kRequest, 0, STACK_WORKER_PATH, &l, 0, r.out, sizeof r.out, &r.report);
+        r.rc = stack_supervised_run_governed(domain, kCap, kRequest, 0, STACK_WORKER_PATH, g_worker_digest, &l, 0, r.out, sizeof r.out, &r.report);
         REQUIRE(r.rc == kLimitsInvalid);
-        r.rc = stack_supervised_run_governed(domain, kCap, kRequest, 0, STACK_WORKER_PATH, nullptr, 0, r.out, sizeof r.out, &r.report);
+        r.rc = stack_supervised_run_governed(domain, kCap, kRequest, 0, STACK_WORKER_PATH, g_worker_digest, nullptr, 0, r.out, sizeof r.out, &r.report);
         REQUIRE(r.rc == kNullArgument);
-        r.rc = stack_supervised_run_governed(domain, kCap, kRequest, 0, STACK_WORKER_PATH, &l, 0, r.out, sizeof r.out, nullptr);
+        r.rc = stack_supervised_run_governed(domain, kCap, kRequest, 0, STACK_WORKER_PATH, g_worker_digest, &l, 0, r.out, sizeof r.out, nullptr);
         REQUIRE(r.rc == kNullArgument);
     }
     ::usleep(100'000);
     REQUIRE(g_sigchld.load() == before);
     ServedRequests(domain);  // the full 9: not one token was taken
+}
+
+// R2-K-21: the governed path executes only the worker image whose SHA-256 the
+// configuration pinned. No digest is a refusal (fail closed), a different
+// program is a refusal, and a symlink or an image with setuid, setgid or
+// group-write mode is a refusal; nothing is spawned or consumed in any case.
+TEST_CASE("Governed supervised: the worker image digest is required, and an image that is not the pinned one is refused", "[governed][image]") {
+    Setup();
+    const uint64_t domain = 14;
+    const int before = g_sigchld.load();
+    // Unset: fail closed.
+    REQUIRE(Governed(domain, kCap, kRequest, 0, 2'000 * kMs, STACK_WORKER_PATH, 0, nullptr).rc == kDigestRequired);
+    // A wrong digest.
+    uint8_t wrong[32];
+    std::memcpy(wrong, g_worker_digest, 32);
+    wrong[0] ^= 0x80;
+    REQUIRE(Governed(domain, kCap, kRequest, 0, 2'000 * kMs, STACK_WORKER_PATH, 0, wrong).rc == kDigestMismatch);
+    // A real, owner-and-mode-clean program that is not the worker: it would create
+    // the file "0" in the working directory if it ran.
+    ::unlink("0");
+    REQUIRE(Governed(domain, kCap, kRequest, 0, 2'000 * kMs, "/usr/bin/touch").rc == kDigestMismatch);
+    REQUIRE(::access("0", F_OK) != 0);
+    ::usleep(100'000);
+    REQUIRE(g_sigchld.load() == before);  // nothing spawned
+    // The digest is checked after governance, so the two mismatches took tokens
+    // and gave them back: two SupervisedFailed events that spent 0 tokens.
+    REQUIRE(Audit(domain, kAuditSupervisedFailed).count == 2);
+    REQUIRE(Audit(domain, kAuditSupervisedFailed).tokens == 0);
+    ServedRequests(domain);  // the full 9: nothing was kept
+    // The pinned image runs.
+    REQUIRE(Governed(0, kCap, kRequest, 0).report.outcome == kCompleted);
+}
+
+TEST_CASE("Governed supervised: a symlink, a setuid, a setgid and a group-writable image are refused", "[governed][image]") {
+    Setup();
+    const uint64_t domain = 0;
+    char dir[] = "/tmp/stack_ffi_img_XXXXXX";
+    REQUIRE(::mkdtemp(dir) != nullptr);
+    const std::string real = std::string(dir) + "/worker";
+    {
+        const std::string cmd = std::string("cp ") + STACK_WORKER_PATH + " " + real;
+        REQUIRE(std::system(cmd.c_str()) == 0);
+    }
+    REQUIRE(::chmod(real.c_str(), 0755) == 0);
+    const std::string link = std::string(dir) + "/link";
+    REQUIRE(::symlink(real.c_str(), link.c_str()) == 0);
+    const int before = g_sigchld.load();
+    REQUIRE(Governed(domain, kCap, kRequest, 0, 2'000 * kMs, real.c_str()).rc == kRan);  // control: a clean copy runs
+    REQUIRE(Governed(domain, kCap, kRequest, 0, 2'000 * kMs, link.c_str()).rc == kWorkerUnusable);
+    for (const mode_t mode : {mode_t{04755}, mode_t{02755}, mode_t{0775}}) {
+        REQUIRE(::chmod(real.c_str(), mode) == 0);
+        INFO("mode " << std::oct << mode);
+        const Result r = Governed(domain, kCap, kRequest, 0, 2'000 * kMs, real.c_str());
+        REQUIRE(r.rc == kWorkerUnusable);
+        REQUIRE(r.report.child_pid == 0);
+    }
+    REQUIRE(WaitForSigchld(before + 1));
+    ::usleep(100'000);
+    REQUIRE(g_sigchld.load() == before + 1);  // only the control spawned
+    const std::string cmd = std::string("rm -rf ") + dir;
+    (void)std::system(cmd.c_str());
 }
 
 TEST_CASE("Governed supervised: a timeout is audited and still spends its tokens", "[governed]") {

@@ -73,6 +73,12 @@
  *     2 s by default). If the child is not reaped in time the run is
  *     TerminationUnconfirmed: not a success, the pid and pidfd stay tracked
  *     (UnconfirmedCount, ReapUnconfirmed) and the child may still be running.
+ *   - The worker image is trusted before it runs (R2-K-21): a symlink in the path is
+ *     refused (openat2 RESOLVE_NO_SYMLINKS; O_NOFOLLOW only where openat2 is missing), so are
+ *     setuid, setgid, group-writable and world-writable images and owners other than root or
+ *     the effective user, the child sets PR_SET_NO_NEW_PRIVS before the exec, and
+ *     WorkerSpec::expected_sha256 pins the image: the bytes read through the opened
+ *     descriptor are hashed and a sealed memfd copy of those bytes is what executes.
  *   - Otherwise the child is reaped and both parent-side descriptors are
  *     closed, on every path. There is no heap allocation in the parent; the
  *     result goes into the caller's buffer.
@@ -181,6 +187,8 @@ inline constexpr uint64_t kMaxReapTimeoutNs = 60'000'000'000ULL;
 inline constexpr std::size_t kMaxUnconfirmedChildren = 64;
 /** Longest worker path accepted (bytes, without the terminator). */
 inline constexpr std::size_t kMaxWorkerPathBytes = 4095;
+/** Largest worker image the supervisor will hash and copy (pinned mode): 64 MiB. */
+inline constexpr std::size_t kMaxWorkerImageBytes = 64u << 20;
 
 struct Limits {
     /** Required, 1 .. kMaxWallClockDeadlineNs. */
@@ -247,6 +255,16 @@ struct WorkerSpec {
     uint32_t kind = 0;
     /** Optional argv[2]; used by test workers only. Null for none. */
     const char* argument = nullptr;
+    /**
+     * Optional (R2-K-21): the expected SHA-256 of the worker image, 32 bytes. When set the
+     * supervisor reads the image through the descriptor it opened, hashes what it read, refuses
+     * (SpawnFailed, error_number EKEYREJECTED, nothing forked) on a mismatch, and executes a
+     * sealed in-memory copy of exactly the bytes it hashed, so nothing that happens to the
+     * file after the check changes what runs. When null the opened descriptor itself is
+     * executed (not pinned: a write into the same file between the open and the exec would be
+     * executed). The governed FFI path requires the digest.
+     */
+    const uint8_t* expected_sha256 = nullptr;
 };
 
 /** Payload entry used by the child: writes up to capacity bytes to out and returns the count. */
@@ -374,7 +392,7 @@ public:
         // child executes this descriptor, not the path.
         FdGuard image{-1};
         {
-            const int err = OpenWorkerImage(spec.executable, image.fd);
+            const int err = OpenWorkerImage(spec.executable, spec.expected_sha256, image.fd);
             if (err != 0) {
                 report.outcome = Outcome::SpawnFailed;
                 report.error_number = err;
@@ -382,6 +400,9 @@ public:
                 return report;
             }
         }
+#ifdef STACK_SUPERVISED_TESTING
+        if (image_checked_hook_ != nullptr) image_checked_hook_(spec.executable);
+#endif
         // argv and envp are built here, on the stack: the child allocates nothing.
         char kind_text[16];
         FormatDecimal(spec.kind, kind_text);
@@ -425,15 +446,38 @@ public:
     }
 
     /**
-     * Checks a worker path the way RunWorker does before it forks (absolute,
-     * opens, regular, executable, not world-writable, owned by root or the
-     * effective user) and closes it again. Returns 0 or an errno. For a caller
-     * that wants to refuse a request before it spends anything on it.
+     * Checks a worker path the way RunWorker does before it forks (absolute, no symlink in
+     * the path where openat2 is available, opens, regular, executable, not setuid, setgid,
+     * group-writable or world-writable, owned by root or the effective user and, when
+     * `expected_sha256` is given, hashing to it) and closes it again. Returns 0 or an errno
+     * (EKEYREJECTED for a digest mismatch). For a caller that wants to refuse a request before
+     * it spends anything on it.
      */
-    [[nodiscard]] static int CheckWorkerImage(const char* path) noexcept {
+    [[nodiscard]] static int CheckWorkerImage(const char* path, const uint8_t* expected_sha256 = nullptr) noexcept {
         int fd = -1;
-        const int err = OpenWorkerImage(path, fd);
+        const int err = OpenWorkerImage(path, expected_sha256, fd);
         if (err == 0) ::close(fd);
+        return err;
+    }
+
+    /** SHA-256 of `n` bytes at `data` (n may be 0). No allocation. */
+    static void Sha256(const uint8_t* data, std::size_t n, uint8_t (&out)[32]) noexcept {
+        Sha256State st;
+        st.Update(data, n);
+        st.Final(out);
+    }
+
+    /**
+     * SHA-256 of the file at `path`, read through one descriptor (no policy check: it hashes any
+     * regular file). Returns 0 or an errno. For provisioning and for tests, to obtain the digest
+     * a configuration pins; a production deployment takes the digest from its release record,
+     * not from the file it is about to trust.
+     */
+    [[nodiscard]] static int Sha256OfFile(const char* path, uint8_t (&out)[32]) noexcept {
+        const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return errno;
+        const int err = HashDescriptor(fd, out, -1);
+        ::close(fd);
         return err;
     }
 
@@ -689,6 +733,14 @@ public:
      */
     using KillHook = bool (*)(pid_t pid, int pidfd);
     static void SetKillHookForTesting(KillHook hook) noexcept { kill_hook_ = hook; }
+
+    /**
+     * Test seam (same define): a function RunWorker calls after the worker image was opened and
+     * verified and before the fork, to let a test change the file at the path (R2-K-21). Pass
+     * nullptr to remove it.
+     */
+    using ImageCheckedHook = void (*)(const char* path);
+    static void SetImageCheckedHookForTesting(ImageCheckedHook hook) noexcept { image_checked_hook_ = hook; }
 #endif
 
 private:
@@ -819,6 +871,9 @@ private:
     // that process and no other.
 #ifdef STACK_SUPERVISED_TESTING
     static inline KillHook kill_hook_ = nullptr;
+#endif
+#ifdef STACK_SUPERVISED_TESTING
+    static inline ImageCheckedHook image_checked_hook_ = nullptr;
 #endif
     static void KillChild(pid_t pid, int pidfd) noexcept {
 #ifdef STACK_SUPERVISED_TESTING
@@ -964,20 +1019,33 @@ private:
     // Worker path.
     // ------------------------------------------------------------------
 
-    // Opens the worker image and checks the OPEN file, not the path: a
-    // regular file, executable, not world-writable, owned by root or by this
-    // process's effective user. Returns 0 or an errno. The descriptor is
-    // close-on-exec, which is also why a script (shebang) worker cannot be
-    // executed: the interpreter would not find the descriptor. Workers are
-    // ELF programs.
-    [[nodiscard]] static int OpenWorkerImage(const char* path, int& fd_out) noexcept {
+    // Opens the worker image and checks the OPEN file, not the path. Returns 0 or an errno.
+    //
+    // Open: openat2 with RESOLVE_NO_SYMLINKS refuses a symlink in ANY component of the path
+    // (ELOOP); where openat2 is unavailable (ENOSYS, or a filter that answers EPERM) the open
+    // falls back to O_NOFOLLOW, which refuses only a symlink as the FINAL component. A
+    // deployment names a canonical path.
+    //
+    // Checks on the open file: a regular file, an exec bit, none of setuid, setgid,
+    // group-writable, world-writable, owned by root or by this process's effective user.
+    //
+    // Digest (expected_sha256 non-null): the file is read through this descriptor, hashed as it
+    // is read and copied into a sealed memfd (no writes, no resize, sealed). A mismatch is
+    // EKEYREJECTED. On success fd_out is the SEALED COPY, so the bytes that run are the bytes
+    // that were hashed whatever happens to the file afterwards. A kernel without memfd_create,
+    // or one that forbids executing memfds, fails closed here. Without a digest fd_out is the
+    // opened file itself.
+    //
+    // The descriptor is close-on-exec, which is also why a script (shebang) worker cannot be
+    // executed: the interpreter would not find the descriptor. Workers are ELF programs.
+    [[nodiscard]] static int OpenWorkerImage(const char* path, const uint8_t* expected_sha256, int& fd_out) noexcept {
         fd_out = -1;
         if (path == nullptr || path[0] != '/') return EINVAL;
         std::size_t n = 0;
         while (path[n] != '\0') {
             if (++n > kMaxWorkerPathBytes) return ENAMETOOLONG;
         }
-        const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+        int fd = OpenNoSymlinks(path);
         if (fd < 0) return errno;
         struct stat st{};
         if (::fstat(fd, &st) != 0) {
@@ -988,15 +1056,186 @@ private:
         int err = 0;
         if (!S_ISREG(st.st_mode)) err = EACCES;
         else if ((st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0) err = EACCES;
-        else if ((st.st_mode & S_IWOTH) != 0) err = EACCES;
+        else if ((st.st_mode & (S_ISUID | S_ISGID | S_IWGRP | S_IWOTH)) != 0) err = EACCES;
         else if (st.st_uid != 0 && st.st_uid != ::geteuid()) err = EACCES;
         if (err != 0) {
             ::close(fd);
             return err;
         }
+        if (expected_sha256 != nullptr) {
+            int copy = -1;
+            uint8_t actual[32];
+            err = HashDescriptor(fd, actual, kSealedCopy, &copy);
+            ::close(fd);
+            if (err == 0 && !Equal32(actual, expected_sha256)) err = EKEYREJECTED;
+            if (err != 0) {
+                if (copy >= 0) ::close(copy);
+                return err;
+            }
+            fd = copy;
+        }
         fd_out = fd;
         return 0;
     }
+
+    static constexpr int kSealedCopy = -2;  // HashDescriptor: also copy into a sealed memfd
+
+    [[nodiscard]] static bool Equal32(const uint8_t* a, const uint8_t* b) noexcept {
+        uint8_t diff = 0;
+        for (int i = 0; i < 32; ++i) diff = static_cast<uint8_t>(diff | (a[i] ^ b[i]));
+        return diff == 0;
+    }
+
+    // openat2 how struct, spelled here so no header newer than the kernel's is needed.
+    struct OpenHow {
+        uint64_t flags;
+        uint64_t mode;
+        uint64_t resolve;
+    };
+    static constexpr uint64_t kResolveNoMagicLinks = 0x02;
+    static constexpr uint64_t kResolveNoSymlinks = 0x04;
+
+    [[nodiscard]] static int OpenNoSymlinks(const char* path) noexcept {
+#ifdef __NR_openat2
+        OpenHow how{};
+        how.flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
+        how.resolve = kResolveNoMagicLinks | kResolveNoSymlinks;
+        const long r = ::syscall(__NR_openat2, AT_FDCWD, path, &how, sizeof how);
+        if (r >= 0) return static_cast<int>(r);
+        if (errno != ENOSYS && errno != EPERM) return -1;
+#endif
+        return ::open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    }
+
+    // Reads fd to its end with pread (the file offset is not used), hashing as it goes. With
+    // `copy_mode == kSealedCopy` the bytes are also written to a new memfd, which is sealed and
+    // returned in *copy_out. Returns 0 or an errno; on an error *copy_out is closed and -1.
+    [[nodiscard]] static int HashDescriptor(int fd, uint8_t (&digest)[32], int copy_mode, int* copy_out = nullptr) noexcept {
+        int copy = -1;
+        if (copy_mode == kSealedCopy) {
+            copy = CreateExecMemfd();
+            if (copy < 0) return errno != 0 ? errno : ENOSYS;
+        }
+        Sha256State st;
+        uint8_t buf[65536];
+        std::size_t total = 0;
+        int err = 0;
+        for (;;) {
+            const ssize_t r = ::pread(fd, buf, sizeof buf, static_cast<off_t>(total));
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                err = errno;
+                break;
+            }
+            if (r == 0) break;
+            const std::size_t got = static_cast<std::size_t>(r);
+            if (total + got > kMaxWorkerImageBytes) { err = EFBIG; break; }
+            st.Update(buf, got);
+            if (copy >= 0 && !WriteAll(copy, buf, got)) { err = errno != 0 ? errno : EIO; break; }
+            total += got;
+        }
+        if (err == 0 && copy >= 0) {
+#if defined(F_ADD_SEALS)
+            if (::fcntl(copy, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE) != 0) err = errno;
+#else
+            err = ENOSYS;
+#endif
+        }
+        if (err != 0) {
+            if (copy >= 0) ::close(copy);
+            if (copy_out != nullptr) *copy_out = -1;
+            return err;
+        }
+        st.Final(digest);
+        if (copy_out != nullptr) *copy_out = copy;
+        return 0;
+    }
+
+    [[nodiscard]] static int CreateExecMemfd() noexcept {
+#if defined(__NR_memfd_create)
+        constexpr unsigned kCloexec = 0x0001U, kAllowSealing = 0x0002U, kExec = 0x0010U;
+        long r = ::syscall(__NR_memfd_create, "stack-worker-image", kCloexec | kAllowSealing | kExec);
+        if (r < 0 && errno == EINVAL) r = ::syscall(__NR_memfd_create, "stack-worker-image", kCloexec | kAllowSealing);
+        return r < 0 ? -1 : static_cast<int>(r);
+#else
+        errno = ENOSYS;
+        return -1;
+#endif
+    }
+
+    // SHA-256 (FIPS 180-4). No allocation; the whole state is on the stack.
+    struct Sha256State {
+        uint32_t h[8] = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+        uint8_t block[64]{};
+        std::size_t fill = 0;
+        uint64_t total = 0;
+
+        static uint32_t Rotr(uint32_t x, unsigned n) noexcept { return (x >> n) | (x << (32 - n)); }
+
+        void Compress(const uint8_t* p) noexcept {
+            static constexpr uint32_t K[64] = {
+                0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+                0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+                0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu, 0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+                0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+                0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+                0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+                0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+                0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u};
+            uint32_t w[64];
+            for (int i = 0; i < 16; ++i) {
+                w[i] = (static_cast<uint32_t>(p[4 * i]) << 24) | (static_cast<uint32_t>(p[4 * i + 1]) << 16) |
+                       (static_cast<uint32_t>(p[4 * i + 2]) << 8) | static_cast<uint32_t>(p[4 * i + 3]);
+            }
+            for (int i = 16; i < 64; ++i) {
+                const uint32_t s0 = Rotr(w[i - 15], 7) ^ Rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                const uint32_t s1 = Rotr(w[i - 2], 17) ^ Rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+            }
+            uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+            for (int i = 0; i < 64; ++i) {
+                const uint32_t s1 = Rotr(e, 6) ^ Rotr(e, 11) ^ Rotr(e, 25);
+                const uint32_t ch = (e & f) ^ (~e & g);
+                const uint32_t t1 = hh + s1 + ch + K[i] + w[i];
+                const uint32_t s0 = Rotr(a, 2) ^ Rotr(a, 13) ^ Rotr(a, 22);
+                const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+                const uint32_t t2 = s0 + maj;
+                hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+            }
+            h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+        }
+
+        void Update(const uint8_t* p, std::size_t n) noexcept {
+            total += n;
+            while (n > 0) {
+                std::size_t take = 64 - fill;
+                if (take > n) take = n;
+                std::memcpy(block + fill, p, take);
+                fill += take;
+                p += take;
+                n -= take;
+                if (fill == 64) { Compress(block); fill = 0; }
+            }
+        }
+
+        void Final(uint8_t (&out)[32]) noexcept {
+            const uint64_t bits = total * 8;
+            const uint8_t one = 0x80;
+            Update(&one, 1);
+            const uint8_t zero = 0;
+            while (fill != 56) Update(&zero, 1);
+            uint8_t len[8];
+            for (int i = 0; i < 8; ++i) len[i] = static_cast<uint8_t>(bits >> (56 - 8 * i));
+            Update(len, 8);
+            for (int i = 0; i < 8; ++i) {
+                out[4 * i] = static_cast<uint8_t>(h[i] >> 24);
+                out[4 * i + 1] = static_cast<uint8_t>(h[i] >> 16);
+                out[4 * i + 2] = static_cast<uint8_t>(h[i] >> 8);
+                out[4 * i + 3] = static_cast<uint8_t>(h[i]);
+            }
+        }
+    };
 
     static void FormatDecimal(uint32_t v, char (&out)[16]) noexcept {
         char tmp[12];
@@ -1019,6 +1258,9 @@ private:
         if (!ResetSignals()) ::_exit(kExitSignalReset);
         if (!WorkerDescriptors(result_fd, image_fd)) ::_exit(kExitDescriptors);
         if (!ApplyRlimits(limits, image_fd)) ::_exit(kExitRlimits);
+        // Whatever image this is, exec may not grant it privilege (setuid, setgid, file
+        // capabilities). The worker sets it again inside its own filter install (R2-K-21).
+        if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) ::_exit(kExitSeccomp);
 #ifdef __NR_execveat
         (void)::syscall(__NR_execveat, image_fd, "", argv, envp, AT_EMPTY_PATH);
 #else

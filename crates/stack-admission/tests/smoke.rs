@@ -14,6 +14,10 @@ fn executor() -> SupervisedExecutor {
     static GRANT: std::sync::Once = std::sync::Once::new();
     let executor = SupervisedExecutor::new(WorkerConfig {
         worker_path: PathBuf::from(stack_ffi::WORKER_BUILD_PATH),
+        worker_sha256: Some(
+            stack_ffi::worker_image_sha256(&std::ffi::CString::new(stack_ffi::WORKER_BUILD_PATH).expect("no NUL"))
+                .expect("hash the worker build"),
+        ),
         context_id: 0,
         required_capabilities: 0x01,
         tokens_per_run: 1,

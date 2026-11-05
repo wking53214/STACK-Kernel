@@ -271,6 +271,10 @@ pub trait Executor: Send + Sync + fmt::Debug {
 pub struct WorkerConfig {
     /// ABSOLUTE path of the worker program (`stack_worker`).
     pub worker_path: PathBuf,
+    /// The SHA-256 of the worker program, from the release record. REQUIRED:
+    /// `None` makes [`SupervisedExecutor::new`] fail closed, and every run
+    /// executes only an image that hashes to this value (R2-K-21).
+    pub worker_sha256: Option<[u8; 32]>,
     /// The host rate-limit domain every run is charged to (0..16).
     pub context_id: u64,
     /// Capability bits every run requires of the host's active mask. Must
@@ -287,7 +291,8 @@ pub struct WorkerConfig {
 /// The real executor: the C++ supervised worker behind `stack-ffi`.
 ///
 /// Built from a [`WorkerConfig`]; [`SupervisedExecutor::new`] fails closed
-/// when the worker path is not absolute or not an executable regular file.
+/// when the worker path is not absolute or not an executable regular file, or
+/// when the pinned image digest is unset or does not match.
 /// Every run goes through the host's capability and rate-limit checks before
 /// anything is spawned, so a refused run is `ExecutorError::Refused` and the
 /// pipeline records it as unknown (nothing ran).
@@ -299,6 +304,7 @@ pub struct WorkerConfig {
 #[derive(Debug, Clone)]
 pub struct SupervisedExecutor {
     worker: CString,
+    worker_sha256: [u8; 32],
     context_id: u64,
     required_capabilities: u64,
     tokens_per_run: u32,
@@ -326,6 +332,20 @@ impl SupervisedExecutor {
         }
         let worker = CString::new(path.as_os_str().as_encoded_bytes())
             .map_err(|_| ExecutorError::WorkerUnavailable("worker path holds a NUL".to_owned()))?;
+        let Some(worker_sha256) = config.worker_sha256 else {
+            return Err(ExecutorError::WorkerUnavailable(
+                "worker_sha256 is not set; the worker image must be pinned".to_owned(),
+            ));
+        };
+        match stack_ffi::worker_image_sha256(&worker) {
+            Some(actual) if actual == worker_sha256 => {}
+            _ => {
+                return Err(ExecutorError::WorkerUnavailable(format!(
+                    "worker {} does not hash to the pinned digest",
+                    path.display()
+                )))
+            }
+        }
         if config.required_capabilities == 0 {
             return Err(ExecutorError::WorkerUnavailable(
                 "required_capabilities names no bit; the host would pass any mask".to_owned(),
@@ -338,6 +358,7 @@ impl SupervisedExecutor {
             .map_err(|e| ExecutorError::WorkerUnavailable(format!("host initialization failed: {e:?}")))?;
         Ok(Self {
             worker,
+            worker_sha256,
             context_id: config.context_id,
             required_capabilities: config.required_capabilities,
             tokens_per_run: config.tokens_per_run,
@@ -379,6 +400,7 @@ impl Executor for SupervisedExecutor {
             required_tokens: self.tokens_per_run,
             kind: kind.ffi_kind(),
             worker_path: &self.worker,
+            worker_sha256: Some(self.worker_sha256),
             reap_timeout_ns: self.reap_timeout_ns,
         };
         let report = stack_ffi::supervised_run_governed(&request, &ffi_limits, &mut out)
