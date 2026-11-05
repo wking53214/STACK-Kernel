@@ -459,15 +459,13 @@ fn rt_driver_sub_ms_phase_keeps_fairness_bound() {
         stage_offsets: vec![0],
         max_dispatch_per_phase: 1,
     };
-    let rec = DebuggingRecorder::new();
-    let (built, results, missed) = metrics::with_local_recorder(&rec, || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
+    let _serial = DRIVER_GLOBAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let missed_before = global_missed_total();
+    let (built, results) = {
+        let rt = driver_runtime();
         rt.block_on(async {
             let Ok(driver) = GreenWaveDriver::<u32>::new(&cfg) else {
-                return (false, Vec::new(), 0);
+                return (false, Vec::new());
             };
             for i in 0..10 {
                 driver.admit(LaneId::new(0), i).await.unwrap();
@@ -480,9 +478,10 @@ fn rt_driver_sub_ms_phase_keeps_fairness_bound() {
             while let Some(d) = rx.recv().await {
                 got.push((d.ticket.lane().index(), d.ticket.dispatched_at()));
             }
-            (true, got, counter(&snapshot(&rec), t::PHASES_MISSED_TOTAL))
+            (true, got)
         })
-    });
+    };
+    let missed = global_missed_total() - missed_before;
     if !built {
         return; // refusing the config is the safe outcome
     }
