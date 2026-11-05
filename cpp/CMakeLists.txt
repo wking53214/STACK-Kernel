@@ -46,6 +46,16 @@ target_compile_definitions(stack_worker_exec_tests PRIVATE
 target_link_libraries(stack_worker_exec_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
 add_dependencies(stack_worker_exec_tests stack_worker stack_worker_test)
 
+# Bounded reap (R2-K-12): built with STACK_SUPERVISED_TESTING, a compile-time
+# seam that suppresses the supervisor's SIGKILL so TerminationUnconfirmed can
+# be produced. The seam does not exist in any other target.
+add_executable(stack_worker_reap_tests tests/worker_reap_tests.cpp)
+target_compile_definitions(stack_worker_reap_tests PRIVATE
+    STACK_SUPERVISED_TESTING=1
+    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>")
+target_link_libraries(stack_worker_reap_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
+add_dependencies(stack_worker_reap_tests stack_worker)
+
 # The waitpid fallback path (no pidfd) with a late-observed deadline: libc
 # kill, waitpid and syscall are interposed by the program itself, so no test
 # hook exists in the header.
@@ -67,6 +77,8 @@ add_test(NAME STACKSupervisedExec COMMAND stack_supervised_exec_tests)
 set_tests_properties(STACKSupervisedExec PROPERTIES TIMEOUT 300)
 add_test(NAME STACKWorkerExec COMMAND stack_worker_exec_tests)
 set_tests_properties(STACKWorkerExec PROPERTIES TIMEOUT 300)
+add_test(NAME STACKWorkerReap COMMAND stack_worker_reap_tests)
+set_tests_properties(STACKWorkerReap PROPERTIES TIMEOUT 300)
 add_test(NAME STACKFfiHost COMMAND stack_ffi_tests)
 set_tests_properties(STACKFfiHost PROPERTIES TIMEOUT 300)
 

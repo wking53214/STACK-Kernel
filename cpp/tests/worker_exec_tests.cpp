@@ -539,3 +539,64 @@ TEST_CASE("Supervised: the fork-of-caller child holds no caller descriptor above
     ::close(leak_b);
     REQUIRE_FALSE(has_100);
 }
+
+// Decision A, result semantics: Completed means "exited 0 within the deadline
+// AND sent a well-formed frame". The bytes are the worker's own claim and the
+// report says so.
+TEST_CASE("Worker: a forged frame then exit_group(0) is Completed but flagged self-reported, with no caller memory", "[worker][forge][semantics]") {
+    const Run r = Hostile(kForgeThenExit0);
+    REQUIRE(r.report.outcome == Outcome::Completed);
+    REQUIRE(r.report.exit_code == 0);
+    REQUIRE(r.report.result_self_reported);
+    REQUIRE(r.Text() == "FORGED-OK");
+    // The forgery is whatever the worker chose to write: it holds nothing of
+    // the caller's.
+    REQUIRE(r.Text().find("CALLER-SECRET") == std::string::npos);
+    const std::string all(reinterpret_cast<const char*>(r.out), sizeof r.out);
+    REQUIRE(all.find("CALLER-SECRET") == std::string::npos);
+}
+
+TEST_CASE("Worker: a result is self-reported when delivered and never otherwise", "[worker][semantics]") {
+    REQUIRE(Shipped(kReturnBytes).report.result_self_reported);
+    uint8_t out[64] = {};
+    Limits l = DefaultLimits();
+    l.max_output_bytes = sizeof out;
+    const auto legacy = SupervisedExecutor::Run(l, [](uint8_t* o, std::size_t) { o[0] = 'x'; return std::size_t{1}; }, out, sizeof out);
+    REQUIRE(legacy.outcome == Outcome::Completed);
+    REQUIRE(legacy.result_self_reported);
+
+    for (const uint32_t kind : {kSpin, kCrash, kExitNonZero, kForbiddenOpen}) {
+        const Run r = Shipped(kind);
+        INFO(kind);
+        REQUIRE(r.report.outcome != Outcome::Completed);
+        REQUIRE_FALSE(r.report.result_self_reported);
+    }
+    for (const uint32_t kind : {kForgeThenSpin, kExitZeroNoFrame, kMalformedFrame, kTruncatedFrame, kOversizedFrame, kTrailingBytes,
+                                kSelfSigkill, kDelayedResult}) {
+        const Run r = Hostile(kind);
+        INFO(kind);
+        REQUIRE(r.report.outcome != Outcome::Completed);
+        REQUIRE_FALSE(r.report.result_self_reported);
+    }
+}
+
+TEST_CASE("Worker: bytes of a run that did not complete are not left in the caller's buffer", "[worker][semantics]") {
+    // kTrailingBytes and kForgeThenSpin both put a whole valid frame into the
+    // buffer before the run is judged not Completed.
+    struct Case { uint32_t kind; std::size_t written; };  // bytes the frame parser put in the buffer
+    for (const Case c : {Case{kTrailingBytes, 5}, Case{kForgeThenSpin, 9}}) {
+        const uint32_t kind = c.kind;
+        Run r;
+        std::memset(r.out, 0xAB, sizeof r.out);
+        WorkerSpec spec;
+        spec.executable = STACK_WORKER_TEST_PATH;
+        spec.kind = kind;
+        r.report = SupervisedExecutor::RunWorker(DefaultLimits(), spec, r.out, sizeof r.out);
+        REQUIRE(r.report.outcome != Outcome::Completed);
+        for (std::size_t i = 0; i < c.written; ++i) {
+            INFO("kind " << kind << " byte " << i);
+            REQUIRE(r.out[i] == 0);
+        }
+        REQUIRE(r.out[c.written] == 0xAB);  // only what the parser had written is cleared
+    }
+}
