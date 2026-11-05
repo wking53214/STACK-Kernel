@@ -627,6 +627,9 @@ fn a_real_decision_that_carries_the_same_subject_seat_is_refused_today() {
     ] {
         let mut p = policy();
         p.required_seats = required.iter().map(|s| (*s).to_owned()).collect();
+        p.seat_positions
+            .insert("CNS:same_subject".to_owned(), stack_receipt::GatePosition::Alpha);
+        p.seat_positions.retain(|k, _| p.required_seats.contains(k));
         let dir = TempDir::new("same-subject");
         let h = Builder::new(dir.path()).policy(p).start();
         let r = h.refusal(honest_payload(&case, "echo"));
@@ -637,4 +640,82 @@ fn a_real_decision_that_carries_the_same_subject_seat_is_refused_today() {
         assert_eq!(h.runs(), 0);
         drop(h);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Roster shape through the pipeline (P2 findings 1 to 3)
+// ---------------------------------------------------------------------------
+
+/// A refused request for `edited`, a hostile edit of a fixture decision that
+/// the attacker re-rooted and holds a capability for, so only the kernel's
+/// binding and policy checks can refuse it.
+fn refused_edit(name: &str, policy: stack_admission::KernelPolicy, edited: &Value) -> Vec<DecisionFinding> {
+    let dir = TempDir::new(name);
+    let h = Builder::new(dir.path()).policy(policy).start();
+    let cap = CapSpec::for_case(edited, "echo", RESOURCE).issue();
+    let r = h.refusal(payload_with(edited, &cap, "echo", RESOURCE));
+    h.assert_rejected_recorded(&r);
+    assert_eq!(h.runs(), 0);
+    binding(&r)
+        .into_iter()
+        .filter_map(|f| match f {
+            BindingFinding::Decision(d) => Some(d),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_repeated_door_verdict_cannot_stand_in_for_the_judge() {
+    let mut edited = all_pass();
+    let door = edited["verdicts"][0].clone();
+    edited["verdicts"][1] = door;
+    reroot(&mut edited);
+    let f = refused_edit("dup-verdict", policy(), &edited);
+    assert!(f.contains(&DecisionFinding::DuplicateVerdict("door".into())), "{f:?}");
+    assert!(f.contains(&DecisionFinding::SeatNotJudged("DIT:judge".into())), "{f:?}");
+}
+
+#[test]
+fn two_seats_sharing_a_gate_name_are_refused_by_the_kernel() {
+    let mut edited = all_pass();
+    edited["seats"] = json!(["DIT:judge", "Evil:judge"]);
+    let judge = edited["verdicts"][1].clone();
+    edited["verdicts"] = json!([judge.clone(), judge]);
+    reroot(&mut edited);
+    let mut p = policy();
+    p.required_seats = vec!["DIT:judge".into()];
+    p.seat_positions = std::collections::BTreeMap::from([("DIT:judge".to_owned(), stack_receipt::GatePosition::Omega)]);
+    let f = refused_edit("dup-gate", p, &edited);
+    assert!(f.contains(&DecisionFinding::DuplicateGateName("judge".into())), "{f:?}");
+}
+
+#[test]
+fn a_required_seat_at_the_wrong_position_is_refused_by_the_kernel() {
+    let mut edited = all_pass();
+    edited["seats"] = json!(["Governance_Gateway:door"]);
+    let mut door = edited["verdicts"][0].clone();
+    door["position"] = json!("omega");
+    edited["verdicts"] = json!([door]);
+    reroot(&mut edited);
+    let mut p = policy();
+    p.required_seats = vec!["Governance_Gateway:door".into()];
+    p.seat_positions =
+        std::collections::BTreeMap::from([("Governance_Gateway:door".to_owned(), stack_receipt::GatePosition::Alpha)]);
+    let f = refused_edit("wrong-position", p, &edited);
+    assert!(
+        f.contains(&DecisionFinding::RequiredSeatWrongPosition {
+            seat: "Governance_Gateway:door".into(),
+            expected: stack_receipt::GatePosition::Alpha,
+            found: stack_receipt::GatePosition::Omega,
+        }),
+        "{f:?}"
+    );
+}
+
+#[test]
+fn a_policy_that_states_no_position_for_a_required_seat_is_refused() {
+    let mut p = policy();
+    p.seat_positions.remove("DIT:judge");
+    assert!(matches!(p.validate(), Err(stack_admission::ConfigError::SeatPositions(_))));
 }

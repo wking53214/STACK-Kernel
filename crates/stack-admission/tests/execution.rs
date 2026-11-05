@@ -227,6 +227,7 @@ fn an_auditor_with_other_expectations_rejects_the_same_log() {
             "DIT:judge".into(),
             "HERALD:confidence".into(),
         ],
+        ..stack_receipt::RosterPolicy::default()
     };
     let content = stack_admission::cns_value(&case["subject"]).unwrap();
     let v = stack_receipt::verify_log_bytes(

@@ -63,6 +63,31 @@ impl DecisionEvidence {
 pub struct RosterPolicy {
     /// Required seats.
     pub required_seats: Vec<String>,
+    /// The position each listed required seat must hold. A required seat
+    /// that is not listed has its position left unchecked, so a verifier
+    /// that wants the position enforced lists every seat.
+    pub seat_positions: std::collections::BTreeMap<String, GatePosition>,
+}
+
+impl RosterPolicy {
+    /// A policy requiring these seats, with no position constraint.
+    pub fn new<I, S>(required_seats: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            required_seats: required_seats.into_iter().map(Into::into).collect(),
+            seat_positions: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// This policy with `seat` required to hold `position`.
+    #[must_use]
+    pub fn with_position(mut self, seat: &str, position: GatePosition) -> Self {
+        self.seat_positions.insert(seat.to_owned(), position);
+        self
+    }
 }
 
 /// One thing wrong with a decision that an `Authorized` execution relied
@@ -100,6 +125,26 @@ pub enum DecisionFinding {
     /// An omega verdict precedes an alpha one; CNS runs every alpha gate
     /// first.
     OmegaBeforeAlpha,
+    /// Two verdicts name the same gate: one seat cannot be judged twice,
+    /// and a second verdict can stand in for another seat's.
+    DuplicateVerdict(String),
+    /// A roster seat has no verdict (reported when the counts agree, so a
+    /// repeated verdict cannot hide it; a short run is a
+    /// [`Self::VerdictCountMismatch`]).
+    SeatNotJudged(String),
+    /// Two different seats share one gate name, so a verdict cannot say
+    /// which of them it judged.
+    DuplicateGateName(String),
+    /// A policy-required seat's verdict is at another position than the
+    /// policy expects.
+    RequiredSeatWrongPosition {
+        /// The seat.
+        seat: String,
+        /// The position the policy expects.
+        expected: GatePosition,
+        /// The position the verdict recorded.
+        found: GatePosition,
+    },
 }
 
 /// The gate name of a seat written as `repository:gate`.
@@ -108,9 +153,11 @@ pub fn seat_gate(seat: &str) -> &str {
 }
 
 /// Checks a decision an `Authorized` execution relied on: non-empty
-/// roster without duplicates, one verdict per seat and none for an
-/// unseated gate, every verdict PASS and bound, alpha before omega, and
-/// every policy-required seat present with a PASS verdict. Returns every
+/// roster without duplicate seats or shared gate names, exactly one
+/// verdict per seat (never two for one gate) and none for an unseated
+/// gate, every verdict PASS and bound, alpha before omega, and
+/// every policy-required seat present with a PASS verdict at the position
+/// the policy states for it. Returns every
 /// finding, in a fixed order.
 pub fn check_authorized_decision(d: &DecisionEvidence, policy: Option<&RosterPolicy>) -> Vec<DecisionFinding> {
     let mut out = Vec::new();
@@ -122,11 +169,30 @@ pub fn check_authorized_decision(d: &DecisionEvidence, policy: Option<&RosterPol
             out.push(DecisionFinding::DuplicateSeat(seat.clone()));
         }
     }
+    for (i, seat) in d.seats.iter().enumerate() {
+        let gate = seat_gate(seat);
+        let clash = d.seats.iter().take(i).any(|s| s != seat && seat_gate(s) == gate);
+        if clash && !out.contains(&DecisionFinding::DuplicateGateName(gate.to_owned())) {
+            out.push(DecisionFinding::DuplicateGateName(gate.to_owned()));
+        }
+    }
+    for (i, v) in d.verdicts.iter().enumerate() {
+        let repeated = d.verdicts.iter().take(i).any(|w| w.gate == v.gate);
+        if repeated && !out.contains(&DecisionFinding::DuplicateVerdict(v.gate.clone())) {
+            out.push(DecisionFinding::DuplicateVerdict(v.gate.clone()));
+        }
+    }
     if d.seats.len() != d.verdicts.len() {
         out.push(DecisionFinding::VerdictCountMismatch {
             seats: d.seats.len(),
             verdicts: d.verdicts.len(),
         });
+    } else {
+        for seat in &d.seats {
+            if !d.verdicts.iter().any(|v| v.gate == seat_gate(seat)) {
+                out.push(DecisionFinding::SeatNotJudged(seat.clone()));
+            }
+        }
     }
     let mut seen_omega = false;
     for v in &d.verdicts {
@@ -163,6 +229,15 @@ pub fn check_authorized_decision(d: &DecisionEvidence, policy: Option<&RosterPol
                 .any(|v| v.gate == gate && v.outcome == GateOutcome::Pass && v.is_bound());
             if !passed {
                 out.push(DecisionFinding::RequiredSeatNotPassed(required.clone()));
+            }
+            if let Some(expected) = policy.seat_positions.get(required) {
+                if let Some(v) = d.verdicts.iter().find(|v| v.gate == gate && v.position != *expected) {
+                    out.push(DecisionFinding::RequiredSeatWrongPosition {
+                        seat: required.clone(),
+                        expected: *expected,
+                        found: v.position,
+                    });
+                }
             }
         }
     }

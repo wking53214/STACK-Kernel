@@ -172,6 +172,7 @@ mod tests {
         };
         let policy = RosterPolicy {
             required_seats: vec!["Governance_Gateway:door".into(), "DIT:judge".into()],
+            ..RosterPolicy::default()
         };
         let (findings, root) = check(&claim, &digest, &policy);
         assert!(findings.is_empty(), "{findings:?}");
@@ -199,6 +200,7 @@ mod tests {
 
         let stricter = RosterPolicy {
             required_seats: vec!["HERALD:confidence".into()],
+            ..RosterPolicy::default()
         };
         assert_eq!(
             check(&claim, &digest, &stricter).0,
