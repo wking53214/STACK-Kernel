@@ -1,0 +1,26 @@
+[package]
+name = "stack-admission"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The admission pipeline: Trident handoff, CNS decision binding, capability authorization, write-ahead receipt, supervised execution, terminal receipt"
+
+[dependencies]
+stack-trident = { path = "../stack-trident" }
+stack-authority = { path = "../stack-authority" }
+stack-receipt = { path = "../stack-receipt" }
+stack-ffi = { path = "../stack-ffi" }
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# TEST FIXTURE issuer only: tests stand in for the capability issuer that
+# lives outside the kernel. Nothing in src/ signs.
+ed25519-dalek.workspace = true
+
+[lints]
+workspace = true

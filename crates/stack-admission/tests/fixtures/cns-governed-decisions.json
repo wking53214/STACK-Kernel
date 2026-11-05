@@ -1,0 +1,359 @@
+{
+  "schema": "stack-admission-cns-governed-decisions/1",
+  "comment": "Generates cns-governed-decisions.json from the real CNS SuperGate. See the module docstring of gen_cns_governed_decisions.py.",
+  "cns_commit": "4acd8f958a091900d43f553eba7fe83f7d33c4d6",
+  "cases": [
+    {
+      "name": "all_pass",
+      "identity": "invoice-42",
+      "subject": {
+        "doc": "invoice-42",
+        "amount": 1200,
+        "lines": [
+          {
+            "sku": "A1",
+            "qty": 2
+          },
+          {
+            "sku": "B7",
+            "qty": 1
+          }
+        ],
+        "approved": true,
+        "note": null
+      },
+      "subject_digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        }
+      ],
+      "root": "08efae276351fd848c7e16be2d907c72d54b5ba1bf65723891e706c5a5c641be",
+      "allowed": true,
+      "outcome": "pass"
+    },
+    {
+      "name": "other_subject_all_pass",
+      "identity": "invoice-43",
+      "subject": {
+        "doc": "invoice-43",
+        "amount": 99,
+        "lines": [],
+        "approved": false,
+        "note": null
+      },
+      "subject_digest": "5e69f1d58488a17b5d0ce9355751a260f1dff2b5855b2a9de4350eb337bccdc7",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "invoice-43",
+          "digest": "5e69f1d58488a17b5d0ce9355751a260f1dff2b5855b2a9de4350eb337bccdc7"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "invoice-43",
+          "digest": "5e69f1d58488a17b5d0ce9355751a260f1dff2b5855b2a9de4350eb337bccdc7"
+        }
+      ],
+      "root": "7b4904041f9ccbec8e88891926d20a82396ce5ecc229d38d0b95895138b2c3b3",
+      "allowed": true,
+      "outcome": "pass"
+    },
+    {
+      "name": "three_seats_all_pass",
+      "identity": "invoice-42",
+      "subject": {
+        "doc": "invoice-42",
+        "amount": 1200,
+        "lines": [
+          {
+            "sku": "A1",
+            "qty": 2
+          },
+          {
+            "sku": "B7",
+            "qty": 1
+          }
+        ],
+        "approved": true,
+        "note": null
+      },
+      "subject_digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge",
+        "HERALD:confidence"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        },
+        {
+          "gate": "confidence",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        }
+      ],
+      "root": "f9b14980f98263980404b5279bd379468a74885698166640413a6a9ee0789b19",
+      "allowed": true,
+      "outcome": "pass"
+    },
+    {
+      "name": "omega_retry",
+      "identity": "invoice-42",
+      "subject": {
+        "doc": "invoice-42",
+        "amount": 1200,
+        "lines": [
+          {
+            "sku": "A1",
+            "qty": 2
+          },
+          {
+            "sku": "B7",
+            "qty": 1
+          }
+        ],
+        "approved": true,
+        "note": null
+      },
+      "subject_digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "retry",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        }
+      ],
+      "root": "decb440e421a9daf9fb799c82922856fc62ed9d5e758cd407f3e15dd600dad99",
+      "allowed": false,
+      "outcome": "retry"
+    },
+    {
+      "name": "alpha_breach_omega_not_run",
+      "identity": "invoice-42",
+      "subject": {
+        "doc": "invoice-42",
+        "amount": 1200,
+        "lines": [
+          {
+            "sku": "A1",
+            "qty": 2
+          },
+          {
+            "sku": "B7",
+            "qty": 1
+          }
+        ],
+        "approved": true,
+        "note": null
+      },
+      "subject_digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "terminal_breach",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        }
+      ],
+      "root": "e0a07e0f8ee23414faf03e821cf117b6c6b485039d6d56985c122360b266d93b",
+      "allowed": false,
+      "outcome": "terminal_breach"
+    },
+    {
+      "name": "unbound_pass",
+      "identity": "invoice-42",
+      "subject": {
+        "doc": "invoice-42",
+        "amount": 1200,
+        "lines": [
+          {
+            "sku": "A1",
+            "qty": 2
+          },
+          {
+            "sku": "B7",
+            "qty": 1
+          }
+        ],
+        "approved": true,
+        "note": null
+      },
+      "subject_digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e",
+      "seats": [
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "",
+          "digest": ""
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        }
+      ],
+      "root": "00145b20eeda81f52700eec041da1b5a7ff8e49029ed5348dd96bcf3c34b2b6e",
+      "allowed": false,
+      "outcome": "pass"
+    },
+    {
+      "name": "missing_required_seat",
+      "identity": "invoice-42",
+      "subject": {
+        "doc": "invoice-42",
+        "amount": 1200,
+        "lines": [
+          {
+            "sku": "A1",
+            "qty": 2
+          },
+          {
+            "sku": "B7",
+            "qty": 1
+          }
+        ],
+        "approved": true,
+        "note": null
+      },
+      "subject_digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e",
+      "seats": [
+        "Governance_Gateway:door",
+        "HERALD:confidence"
+      ],
+      "verdicts": [
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        },
+        {
+          "gate": "confidence",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        }
+      ],
+      "root": "7ca2ce70fb90810a0e8962795e10cd82f7efdcfbc29eaaac6b30114914254cb5",
+      "allowed": true,
+      "outcome": "pass"
+    },
+    {
+      "name": "same_subject_all_pass",
+      "identity": "invoice-42",
+      "subject": {
+        "doc": "invoice-42",
+        "amount": 1200,
+        "lines": [
+          {
+            "sku": "A1",
+            "qty": 2
+          },
+          {
+            "sku": "B7",
+            "qty": 1
+          }
+        ],
+        "approved": true,
+        "note": null
+      },
+      "subject_digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e",
+      "seats": [
+        "CNS:same_subject",
+        "Governance_Gateway:door",
+        "DIT:judge"
+      ],
+      "verdicts": [
+        {
+          "gate": "same_subject",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "same_subject",
+          "digest": "3af8e0500ddb02e3ec2b477ffea78a2ab778d2361198bb40d64a44605b6a148d"
+        },
+        {
+          "gate": "door",
+          "position": "alpha",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        },
+        {
+          "gate": "judge",
+          "position": "omega",
+          "outcome": "pass",
+          "subject": "invoice-42",
+          "digest": "32b57492907675867f122c85ae6c2eee02d9eb6f63c3452eeb3c9bca0576ae2e"
+        }
+      ],
+      "root": "82da562ca141f55bfcd0834a9212ede773c9f98d3958cde635abf8881d1cded0",
+      "allowed": true,
+      "outcome": "pass"
+    }
+  ]
+}
