@@ -160,14 +160,18 @@ jobs:
     # binary on the same inputs and fails on any difference that is not listed in
     # crates/stack-sentinel/tests/crosscheck.rs. sentinel_os is private, so the job needs a read-only token
     # for it in the repository secret SENTINEL_OS_TOKEN. Without the secret the job is skipped and passes;
-    # it then checks nothing, so do not make it a required check until the secret is set.
+    # it then checks nothing, so do not make it a required check until the secret is set. The skip is
+    # reported as a warning annotation and a step summary line so that it does not read as a clean pass.
+    # It is not made a failure here because pull requests from forks never receive the secret.
     runs-on: ubuntu-latest
     env:
       HAS_TOKEN: ${{ secrets.SENTINEL_OS_TOKEN != '' }}
     steps:
       - name: Report a skipped cross-check
         if: env.HAS_TOKEN != 'true'
-        run: echo "SENTINEL_OS_TOKEN is not set, so the cross-check did not run."
+        run: |
+          echo "::warning title=Cross-check NOT RUN::SENTINEL_OS_TOKEN is not set, so the Python and Rust verifiers were not compared. This job passing means nothing."
+          echo "### Cross-check NOT RUN (SENTINEL_OS_TOKEN is not set)" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
         if: env.HAS_TOKEN == 'true'
       - uses: actions/checkout@v4
