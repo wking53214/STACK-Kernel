@@ -68,6 +68,28 @@ if(STACK_FFI_TSAN)
     add_test(NAME STACKTsan_ffi_init COMMAND ffi_init_redteam_tsan)
     set_tests_properties(STACKTsan_ffi_init PROPERTIES TIMEOUT 600
         ENVIRONMENT "TSAN_OPTIONS=halt_on_error=0:exitcode=66")
+
+    # The capability-change protocol (I-04: pending changes, the in-flight
+    # counter and the condition variable the last transaction signals) under
+    # ThreadSanitizer, with the same interposer and the same limits: this
+    # checks the synchronization, not the filter. Only the [I-04] cases run:
+    # the sustained-load revocation through the shipped wrapper, and the
+    # latch-based host cases (a transaction held in flight, a change pending,
+    # a new transaction refused, a timeout).
+    add_executable(ffi_host_tests_tsan
+        tests/ffi_host_tests.cpp tests/ffi_no_seccomp_interpose.cpp ${STACK_FFI_WRAPPER})
+    target_compile_options(ffi_host_tests_tsan PRIVATE -fsanitize=thread -g -O1)
+    target_link_options(ffi_host_tests_tsan PRIVATE -fsanitize=thread)
+    target_link_libraries(ffi_host_tests_tsan PRIVATE Catch2::Catch2WithMain stack_containment atomic pthread)
+    add_test(NAME STACKTsan_ffi_revocation COMMAND ffi_host_tests_tsan "[I-04]")
+
+    add_executable(stack_tests_tsan tests/tests_all_components.cpp tests/ffi_no_seccomp_interpose.cpp)
+    target_compile_options(stack_tests_tsan PRIVATE -fsanitize=thread -g -O1)
+    target_link_options(stack_tests_tsan PRIVATE -fsanitize=thread)
+    target_link_libraries(stack_tests_tsan PRIVATE Catch2::Catch2WithMain stack_containment atomic pthread)
+    add_test(NAME STACKTsan_capability_change COMMAND stack_tests_tsan "[I-04]")
+    set_tests_properties(STACKTsan_ffi_revocation STACKTsan_capability_change PROPERTIES TIMEOUT 600
+        ENVIRONMENT "TSAN_OPTIONS=halt_on_error=0:exitcode=66")
 endif()
 
 # Red-team programs: plain main() executables that exit non-zero on failure.
