@@ -2,8 +2,11 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
+#include <expected>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -404,6 +407,208 @@ TEST_CASE("Component 12: Layer 4 - Capability change refused while a payload run
     REQUIRE(refused_while_running);
     // Asked after the transaction returned: the counter is back to zero.
     REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0)));
+}
+
+namespace {
+
+// A transaction whose payload parks until released, so a test can hold one
+// transaction provably in flight (I-04). It runs on its own thread, which
+// seals itself; the test thread stays unsealed.
+struct ParkedTransaction {
+    std::mutex m;
+    std::condition_variable cv;
+    bool parked = false;
+    bool release = false;
+    std::atomic<bool> payload_ran{false};
+    std::expected<void, HostExecutionError> result{};
+    std::thread thread;
+
+    template <typename Host>
+    void Start(Host& host, uint64_t domain, uint64_t capability_bits) {
+        thread = std::thread([this, &host, domain, capability_bits]() {
+            SIMDCapabilityToken token(domain, CapabilityMask256(capability_bits, 0, 0, 0));
+            result = host.ExecuteGovernedTransaction(
+                token, 5, 100'000'000'000ULL, 10'000'000'000ULL,
+                [this]() {
+                    payload_ran.store(true, std::memory_order_release);
+                    std::unique_lock<std::mutex> lk(m);
+                    parked = true;
+                    cv.notify_all();
+                    cv.wait(lk, [this] { return release; });
+                });
+            // A refused or failed transaction never parks: wake the waiter.
+            std::lock_guard<std::mutex> lk(m);
+            parked = true;
+            cv.notify_all();
+        });
+    }
+    void WaitParked() {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [this] { return parked; });
+    }
+    void Release() {
+        std::lock_guard<std::mutex> lk(m);
+        release = true;
+        cv.notify_all();
+    }
+    void Join() { if (thread.joinable()) thread.join(); }
+};
+
+// Polls on the unsealed test thread; a failure shows as a false return, not a hang.
+template <typename Pred>
+bool WaitUntil(Pred pred, int timeout_ms = 5000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!pred()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+// One quick transaction on a fresh thread; returns its result and whether the payload ran.
+template <typename Host>
+std::expected<void, HostExecutionError> QuickTransaction(Host& host, uint64_t domain, uint64_t capability_bits,
+                                                         bool* payload_ran) {
+    std::expected<void, HostExecutionError> result{};
+    std::atomic<bool> ran{false};
+    std::thread([&]() {
+        SIMDCapabilityToken token(domain, CapabilityMask256(capability_bits, 0, 0, 0));
+        result = host.ExecuteGovernedTransaction(
+            token, 5, 100'000'000'000ULL, 10'000'000'000ULL,
+            [&ran]() { ran.store(true, std::memory_order_release); });
+    }).join();
+    *payload_ran = ran.load(std::memory_order_acquire);
+    return result;
+}
+
+}  // namespace
+
+TEST_CASE("Component 12: Layer 4 - A pending capability change blocks new transactions and applies when in-flight ones drain", "[layer-4][I-04]") {
+    // R2-K-07. A transaction is held in flight (payload parked on a latch). A
+    // bounded capability change then waits for it: while it waits, a NEW
+    // transaction is refused with CapabilityChangePending (fail closed, nothing
+    // runs, nothing is charged). When the parked transaction finishes the
+    // change applies and the revoked capability is refused.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+
+    ParkedTransaction a;
+    a.Start(host, 1, 0x01);
+    a.WaitParked();
+    REQUIRE(a.payload_ran.load());
+
+    std::atomic<bool> setter_done{false};
+    bool setter_applied = false;
+    std::thread setter([&]() {
+        setter_applied = host.SetActiveCapabilitiesWithin(
+            CapabilityMask256(0, 0, 0, 0), std::chrono::seconds(30));
+        setter_done.store(true, std::memory_order_release);
+    });
+    REQUIRE(WaitUntil([&] { return host.PendingCapabilityChanges() == 1; }));
+
+    // A new transaction while the change is pending: refused, payload not run.
+    bool b_ran = true;
+    const auto b = QuickTransaction(host, 2, 0x01, &b_ran);
+    REQUIRE_FALSE(b.has_value());
+    REQUIRE(b.error() == HostExecutionError::CapabilityChangePending);
+    REQUIRE_FALSE(b_ran);
+    REQUIRE(host.DebtTracker().Accrued(2) == 0);
+    // The change waits for the parked transaction: it has not applied.
+    REQUIRE_FALSE(setter_done.load(std::memory_order_acquire));
+
+    a.Release();
+    a.Join();
+    setter.join();
+    REQUIRE(a.result.has_value());           // it ran to completion under the old mask
+    REQUIRE(setter_applied);
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+
+    // Applied: the revoked capability is refused, and the payload does not run.
+    bool c_ran = true;
+    const auto c = QuickTransaction(host, 3, 0x01, &c_ran);
+    REQUIRE_FALSE(c.has_value());
+    REQUIRE(c.error() == HostExecutionError::CapabilityValidationFailed);
+    REQUIRE_FALSE(c_ran);
+}
+
+TEST_CASE("Component 12: Layer 4 - A bounded capability change that times out leaves nothing pending", "[layer-4][I-04]") {
+    // The wait is bounded. When the in-flight transaction does not drain in
+    // time the change is NOT applied (false), no change remains pending, and
+    // the host serves new transactions under the unchanged mask.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    ParkedTransaction a;
+    a.Start(host, 1, 0x01);
+    a.WaitParked();
+
+    // Zero wait is the old try-once behaviour: refused at once, nothing pending.
+    REQUIRE_FALSE(host.SetActiveCapabilitiesWithin(CapabilityMask256(0, 0, 0, 0), std::chrono::nanoseconds(0)));
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+    REQUIRE_FALSE(host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0)));
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool applied = host.SetActiveCapabilitiesWithin(
+        CapabilityMask256(0, 0, 0, 0), std::chrono::milliseconds(60));
+    const auto waited = std::chrono::steady_clock::now() - t0;
+    REQUIRE_FALSE(applied);
+    REQUIRE(waited >= std::chrono::milliseconds(60));
+    REQUIRE(waited < std::chrono::seconds(5));
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+
+    // Still serving, still under the old mask (nothing was applied).
+    bool b_ran = false;
+    const auto b = QuickTransaction(host, 2, 0x01, &b_ran);
+    REQUIRE(b.has_value());
+    REQUIRE(b_ran);
+
+    a.Release();
+    a.Join();
+    REQUIRE(a.result.has_value());
+    // Nothing in flight now: the same change applies at once.
+    REQUIRE(host.SetActiveCapabilitiesWithin(CapabilityMask256(0, 0, 0, 0), std::chrono::milliseconds(60)));
+    bool c_ran = true;
+    const auto c = QuickTransaction(host, 3, 0x01, &c_ran);
+    REQUIRE(c.error() == HostExecutionError::CapabilityValidationFailed);
+    REQUIRE_FALSE(c_ran);
+}
+
+TEST_CASE("Component 12: Layer 4 - One setter timing out does not unblock another that is still waiting", "[layer-4][I-04]") {
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    ParkedTransaction a;
+    a.Start(host, 1, 0x01);
+    a.WaitParked();
+
+    bool long_applied = false;
+    std::thread long_setter([&]() {
+        long_applied = host.SetActiveCapabilitiesWithin(CapabilityMask256(0x0F, 0, 0, 0), std::chrono::seconds(30));
+    });
+    REQUIRE(WaitUntil([&] { return host.PendingCapabilityChanges() == 1; }));
+
+    REQUIRE_FALSE(host.SetActiveCapabilitiesWithin(CapabilityMask256(0xF0, 0, 0, 0), std::chrono::milliseconds(30)));
+    // The short setter is gone; the long one still holds the host closed.
+    REQUIRE(host.PendingCapabilityChanges() == 1);
+    bool b_ran = true;
+    const auto b = QuickTransaction(host, 2, 0x01, &b_ran);
+    REQUIRE(b.error() == HostExecutionError::CapabilityChangePending);
+    REQUIRE_FALSE(b_ran);
+
+    a.Release();
+    a.Join();
+    long_setter.join();
+    REQUIRE(long_applied);
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+    // The long setter's mask (0x0F) applied, the short one's (0xF0) did not.
+    bool c_ran = false;
+    REQUIRE(QuickTransaction(host, 3, 0x01, &c_ran).has_value());
+    REQUIRE(c_ran);
+    bool d_ran = true;
+    REQUIRE(QuickTransaction(host, 4, 0x10, &d_ran).error() == HostExecutionError::CapabilityValidationFailed);
+    REQUIRE_FALSE(d_ran);
 }
 
 TEST_CASE("Component 12: Layer 4 - A sealed thread can arm its deadline timer", "[layer-4][defect-5]") {

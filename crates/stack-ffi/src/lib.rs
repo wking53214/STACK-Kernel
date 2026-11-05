@@ -112,8 +112,13 @@ pub fn host_initialize_and_seal() -> Result<(), HostError> {
 
 /// Safe wrapper for setting active capabilities.
 ///
-/// A change is refused while a transaction is in flight, so a caller that must
-/// apply it retries on `TransactionInFlight`. It needs a completed
+/// Ok means the mask is applied and no transaction is running, or will run,
+/// with the old one (I-04). The call holds new transactions out
+/// (`TransactionError::CapabilityChangePending`) while it waits up to 500 ms
+/// for the ones in flight to drain, so it applies under steady load. If they
+/// do not drain in time it returns `TransactionInFlight`: the mask was NOT
+/// applied, nothing is left pending, and the caller retries or escalates. Do
+/// not call it from inside a payload. It needs a completed
 /// initialization: `NotInitialized` before (or during) it, and
 /// `InitializationFailed` for good once it has failed.
 pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> Result<(), CapabilityError> {
@@ -158,6 +163,7 @@ pub fn execute_governed_transaction(
             -10 => Err(TransactionError::TimerArmFailed),
             -11 => Err(TransactionError::ThreadNotSealed),
             -12 => Err(TransactionError::InitializationFailed),
+            -13 => Err(TransactionError::CapabilityChangePending),
             _ => Err(TransactionError::ExecutionFailed),
         }
     }
@@ -464,7 +470,8 @@ pub enum SealError {
 pub enum CapabilityError {
     /// The host has not been initialized yet (or is still being initialized).
     NotInitialized,
-    /// A governed transaction is in flight; the mask was not changed.
+    /// The transactions in flight did not drain within the bound (500 ms); the
+    /// mask was not changed and nothing is left pending (I-04).
     TransactionInFlight,
     /// Initialization failed; latched. The mask was not changed (I-02).
     InitializationFailed,
@@ -495,6 +502,10 @@ pub enum TransactionError {
     ThreadNotSealed,
     /// Initialization failed; latched for this process. Nothing ran.
     InitializationFailed,
+    /// A capability change (a revocation) is waiting for the transactions in
+    /// flight to drain and holds new ones out (I-04). Nothing ran and nothing
+    /// was consumed. Retry.
+    CapabilityChangePending,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -907,6 +918,88 @@ mod tests {
             return;
         }
         run_in_child("tests::test_overrun_keeps_its_tokens_through_the_ffi", CHILD_ENV);
+    }
+
+    /// I-04 (R2-K-07): a revocation applies under sustained load from eight
+    /// sealed executor threads, within a bound, and no transaction that begins
+    /// after it returned runs its payload. Executors ask for zero tokens so the
+    /// load is not ended by the rate limit.
+    #[test]
+    fn test_revocation_applies_under_sustained_load_through_the_ffi() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        const CHILD_ENV: &str = "STACK_FFI_REVOKE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            const DOMAINS: [u64; 8] = [0, 9, 10, 11, 12, 13, 14, 15];
+            assert_eq!(host_initialize(), Ok(()));
+            assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let revoked = Arc::new(AtomicBool::new(false));
+            let sealed = Arc::new(AtomicU64::new(0));
+            let started_after = Arc::new(AtomicU64::new(0));
+            let ran_after = Arc::new(AtomicU64::new(0));
+            let refused_after = Arc::new(AtomicU64::new(0));
+            let mut executors = std::vec::Vec::new();
+            for domain in DOMAINS {
+                let (stop, revoked, sealed) = (stop.clone(), revoked.clone(), sealed.clone());
+                let (started_after, ran_after, refused_after) =
+                    (started_after.clone(), ran_after.clone(), refused_after.clone());
+                executors.push(std::thread::spawn(move || {
+                    assert!(host_initialize_and_seal().is_ok(), "seal");
+                    sealed.fetch_add(1, Ordering::SeqCst);
+                    while !stop.load(Ordering::Relaxed) {
+                        let after = revoked.load(Ordering::Acquire);
+                        let r = txn(domain, 0x01, 0);
+                        if after {
+                            started_after.fetch_add(1, Ordering::Relaxed);
+                            match r {
+                                Ok(()) => {
+                                    ran_after.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(TransactionError::CapabilityDenied) => {
+                                    refused_after.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                }));
+            }
+            let wait = std::time::Instant::now();
+            while sealed.load(Ordering::SeqCst) < 8 && wait.elapsed().as_secs() < 5 {}
+            let at_start = host_payload_count();
+            while host_payload_count() < at_start + 100 && wait.elapsed().as_secs() < 5 {}
+
+            let t0 = std::time::Instant::now();
+            let mut r = Err(CapabilityError::TransactionInFlight);
+            while r == Err(CapabilityError::TransactionInFlight) && t0.elapsed().as_millis() < 1000 {
+                r = host_set_capabilities(0, 0, 0, 0);
+            }
+            let applied_ms = t0.elapsed().as_millis();
+            let payloads_when_applied = host_payload_count();
+            revoked.store(true, Ordering::Release);
+
+            let after_start = std::time::Instant::now();
+            while started_after.load(Ordering::Relaxed) < 1000 && after_start.elapsed().as_secs() < 2 {}
+            stop.store(true, Ordering::Relaxed);
+            for e in executors {
+                e.join().expect("executor");
+            }
+            let payloads_at_end = host_payload_count();
+
+            assert_eq!(r, Ok(()), "revocation not applied after {applied_ms} ms");
+            assert!(applied_ms < 1000, "applied after {applied_ms} ms");
+            assert!(payloads_when_applied > at_start, "payloads ran under the load");
+            assert!(started_after.load(Ordering::Relaxed) >= 1000);
+            assert_eq!(ran_after.load(Ordering::Relaxed), 0, "a transaction ran after the revocation");
+            assert_eq!(refused_after.load(Ordering::Relaxed), started_after.load(Ordering::Relaxed));
+            assert_eq!(payloads_at_end, payloads_when_applied, "a payload ran after the revocation");
+            // Restoring applies at once and the host serves.
+            assert_eq!(host_set_capabilities(0xFF, 0, 0, 0), Ok(()));
+            assert_eq!(on_sealed_thread(|| txn(1, 0x01, 1)), Ok(()));
+            return;
+        }
+        run_in_child("tests::test_revocation_applies_under_sustained_load_through_the_ffi", CHILD_ENV);
     }
 
     /// I-02 (decision B): a transaction on a thread that has not sealed

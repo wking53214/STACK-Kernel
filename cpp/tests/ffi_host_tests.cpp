@@ -19,6 +19,7 @@
 #include <vector>
 
 extern "C" {
+int stack_host_initialize();
 int stack_host_initialize_and_seal();
 int stack_host_set_capabilities(uint64_t, uint64_t, uint64_t, uint64_t);
 int stack_execute_governed_transaction(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t);
@@ -35,6 +36,7 @@ constexpr uint64_t kOneSecondNs = 1'000'000'000ULL;
 constexpr int kCompleted = 0;
 constexpr int kCapabilityDenied = -4;
 constexpr int kRateLimited = -5;
+constexpr int kCapabilityChangePending = -13;  // I-04: a capability change is waiting to apply
 
 // FFI governance policy (ffi_wrapper.cpp): bucket 1000, floor 100, largest
 // request 100, 1000 tokens per second, 16 domains.
@@ -361,4 +363,97 @@ TEST_CASE("FFI host: a failed transaction produces no success audit record", "[f
     REQUIRE(c.rate_limited == 1);
     REQUIRE(c.completed == 1);  // only the transaction that completed
     REQUIRE(c.other == 0);
+}
+
+TEST_CASE("FFI host: a revocation applies under sustained transaction load (R2-K-07)", "[ffi][I-04]") {
+    // Eight sealed executor threads run transactions back to back, each on its
+    // own domain, so at every instant some transaction is in flight. They ask
+    // for zero tokens: the bucket's rate limit (1000 tokens per second) would
+    // otherwise end the load within milliseconds, and a rate limited
+    // transaction leaves the host before the payload and the timer, which
+    // leaves the setter gaps to slip through. A zero-token transaction takes
+    // the whole path: capability check, floor check, timer arm, payload,
+    // debt. The
+    // capability change used to be refused whenever the global in-flight count
+    // was above zero, so it never applied (334 attempts with one executor,
+    // none in 2 s with eight). The change must now apply within a bound, a
+    // transaction that starts after it returned must not run its payload, and
+    // the host must serve again once the capability is restored.
+    constexpr int kExecutors = 8;
+    constexpr uint64_t kDomains[kExecutors] = {0, 9, 10, 11, 12, 13, 14, 15};
+    constexpr long kBoundMs = 1000;
+
+    REQUIRE(stack_host_initialize() == 0);
+    REQUIRE(stack_host_set_capabilities(0xFF, 0, 0, 0) == 0);
+
+    std::atomic<bool> stop{false};
+    std::atomic<bool> revoked{false};       // set after the change returned applied
+    std::atomic<int> sealed{0};
+    std::atomic<int> seal_failures{0};
+    std::atomic<uint64_t> attempts{0};
+    std::atomic<uint64_t> started_after_revoke{0};
+    std::atomic<uint64_t> completed_after_revoke{0};
+    std::atomic<uint64_t> refused_after_revoke{0};
+    std::vector<std::thread> executors;
+    for (int t = 0; t < kExecutors; ++t) {
+        executors.emplace_back([&, t] {
+            if (stack_host_initialize_and_seal() != 0) { seal_failures++; sealed++; return; }
+            sealed++;
+            while (!stop.load(std::memory_order_relaxed)) {
+                // Read before the call: a transaction that begins after the
+                // change returned applied is the one that must be refused.
+                const bool after = revoked.load(std::memory_order_acquire);
+                const int rc = Txn(kDomains[t], 0x01, 0);
+                attempts.fetch_add(1, std::memory_order_relaxed);
+                if (after) {
+                    started_after_revoke.fetch_add(1, std::memory_order_relaxed);
+                    if (rc == kCompleted) completed_after_revoke.fetch_add(1, std::memory_order_relaxed);
+                    if (rc == kCapabilityDenied) refused_after_revoke.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+    const auto wait_started = Clock::now();
+    while (sealed.load() < kExecutors && ElapsedMs(wait_started) < 5000) {}
+    // Let the load run until payloads are demonstrably executing.
+    const uint64_t payloads_at_start = stack_host_payload_count();
+    while (stack_host_payload_count() < payloads_at_start + 100 && ElapsedMs(wait_started) < 5000) {}
+
+    // The revocation, retried on -2 as the ABI documents, for at most the bound.
+    const auto t0 = Clock::now();
+    int rc = -2;
+    long tries = 0;
+    while (rc == -2 && ElapsedMs(t0) < kBoundMs) {
+        rc = stack_host_set_capabilities(0, 0, 0, 0);
+        ++tries;
+    }
+    const long applied_ms = ElapsedMs(t0);
+    const uint64_t payloads_when_applied = stack_host_payload_count();
+    revoked.store(true, std::memory_order_release);
+
+    // Keep the load running after the change so a late payload would show.
+    const auto after_start = Clock::now();
+    while (started_after_revoke.load() < 1000 && ElapsedMs(after_start) < 2000) {}
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& e : executors) e.join();
+    const uint64_t payloads_at_end = stack_host_payload_count();
+
+    REQUIRE(seal_failures.load() == 0);
+    INFO("revocation returned " << rc << " after " << applied_ms << " ms and " << tries << " calls ("
+         << attempts.load() << " transactions attempted)");
+    REQUIRE(rc == 0);
+    REQUIRE(applied_ms < kBoundMs);
+    REQUIRE(payloads_when_applied > payloads_at_start);  // payloads were running under the load
+    // Nothing that began after the change ran: not by return code, not by payload.
+    REQUIRE(started_after_revoke.load() >= 1000);
+    REQUIRE(completed_after_revoke.load() == 0);
+    REQUIRE(refused_after_revoke.load() == started_after_revoke.load());
+    REQUIRE(payloads_at_end == payloads_when_applied);
+
+    // Restoring applies at once (no change is left pending) and the host serves.
+    REQUIRE(stack_host_set_capabilities(0xFF, 0, 0, 0) == 0);
+    int served = 99;
+    REQUIRE(OnSealedThread([&] { served = Txn(1, 0x01, 1); }) == 0);
+    REQUIRE(served != kCapabilityChangePending);
+    REQUIRE(served == kCompleted);
 }

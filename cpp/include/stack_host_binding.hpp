@@ -51,6 +51,8 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <csignal>
@@ -348,7 +350,12 @@ enum class HostExecutionError : uint8_t {
     InvalidHardTimeout,
     // timer_settime failed on an already created timer. Distinct from
     // TimerInitializationFailed (timer_create). The payload does not run.
-    TimerArmFailed
+    TimerArmFailed,
+    // A capability change (a revocation, typically) is waiting for the
+    // transactions in flight to drain and new transactions are held out
+    // until it has applied or given up (I-04, R2-K-07). Fail closed: nothing
+    // ran, no token was consumed, nothing was charged. Retry.
+    CapabilityChangePending
 };
 
 template <
@@ -364,6 +371,11 @@ private:
     ComputeDebtTracker<MaxDomains> debt_tracker_{};
     CapabilityMask256 active_host_capabilities_{};
     std::atomic<uint32_t> transactions_in_flight_{0};  // Lifecycle guard
+    // Capability changes waiting for the in-flight transactions to drain
+    // (I-04). Written under capability_lock_; read lock free by the
+    // transaction guard, which notifies only when it is not zero.
+    std::atomic<uint32_t> pending_capability_changes_{0};
+    std::condition_variable capability_drained_{};
     mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
     mutable std::mutex capability_lock_{};  // Protects active_host_capabilities_
     SeccompAuditRing<8192> audit_ring_{};  // Layer 5: Governance audit trail (DEFECT #1 FIX)
@@ -399,6 +411,12 @@ public:
      * Set active capability mask. Guarded against mid-transaction changes.
      * Returns false if transaction is in flight, preventing capability mutation.
      *
+     * Try once: this is the original behaviour and it is unchanged. Under a
+     * steady stream of transactions some transaction is always in flight, so
+     * a caller that retries this can wait forever (R2-K-07). A caller that
+     * must make a change, a revocation above all, uses
+     * SetActiveCapabilitiesWithin().
+     *
      * Thread safety: Acquires capability_lock_ to ensure atomicity with
      * concurrent reads in ExecuteGovernedTransaction(). The in-flight check
      * runs under that lock, and ExecuteGovernedTransaction() raises the
@@ -412,6 +430,60 @@ public:
         }
         active_host_capabilities_ = mask;
         return true;
+    }
+
+    /**
+     * Set the active capability mask, waiting up to `max_wait` for the
+     * transactions in flight to drain (I-04, R2-K-07).
+     *
+     * While this call waits, the change is pending and NEW transactions are
+     * refused with CapabilityChangePending (fail closed: they do not wait,
+     * nothing runs, nothing is charged). Only transactions that were already
+     * in flight can still be running, so the set can only shrink and the
+     * change applies as soon as the last of them returns. It applies only
+     * with none in flight, so no transaction is ever running across it.
+     *
+     * Returns true when the mask was applied. After a true return, no
+     * transaction runs with the old mask. Returns false when the in-flight
+     * transactions did not drain within `max_wait` (a payload that does not
+     * return holds them; the deadline is cooperative): the mask is NOT
+     * applied, no change is left pending, and the host serves under the old
+     * mask again. The caller owns the decision to retry or to escalate.
+     * A `max_wait` of zero or less is try-once, the same as
+     * SetActiveCapabilities(), and never holds new transactions out.
+     *
+     * Several waiting changes are allowed. New transactions stay refused
+     * while any of them is waiting, and each applies when it sees the host
+     * drained, in the order the lock is won, so the last to apply is the mask
+     * that stays. A change that times out leaves the others waiting.
+     *
+     * Do not call this from inside a payload: the calling transaction is
+     * itself in flight, so the wait cannot succeed and runs to its bound.
+     */
+    [[nodiscard]] bool SetActiveCapabilitiesWithin(const CapabilityMask256& mask,
+                                                   std::chrono::nanoseconds max_wait) noexcept {
+        std::unique_lock<std::mutex> lock(capability_lock_);
+        if (transactions_in_flight_.load(std::memory_order_seq_cst) == 0) {
+            active_host_capabilities_ = mask;
+            return true;
+        }
+        if (max_wait <= std::chrono::nanoseconds::zero()) {
+            return false;
+        }
+        pending_capability_changes_.fetch_add(1, std::memory_order_seq_cst);
+        const bool drained = capability_drained_.wait_for(lock, max_wait, [this] {
+            return transactions_in_flight_.load(std::memory_order_seq_cst) == 0;
+        });
+        pending_capability_changes_.fetch_sub(1, std::memory_order_seq_cst);
+        if (drained) {
+            active_host_capabilities_ = mask;
+        }
+        return drained;
+    }
+
+    /** Number of capability changes currently waiting for in-flight transactions to drain. */
+    [[nodiscard]] uint32_t PendingCapabilityChanges() const noexcept {
+        return pending_capability_changes_.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] std::expected<void, HostExecutionError> InitializeAndSeal() noexcept {
@@ -471,20 +543,38 @@ public:
         // Lifecycle guard: mark the transaction in flight under the same lock, so
         // SetActiveCapabilities() (which checks the counter under capability_lock_)
         // sees either the old counter and no snapshot yet, or the raised counter.
+        //
+        // A pending capability change (I-04) holds new transactions out here,
+        // before anything is consumed: the in-flight set can then only shrink,
+        // so the change is guaranteed to apply once it drains.
         CapabilityMask256 snapshot_capabilities{};
         {
             std::lock_guard<std::mutex> lock(capability_lock_);
+            if (pending_capability_changes_.load(std::memory_order_seq_cst) > 0) [[unlikely]] {
+                return std::unexpected(HostExecutionError::CapabilityChangePending);
+            }
             snapshot_capabilities = active_host_capabilities_;
             transactions_in_flight_.fetch_add(1, std::memory_order_release);
         }
 
         // RAII cleanup: decrement on exit (pairs with the fetch_add above on every path)
+        // When a capability change is waiting (I-04), wake it. The decrement
+        // comes first and the waiter tests the counter under capability_lock_,
+        // so taking that lock before notifying cannot lose the wake-up.
         struct TransactionGuard {
             std::atomic<uint32_t>& counter;
+            const std::atomic<uint32_t>& pending;
+            std::mutex& lock;
+            std::condition_variable& drained;
             ~TransactionGuard() noexcept {
-                counter.fetch_sub(1, std::memory_order_release);
+                counter.fetch_sub(1, std::memory_order_seq_cst);
+                if (pending.load(std::memory_order_seq_cst) != 0) [[unlikely]] {
+                    std::lock_guard<std::mutex> lk(lock);
+                    drained.notify_all();
+                }
             }
-        } lifecycle_guard{transactions_in_flight_};
+        } lifecycle_guard{transactions_in_flight_, pending_capability_changes_, capability_lock_,
+                          capability_drained_};
 
         // Extract domain ID early for audit logging
         const uint64_t domain_id = token.GetContextId();

@@ -281,8 +281,9 @@ void ScenarioD() {
     Check(caps_ok, "capability updates returned only 0, -1 or -2");
     Check(caps_applied > 0, "at least one capability update was applied");
     // Transactions on a sealed thread after Ready: completed (0) or
-    // CapabilityValidationFailed (-4, before any setter got in). Never
-    // -1, -3, -11 or -12, and never RateLimited (200 tokens of 900).
+    // CapabilityValidationFailed (-4, before any setter got in) or, since
+    // I-04, CapabilityChangePending (-13, while a setter waits to apply).
+    // Never -1, -3, -11 or -12, and never RateLimited (200 tokens of 900).
     bool exec_ok = true;
     int completed = 0;
     for (int i = 0; i < kExec; ++i) {
@@ -290,10 +291,10 @@ void ScenarioD() {
         for (int c = 0; c < 16; ++c) {
             if (exec_hist[i][c] == 0) continue;
             if (c == 0) completed += exec_hist[i][c];
-            else if (c != 4) { exec_ok = false; std::printf("    exec[%d]: unexpected rc=-%d x%d\n", i, c, exec_hist[i][c]); }
+            else if (c != 4 && c != 13) { exec_ok = false; std::printf("    exec[%d]: unexpected rc=-%d x%d\n", i, c, exec_hist[i][c]); }
         }
     }
-    Check(exec_ok, "sealed executors returned only 0 or -4");
+    Check(exec_ok, "sealed executors returned only 0, -4 or -13");
     Check(completed > 0, "at least one transaction completed");
     Check(stack_ffi_testing_init_work_runs() == 1, "the one-time work still ran exactly once");
     Check(stack_ffi_testing_host_constructions() == 1, "the host is still one object");

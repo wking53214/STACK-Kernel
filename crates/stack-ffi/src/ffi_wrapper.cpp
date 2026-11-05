@@ -3,6 +3,7 @@
 #include <cstring>
 #include <ctime>
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <x86intrin.h>
 #include <fcntl.h>
@@ -48,6 +49,10 @@ static constexpr uint64_t kDefaultTicksPerToken = 2'100'000;  // 2.1 GHz at 1000
 static constexpr std::size_t kMaxDomains = 16;
 static constexpr uint64_t kTokensPerSecond = 1000;
 static constexpr uint64_t kCalibrationSpanNs = 10'000'000;  // 10 ms
+// How long stack_host_set_capabilities waits for the transactions in flight
+// to drain before giving up with -2 (I-04). A transaction is bounded by its
+// caller's hard timeout, which is cooperative, so the wait is bounded too.
+static constexpr uint64_t kCapabilityDrainNs = 500'000'000;  // 500 ms
 
 static_assert(static_cast<uint64_t>(kReservedTokens) + kMaxRequestTokens <= kMaxCapacity,
               "FFI host: Reserved + largest request must fit in the bucket (R2-K-01)");
@@ -238,16 +243,25 @@ int stack_host_initialize_and_seal() {
 // Set active capabilities mask (256-bit SIMD)
 // Returns 0 when the mask was applied, -1 when the host is not initialized
 // (not yet, or another thread is still initializing it), -2 when the change
-// was refused because a transaction is in flight (retry), and -3 when
-// initialization has failed (latched): a mask is never applied to a host
-// that did not finish initializing (R2-K-03).
+// was NOT applied because the transactions in flight did not drain within
+// kCapabilityDrainNs, and -3 when initialization has failed (latched): a mask
+// is never applied to a host that did not finish initializing (R2-K-03).
+//
+// Revocation (I-04, R2-K-07). The change used to be refused whenever any
+// transaction was in flight anywhere, so under steady load a revocation never
+// applied. Now the call holds NEW transactions out (they return -13, nothing
+// runs, nothing is consumed) while it waits for the ones already in flight,
+// at most kCapabilityDrainNs. 0 means the mask is applied and no transaction
+// is running or will run with the old one. -2 means it was not applied, no
+// change is left pending and the host serves under the old mask again; the
+// caller retries or escalates. Do not call it from a payload.
 int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t m3) {
     const int state = g_init_state.load(std::memory_order_acquire);
     if (state == kInitFailed) return -3;
     if (state != kInitReady) return -1;
 
     host::CapabilityMask256 caps(m0, m1, m2, m3);
-    return g_host->SetActiveCapabilities(caps) ? 0 : -2;
+    return g_host->SetActiveCapabilitiesWithin(caps, std::chrono::nanoseconds(kCapabilityDrainNs)) ? 0 : -2;
 }
 
 // Execute governed transaction under deadline and token budget.
@@ -269,6 +283,9 @@ int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t 
 //       stack_host_seal_current_thread first. Nothing ran, nothing was
 //       consumed, and the thread was not sealed as a side effect.
 //  -12  initialization failed (latched); nothing ran
+//  -13  a capability change is pending (I-04): it is waiting for the
+//       transactions in flight to drain and holds new ones out. Nothing ran,
+//       nothing was consumed. Retry.
 // This is the in-process path: cooperative deadline, not isolation. A
 // payload that must be stopped goes through stack_supervised_run.
 int stack_execute_governed_transaction(
@@ -311,6 +328,7 @@ int stack_execute_governed_transaction(
         case host::HostExecutionError::DebtCeilingExceeded: return -8;
         case host::HostExecutionError::InvalidHardTimeout: return -9;
         case host::HostExecutionError::TimerArmFailed: return -10;
+        case host::HostExecutionError::CapabilityChangePending: return -13;
         case host::HostExecutionError::None:
         case host::HostExecutionError::SeccompInitializationFailed:
         case host::HostExecutionError::SignalHandlerRegistrationFailed:
