@@ -303,18 +303,38 @@ TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][def
         std::atomic<bool> validator_done{false};
         std::atomic<bool> transaction_ok{false};
         std::atomic<bool> capabilities_changed{false};
+        // Latch (R2-K-14): the payload does not return until the changer has made
+        // its attempt, so the attempt is made while the transaction is provably in
+        // flight. Without it the transaction could finish between the payload's
+        // signal and the changer's call, and the attempt would (correctly) apply.
+        // The payload blocks on a condition variable (no CPU is burned while
+        // it waits) and the wait is bounded, so a changer that never attempts
+        // fails the assertions below instead of hanging the run. Because the
+        // payload now waits, the deadline budgets are generous (the nearby
+        // latch test uses the same): the old 100 000 ticks and 50 microseconds
+        // of CPU were sized for a payload that returned at once, and this test
+        // is about snapshot consistency, not about deadlines.
+        std::mutex attempt_mutex;
+        std::condition_variable attempt_cv;
+        bool change_attempted = false;
 
-        std::thread validator([&host, &token_validated, &validator_done, &transaction_ok]() {
+        std::thread validator([&host, &token_validated, &validator_done, &transaction_ok,
+                               &attempt_mutex, &attempt_cv, &change_attempted]() {
             SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
             auto res = host.ExecuteGovernedTransaction(
-                token, 5, 100'000ULL, 50'000ULL,
-                [&token_validated]() { token_validated.store(true, std::memory_order_release); }
+                token, 5, 100'000'000'000ULL, 1'000'000'000ULL,
+                [&token_validated, &attempt_mutex, &attempt_cv, &change_attempted]() {
+                    token_validated.store(true, std::memory_order_release);
+                    std::unique_lock<std::mutex> lk(attempt_mutex);
+                    attempt_cv.wait_for(lk, std::chrono::seconds(5), [&] { return change_attempted; });
+                }
             );
             transaction_ok.store(res.has_value(), std::memory_order_release);
             validator_done.store(true, std::memory_order_release);
         });
 
-        std::thread changer([&host, &token_validated, &validator_done, &capabilities_changed]() {
+        std::thread changer([&host, &token_validated, &validator_done, &capabilities_changed,
+                             &attempt_mutex, &attempt_cv, &change_attempted]() {
             while (!token_validated.load(std::memory_order_acquire)) {
                 if (validator_done.load(std::memory_order_acquire)) return;
                 std::this_thread::yield();
@@ -322,6 +342,11 @@ TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][def
             // Try to change capabilities during validation
             bool success = host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0));
             capabilities_changed.store(!success, std::memory_order_release);  // Should fail (txn in flight)
+            {
+                std::lock_guard<std::mutex> lk(attempt_mutex);
+                change_attempted = true;
+            }
+            attempt_cv.notify_all();
         });
 
         validator.join();
