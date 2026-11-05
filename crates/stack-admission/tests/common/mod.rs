@@ -29,7 +29,7 @@ use stack_receipt::{
 };
 use stack_trident::{
     seal_for, EnvelopeDraft, FileStore, GateOutcome, GatePosition, KeyMeta, KeyPurpose, KeyRing, Nonce, SecretKey,
-    TridentConfig,
+    StartError, StoreError, TridentConfig,
 };
 
 /// Start of test time (a fixed Unix ms value).
@@ -306,6 +306,8 @@ pub struct Builder {
     trust: TrustSet,
     executor: Option<Box<dyn Executor>>,
     receipt_log: Option<Box<dyn ReceiptLog>>,
+    replay: Option<PathBuf>,
+    uses: Option<PathBuf>,
 }
 
 impl Builder {
@@ -318,7 +320,29 @@ impl Builder {
             trust: issuer_trust(),
             executor: None,
             receipt_log: None,
+            replay: None,
+            uses: None,
         }
+    }
+
+    /// A kernel restarting after another one that last read `previous_now`:
+    /// the same wall clock carries on (the Trident refuses to start behind
+    /// its own store's high-water mark).
+    pub fn restarting(dir: &Path, previous_now: u64) -> Self {
+        Self::new(dir).clock(Arc::new(ManualClock::new(previous_now)))
+    }
+
+    /// Uses this replay store file instead of the one in the directory,
+    /// to share a store between two kernels.
+    pub fn replay_file(mut self, path: PathBuf) -> Self {
+        self.replay = Some(path);
+        self
+    }
+
+    /// Uses this one-time-use store file instead of the one in the directory.
+    pub fn uses_file(mut self, path: PathBuf) -> Self {
+        self.uses = Some(path);
+        self
     }
 
     pub fn clock(mut self, clock: Arc<ManualClock>) -> Self {
@@ -369,9 +393,12 @@ impl Builder {
                     .map_err(|e| BuildError::Recorder(e.into()))?,
             ),
         };
-        let replay_store = Box::new(FileStore::open(replay_path(&self.dir)).map_err(stack_trident::StartError::from)?);
+        let replay_store = Box::new(
+            FileStore::open(self.replay.clone().unwrap_or_else(|| replay_path(&self.dir)))
+                .map_err(stack_trident::StartError::from)?,
+        );
         let use_store = Box::new(
-            FileUseStore::open(uses_path(&self.dir), 1024).map_err(|_| BuildError::UseStoreNotDurable)?,
+            FileUseStore::open(self.uses.clone().unwrap_or_else(|| uses_path(&self.dir)), 1024).map_err(|_| BuildError::UseStoreNotDurable)?,
         );
         let parts = Parts {
             trident: self.trident,
@@ -395,6 +422,46 @@ impl Builder {
             policy: self.policy,
             next_seq: AtomicU64::new(1),
         })
+    }
+
+    /// As [`Builder::start`], for a kernel that starts right after another
+    /// one released its stores. The stores are advisory file locks, held by
+    /// the open file description; a supervised worker forked by ANY thread
+    /// of the old process (here, another test running a worker at that
+    /// instant) holds a copy of the descriptor until it closes its
+    /// descriptors or dies. So the lock can outlive the old kernel by
+    /// milliseconds. The new kernel fails closed ("locked") and this
+    /// retries, printing how long it waited whenever it had to.
+    pub fn start_after_release(self) -> Harness {
+        let skew = self.trident.max_future_skew_ms;
+        let (dir, clock, policy, trident, trust) =
+            (self.dir.clone(), Arc::clone(&self.clock), self.policy.clone(), self.trident.clone(), self.trust.clone());
+        let first = self.build();
+        let h = match first {
+            Ok(h) => h,
+            Err(e) => {
+                let begun = std::time::Instant::now();
+                let mut last = e;
+                loop {
+                    assert!(
+                        matches!(last, BuildError::Trident(StartError::Store(StoreError::Locked { .. })) | BuildError::Recorder(_) | BuildError::UseStoreNotDurable),
+                        "the restart failed for a reason other than a lock: {last}"
+                    );
+                    assert!(begun.elapsed() < std::time::Duration::from_secs(10), "stores still locked after 10 s: {last}");
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    let retry = Builder::new(&dir).clock(Arc::clone(&clock)).policy(policy.clone()).trident(trident.clone()).trust(trust.clone());
+                    match retry.build() {
+                        Ok(h) => {
+                            println!("observed: stores were locked for {:?} after the previous kernel was dropped", begun.elapsed());
+                            break h;
+                        }
+                        Err(e) => last = e,
+                    }
+                }
+            }
+        };
+        h.clock.advance(skew + 1);
+        h
     }
 
     /// Builds the kernel and steps the clock past the Trident's start-up
@@ -450,6 +517,15 @@ impl Harness {
     /// `outcome`.
     pub fn envelope_for(&self, payload: Value, audience: &str, outcome: GateOutcome) -> Vec<u8> {
         let seq = self.next_seq();
+        self.envelope_with(payload, audience, outcome, seq)
+    }
+
+    /// An envelope carrying exactly sender sequence `seq` (and its nonce).
+    pub fn envelope_for_seq(&self, payload: Value, seq: u64) -> Vec<u8> {
+        self.envelope_with(payload, KERNEL, GateOutcome::Pass, seq)
+    }
+
+    fn envelope_with(&self, payload: Value, audience: &str, outcome: GateOutcome, seq: u64) -> Vec<u8> {
         let env = seal_for(
             EnvelopeDraft {
                 sequence: seq,
@@ -529,6 +605,12 @@ impl Harness {
         assert!(!refused.recorded);
         assert_eq!(refused.execution_id, None);
     }
+}
+
+/// The clock reading of a kernel started with [`Builder::start`] and not
+/// stepped since: what a restarted kernel's clock must at least show.
+pub fn started_now() -> u64 {
+    T0 + TridentConfig::production(KERNEL).max_future_skew_ms + 1
 }
 
 /// A nonce from a sequence number.
