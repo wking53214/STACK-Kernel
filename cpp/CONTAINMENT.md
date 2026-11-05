@@ -302,3 +302,29 @@ time into a 50 ms budget (idle: 50 to 54 ms). R2-K-16: the cooperative
 deadline is therefore a lower bound on how long a payload may run, not a tight
 one. The cause inside the kernel's CPU-timer delivery was not investigated.
 The supervised executor's wall-clock kill is the bounded path.
+
+## CI parity: tests run as an ordinary user
+
+CI (`ubuntu-latest`, a non-root runner user, passwordless sudo) and local
+development both run the tests as an ordinary user. Only the two `needs-root`
+cases run as root (see above). A machine where everything runs as root hides
+failures that CI will show; the first CI run of the pid-reuse and host-binary
+tests failed for exactly that reason. The environment each test depends on:
+
+| Test or area | Depends on |
+| --- | --- |
+| `STACKWorkerReapPidReuse` (two `[pid-reuse]` cases) | Root or `CAP_SYS_ADMIN` to write `/proc/sys/kernel/ns_last_pid`; a pidfd-capable kernel (5.3 or later). Run under `sudo` in CI. Fails loudly, never skips, without the capability. |
+| `STACKWorkerExec`, `STACKWorkerImage`, `STACKWorkerReap` (the rest), `STACKFfiSupervised`, the Rust `stack-ffi` and `stack-admission` governed tests | The worker image is built by the same user with a umask that leaves it free of group and other write (umask 022, as on the CI runner): the image check refuses a group-writable worker. A build under umask 002 makes every worker spawn fail (`SpawnFailed`). The image and its directory must be owned by root or the current euid. `memfd_create` and permission to exec a sealed memfd (the pinned digest path). |
+| Image refusal tests (symlink, setuid, setgid, group- or world-writable, non-pinned program) | `openat2` with `RESOLVE_NO_SYMLINKS` for a symlink in a directory component; where it is absent only a final-component symlink is refused. A fixture directory under `/tmp` that the current user can create. They use no host binary: the "another program" fixture is a copy of the test binary (`/proc/self/exe`), regular, mode 0755, owned by the current euid. Never name `/usr/bin/touch`, `/bin/true` and the like: on some images they are symlinks to a multicall binary. |
+| `STACKSupervisedExec`, `STACKWorkerExec` | `seccomp` strict filter support (`PR_SET_SECCOMP`, `SECCOMP_RET_KILL_PROCESS`); `prctl(PR_SET_NO_NEW_PRIVS)`; `/proc` mounted (`/proc/self/fd`, `/proc/<pid>/stat`). |
+| `STACKSupervisedFallback` | A kernel with `pidfd_open` for the pidfd case (the case prints "not run on this kernel" and the fallback case still runs). |
+| `STACKTsan_*` | `libtsan` (shipped with g++); a kernel and address-space layout that allow ThreadSanitizer. |
+| `STACKFfiSupervised` timing cases | Wall-clock deadlines of 40 to 300 ms; a heavily loaded runner can approach the stated slack. |
+| Rust workspace (`cargo test --workspace --locked`, ANC crates excluded) | The C++ worker is compiled by `crates/stack-ffi/build.rs` with `g++` on the PATH; `sha256sum` (coreutils) for the digest test; a writable `std::env::temp_dir()`. |
+
+To reproduce CI locally: create a non-root user, build and test as that user
+with `umask 022`, run `ctest -LE needs-root` and
+`cargo +1.99.0 test --workspace --locked --exclude stack-anc-harness
+--exclude stack-anc-ceiling --exclude stack-anc-adaptive
+--exclude stack-anc-pipeline`, then run `sudo -E env PATH=$PATH ctest -L
+needs-root`.
