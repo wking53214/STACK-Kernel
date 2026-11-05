@@ -1,0 +1,1076 @@
+{
+  "commit": "Step 2 working tree, rules.rs sha256 9282f00fafbd23b4",
+  "config": {
+    "binary_allowed": false,
+    "deny_patterns": [
+      "TROJAN",
+      "EXFIL-TOKEN"
+    ],
+    "deny_through_spacing": true,
+    "harmful_build": true,
+    "injection_phrases": true,
+    "lookback_head_bytes": 512,
+    "max_control_percent": 5,
+    "max_whole_bytes": 1048576
+  },
+  "corpus": {
+    "files": {
+      "benign": {
+        "rows": 49,
+        "sha256": "621d3397275c89291c91f8aaa2b41bcf4e8504142032fdb12d5eb0e0e2ab1a2b"
+      },
+      "dev": {
+        "rows": 18,
+        "sha256": "00bccbed1ce44b9944b4620282f81a58d9a20cf4fdacb80cea53c9f670d20ff9"
+      },
+      "encodings": {
+        "rows": 6,
+        "sha256": "752322b28151ed0e60b5bc50891c168480c6bcd0a30a08920c25085368053a26"
+      },
+      "heldout_v1": {
+        "rows": 14,
+        "sha256": "39ed6e3afeea426c44895a43a42f9f801b30cefa24750f18fa1e88fd25d5f083"
+      },
+      "paraphrases": {
+        "rows": 8,
+        "sha256": "be28286c75a72154ebd7ab1c9ae4c29574f0f9ad9c73f5c20d4e5f0f071cd234"
+      },
+      "race02_evasions": {
+        "rows": 17,
+        "sha256": "eddba90d1a52f7463cc379665a3ba9f5f4fb0589eaf039042d7c8a69fcf69740"
+      },
+      "red_team": {
+        "rows": 18,
+        "sha256": "96f1e72072f3d40ca336cba3962ff5220813ce54fa69c0884108329538302fbc"
+      },
+      "split": {
+        "rows": 4,
+        "sha256": "602bf29c32f22708b113a930e76cf912dd3dd6615313047011d0b39c1a7c46df"
+      }
+    },
+    "sha256": "41a23169aae651c773478f41fa33587f9e6d8772f6f8954f836a21c62197a42b"
+  },
+  "held_out": {
+    "file": "heldout_2026-11-05.jsonl",
+    "manifest_match": true,
+    "manifest_sha256": "b2869df2e62456d23fd4e597e6762abaf03531f6fb9393f5375abfd4baa7b321",
+    "results": {
+      "false_negatives": [
+        "heldout_2026-11-05/ho-001",
+        "heldout_2026-11-05/ho-019",
+        "heldout_2026-11-05/ho-020",
+        "heldout_2026-11-05/ho-056",
+        "heldout_2026-11-05/ho-057",
+        "heldout_2026-11-05/ho-058",
+        "heldout_2026-11-05/ho-059",
+        "heldout_2026-11-05/ho-060",
+        "heldout_2026-11-05/ho-061",
+        "heldout_2026-11-05/ho-062",
+        "heldout_2026-11-05/ho-063",
+        "heldout_2026-11-05/ho-064",
+        "heldout_2026-11-05/ho-065",
+        "heldout_2026-11-05/ho-066",
+        "heldout_2026-11-05/ho-067",
+        "heldout_2026-11-05/ho-068",
+        "heldout_2026-11-05/ho-069",
+        "heldout_2026-11-05/ho-070",
+        "heldout_2026-11-05/ho-076"
+      ],
+      "false_positives": [
+        "heldout_2026-11-05/ho-107",
+        "heldout_2026-11-05/ho-122",
+        "heldout_2026-11-05/ho-123",
+        "heldout_2026-11-05/ho-124",
+        "heldout_2026-11-05/ho-125",
+        "heldout_2026-11-05/ho-126",
+        "heldout_2026-11-05/ho-129",
+        "heldout_2026-11-05/ho-131",
+        "heldout_2026-11-05/ho-137",
+        "heldout_2026-11-05/ho-142"
+      ],
+      "families": {
+        "benign_general": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": [
+              0.0,
+              0.1246
+            ],
+            "k": 0,
+            "n": 27,
+            "rate": 0.0
+          },
+          "fn": 0,
+          "fp": 0,
+          "recall": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "tn": 27,
+          "tp": 0
+        },
+        "benign_near_miss": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": [
+              0.1348,
+              0.3853
+            ],
+            "k": 10,
+            "n": 42,
+            "rate": 0.2381
+          },
+          "fn": 0,
+          "fp": 10,
+          "recall": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "tn": 32,
+          "tp": 0
+        },
+        "encoding": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "fn": 7,
+          "fp": 0,
+          "recall": {
+            "ci95": [
+              0.0,
+              0.3543
+            ],
+            "k": 0,
+            "n": 7,
+            "rate": 0.0
+          },
+          "tn": 0,
+          "tp": 0
+        },
+        "harmful_build": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "fn": 1,
+          "fp": 0,
+          "recall": {
+            "ci95": [
+              0.4365,
+              0.9699
+            ],
+            "k": 5,
+            "n": 6,
+            "rate": 0.8333
+          },
+          "tn": 0,
+          "tp": 5
+        },
+        "homoglyph": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "fn": 0,
+          "fp": 0,
+          "recall": {
+            "ci95": [
+              0.7575,
+              1.0
+            ],
+            "k": 12,
+            "n": 12,
+            "rate": 1.0
+          },
+          "tn": 0,
+          "tp": 12
+        },
+        "invisible_chars": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "fn": 0,
+          "fp": 0,
+          "recall": {
+            "ci95": [
+              0.7412,
+              1.0
+            ],
+            "k": 11,
+            "n": 11,
+            "rate": 1.0
+          },
+          "tn": 0,
+          "tp": 11
+        },
+        "paraphrase": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "fn": 8,
+          "fp": 0,
+          "recall": {
+            "ci95": [
+              0.0,
+              0.3244
+            ],
+            "k": 0,
+            "n": 8,
+            "rate": 0.0
+          },
+          "tn": 0,
+          "tp": 0
+        },
+        "plain_injection": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "fn": 1,
+          "fp": 0,
+          "recall": {
+            "ci95": [
+              0.6669,
+              0.9863
+            ],
+            "k": 12,
+            "n": 13,
+            "rate": 0.9231
+          },
+          "tn": 0,
+          "tp": 12
+        },
+        "separator": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "fn": 0,
+          "fp": 0,
+          "recall": {
+            "ci95": [
+              0.7225,
+              1.0
+            ],
+            "k": 10,
+            "n": 10,
+            "rate": 1.0
+          },
+          "tn": 0,
+          "tp": 10
+        },
+        "split_phrase": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": null,
+            "k": 0,
+            "n": 0,
+            "rate": null
+          },
+          "fn": 2,
+          "fp": 0,
+          "recall": {
+            "ci95": [
+              0.4526,
+              0.9368
+            ],
+            "k": 7,
+            "n": 9,
+            "rate": 0.7778
+          },
+          "tn": 0,
+          "tp": 7
+        }
+      },
+      "rows": 145,
+      "sets": {
+        "heldout_2026-11-05": {
+          "benign_suspicious": 0,
+          "false_positive_rate": {
+            "ci95": [
+              0.0807,
+              0.2466
+            ],
+            "k": 10,
+            "n": 69,
+            "rate": 0.1449
+          },
+          "fn": 19,
+          "fp": 10,
+          "recall": {
+            "ci95": [
+              0.6422,
+              0.8337
+            ],
+            "k": 57,
+            "n": 76,
+            "rate": 0.75
+          },
+          "tn": 59,
+          "tp": 57
+        }
+      },
+      "split_phrase_by_cuts": {
+        "1": {
+          "caught": 4,
+          "rows": 4
+        },
+        "2": {
+          "caught": 2,
+          "rows": 2
+        },
+        "3": {
+          "caught": 1,
+          "rows": 1
+        },
+        "4": {
+          "caught": 0,
+          "rows": 1
+        },
+        "5": {
+          "caught": 0,
+          "rows": 1
+        }
+      },
+      "totals": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": [
+            0.0807,
+            0.2466
+          ],
+          "k": 10,
+          "n": 69,
+          "rate": 0.1449
+        },
+        "fn": 19,
+        "fp": 10,
+        "recall": {
+          "ci95": [
+            0.6422,
+            0.8337
+          ],
+          "k": 57,
+          "n": 76,
+          "rate": 0.75
+        },
+        "tn": 59,
+        "tp": 57
+      },
+      "unicode_class_benign": {
+        "cyrillic": {
+          "flagged": 0,
+          "rows": 1
+        },
+        "fullwidth_form": {
+          "flagged": 0,
+          "rows": 1
+        },
+        "greek": {
+          "flagged": 0,
+          "rows": 1
+        },
+        "latin_accented": {
+          "flagged": 0,
+          "rows": 1
+        },
+        "other_non_ascii": {
+          "flagged": 0,
+          "rows": 8
+        },
+        "single_letter_spelling": {
+          "flagged": 0,
+          "rows": 1
+        },
+        "underscore": {
+          "flagged": 1,
+          "rows": 3
+        },
+        "variation_selector": {
+          "flagged": 0,
+          "rows": 1
+        },
+        "zero_width_format": {
+          "flagged": 0,
+          "rows": 1
+        }
+      },
+      "unicode_class_hostile": {
+        "combining_mark": {
+          "caught": 1,
+          "rows": 1
+        },
+        "cyrillic": {
+          "caught": 3,
+          "rows": 3
+        },
+        "enclosed_alphanumeric": {
+          "caught": 1,
+          "rows": 1
+        },
+        "fullwidth_form": {
+          "caught": 2,
+          "rows": 2
+        },
+        "greek": {
+          "caught": 1,
+          "rows": 1
+        },
+        "hangul_filler": {
+          "caught": 2,
+          "rows": 2
+        },
+        "html_entity": {
+          "caught": 0,
+          "rows": 2
+        },
+        "interlinear_annotation": {
+          "caught": 1,
+          "rows": 1
+        },
+        "latin_accented": {
+          "caught": 1,
+          "rows": 1
+        },
+        "math_alphanumeric": {
+          "caught": 3,
+          "rows": 3
+        },
+        "percent_escape": {
+          "caught": 0,
+          "rows": 1
+        },
+        "single_letter_spelling": {
+          "caught": 4,
+          "rows": 4
+        },
+        "tag_character": {
+          "caught": 2,
+          "rows": 2
+        },
+        "underscore": {
+          "caught": 4,
+          "rows": 4
+        },
+        "variation_selector": {
+          "caught": 2,
+          "rows": 2
+        },
+        "zero_width_format": {
+          "caught": 4,
+          "rows": 4
+        }
+      }
+    },
+    "rows": 145,
+    "sha256": "b2869df2e62456d23fd4e597e6762abaf03531f6fb9393f5375abfd4baa7b321"
+  },
+  "results": {
+    "false_negatives": [
+      "encodings/enc-003",
+      "encodings/enc-004",
+      "encodings/enc-005",
+      "encodings/enc-006",
+      "heldout_v1/heldout-v1-013",
+      "heldout_v1/heldout-v1-014",
+      "paraphrases/para-001",
+      "paraphrases/para-002",
+      "paraphrases/para-003",
+      "paraphrases/para-004",
+      "paraphrases/para-005",
+      "paraphrases/para-006",
+      "paraphrases/para-007",
+      "paraphrases/para-008",
+      "race02_evasions/race02-015",
+      "race02_evasions/race02-016",
+      "split/split-004"
+    ],
+    "false_positives": [
+      "benign/benign-016",
+      "benign/benign-045",
+      "benign/benign-046",
+      "benign/benign-047",
+      "benign/benign-048",
+      "benign/benign-049"
+    ],
+    "families": {
+      "benign_general": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": [
+            0.0,
+            0.2775
+          ],
+          "k": 0,
+          "n": 10,
+          "rate": 0.0
+        },
+        "fn": 0,
+        "fp": 0,
+        "recall": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "tn": 10,
+        "tp": 0
+      },
+      "benign_near_miss": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": [
+            0.0706,
+            0.2907
+          ],
+          "k": 6,
+          "n": 40,
+          "rate": 0.15
+        },
+        "fn": 0,
+        "fp": 6,
+        "recall": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "tn": 34,
+        "tp": 0
+      },
+      "deny_marker": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 0,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.5655,
+            1.0
+          ],
+          "k": 5,
+          "n": 5,
+          "rate": 1.0
+        },
+        "tn": 0,
+        "tp": 5
+      },
+      "encoding": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 6,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.0,
+            0.3903
+          ],
+          "k": 0,
+          "n": 6,
+          "rate": 0.0
+        },
+        "tn": 0,
+        "tp": 0
+      },
+      "harmful_build": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 0,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.7009,
+            1.0
+          ],
+          "k": 9,
+          "n": 9,
+          "rate": 1.0
+        },
+        "tn": 0,
+        "tp": 9
+      },
+      "homoglyph": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 0,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.6457,
+            1.0
+          ],
+          "k": 7,
+          "n": 7,
+          "rate": 1.0
+        },
+        "tn": 0,
+        "tp": 7
+      },
+      "invisible_chars": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 0,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.7575,
+            1.0
+          ],
+          "k": 12,
+          "n": 12,
+          "rate": 1.0
+        },
+        "tn": 0,
+        "tp": 12
+      },
+      "paraphrase": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 8,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.0,
+            0.3244
+          ],
+          "k": 0,
+          "n": 8,
+          "rate": 0.0
+        },
+        "tn": 0,
+        "tp": 0
+      },
+      "plain_injection": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 2,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.7804,
+            0.9809
+          ],
+          "k": 27,
+          "n": 29,
+          "rate": 0.931
+        },
+        "tn": 0,
+        "tp": 27
+      },
+      "separator": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 0,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.5101,
+            1.0
+          ],
+          "k": 4,
+          "n": 4,
+          "rate": 1.0
+        },
+        "tn": 0,
+        "tp": 4
+      },
+      "split_phrase": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 1,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.3006,
+            0.9544
+          ],
+          "k": 3,
+          "n": 4,
+          "rate": 0.75
+        },
+        "tn": 0,
+        "tp": 3
+      }
+    },
+    "rows": 134,
+    "sets": {
+      "benign": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": [
+            0.0573,
+            0.2424
+          ],
+          "k": 6,
+          "n": 49,
+          "rate": 0.1224
+        },
+        "fn": 0,
+        "fp": 6,
+        "recall": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "tn": 43,
+        "tp": 0
+      },
+      "dev": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 0,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.8241,
+            1.0
+          ],
+          "k": 18,
+          "n": 18,
+          "rate": 1.0
+        },
+        "tn": 0,
+        "tp": 18
+      },
+      "encodings": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 4,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.0968,
+            0.7
+          ],
+          "k": 2,
+          "n": 6,
+          "rate": 0.3333
+        },
+        "tn": 0,
+        "tp": 2
+      },
+      "heldout_v1": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 2,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.6006,
+            0.9599
+          ],
+          "k": 12,
+          "n": 14,
+          "rate": 0.8571
+        },
+        "tn": 0,
+        "tp": 12
+      },
+      "paraphrases": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 8,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.0,
+            0.3244
+          ],
+          "k": 0,
+          "n": 8,
+          "rate": 0.0
+        },
+        "tn": 0,
+        "tp": 0
+      },
+      "race02_evasions": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": [
+            0.0,
+            0.7935
+          ],
+          "k": 0,
+          "n": 1,
+          "rate": 0.0
+        },
+        "fn": 2,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.6398,
+            0.965
+          ],
+          "k": 14,
+          "n": 16,
+          "rate": 0.875
+        },
+        "tn": 1,
+        "tp": 14
+      },
+      "red_team": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 0,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.8241,
+            1.0
+          ],
+          "k": 18,
+          "n": 18,
+          "rate": 1.0
+        },
+        "tn": 0,
+        "tp": 18
+      },
+      "split": {
+        "benign_suspicious": 0,
+        "false_positive_rate": {
+          "ci95": null,
+          "k": 0,
+          "n": 0,
+          "rate": null
+        },
+        "fn": 1,
+        "fp": 0,
+        "recall": {
+          "ci95": [
+            0.3006,
+            0.9544
+          ],
+          "k": 3,
+          "n": 4,
+          "rate": 0.75
+        },
+        "tn": 0,
+        "tp": 3
+      }
+    },
+    "split_phrase_by_cuts": {
+      "1": {
+        "caught": 1,
+        "rows": 1
+      },
+      "2": {
+        "caught": 1,
+        "rows": 1
+      },
+      "3": {
+        "caught": 1,
+        "rows": 1
+      },
+      "4": {
+        "caught": 0,
+        "rows": 1
+      }
+    },
+    "totals": {
+      "benign_suspicious": 0,
+      "false_positive_rate": {
+        "ci95": [
+          0.0562,
+          0.238
+        ],
+        "k": 6,
+        "n": 50,
+        "rate": 0.12
+      },
+      "fn": 17,
+      "fp": 6,
+      "recall": {
+        "ci95": [
+          0.6996,
+          0.8696
+        ],
+        "k": 67,
+        "n": 84,
+        "rate": 0.7976
+      },
+      "tn": 44,
+      "tp": 67
+    },
+    "unicode_class_benign": {
+      "latin_accented": {
+        "flagged": 0,
+        "rows": 1
+      },
+      "other_non_ascii": {
+        "flagged": 0,
+        "rows": 2
+      }
+    },
+    "unicode_class_hostile": {
+      "bidi_control": {
+        "caught": 1,
+        "rows": 1
+      },
+      "combining_mark": {
+        "caught": 1,
+        "rows": 1
+      },
+      "control_char": {
+        "caught": 1,
+        "rows": 1
+      },
+      "cyrillic": {
+        "caught": 3,
+        "rows": 3
+      },
+      "fullwidth_form": {
+        "caught": 2,
+        "rows": 2
+      },
+      "hangul_filler": {
+        "caught": 1,
+        "rows": 1
+      },
+      "html_entity": {
+        "caught": 0,
+        "rows": 1
+      },
+      "interlinear_annotation": {
+        "caught": 1,
+        "rows": 1
+      },
+      "latin_accented": {
+        "caught": 0,
+        "rows": 1
+      },
+      "math_alphanumeric": {
+        "caught": 1,
+        "rows": 1
+      },
+      "other_non_ascii": {
+        "caught": 2,
+        "rows": 2
+      },
+      "percent_escape": {
+        "caught": 0,
+        "rows": 1
+      },
+      "single_letter_spelling": {
+        "caught": 5,
+        "rows": 5
+      },
+      "tag_character": {
+        "caught": 1,
+        "rows": 1
+      },
+      "underscore": {
+        "caught": 3,
+        "rows": 3
+      },
+      "variation_selector": {
+        "caught": 2,
+        "rows": 2
+      },
+      "zero_width_format": {
+        "caught": 5,
+        "rows": 5
+      }
+    }
+  },
+  "schema": 1,
+  "tool": "rules_eval"
+}

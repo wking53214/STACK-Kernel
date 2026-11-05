@@ -11,7 +11,7 @@ flags; they say nothing about unseen text.
 ```
 eval/
   corpus/*.jsonl            development sets, one file per set; free to run
-  heldout_sealed/*.jsonl    sealed held-out files (see PROCESS.md)
+  heldout_sealed/*.jsonl    sealed held-out files (see PROCESS.md); empty now
   heldout_manifest.json     SHA-256 of each held-out file, committed
   results/                  logged runs: commit, corpus hash, full numbers
   PROCESS.md                the held-out protocol
@@ -36,6 +36,7 @@ Corpus files:
 | `paraphrases.jsonl`, `encodings.jsonl` | recorded gaps |
 | `benign.jsonl` | 49 ordinary and near-miss texts |
 | `split.jsonl` | a phrase cut over 2 to 5 parts |
+| `heldout_2026-11-05.jsonl` | 76 hostile and 69 benign rows authored 2026-11-05 before any rule change; run once before and once after Step 2, then retired into dev |
 | `race02_evasions.jsonl` | evasions found by the RACE-02 probe (R2-E-01, R2-E-02) and the "secret garden" false alarm |
 
 ## Reproduce
@@ -43,7 +44,7 @@ Corpus files:
 ```text
 cargo run -p stack-trident --example rules_eval -- crates/stack-trident/eval/corpus
 cargo run -p stack-trident --example rules_eval -- crates/stack-trident/eval/corpus \
-  --held-out crates/stack-trident/eval/heldout_sealed/<file>.jsonl --commit "$(git rev-parse --short HEAD)"
+  --held-out crates/stack-trident/eval/heldout_sealed/<file>.jsonl   # only when a sealed file exists --commit "$(git rev-parse --short HEAD)"
 cargo test -p stack-trident --locked --test puzzle_eval
 ```
 

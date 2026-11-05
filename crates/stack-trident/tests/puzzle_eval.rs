@@ -1,9 +1,10 @@
 //! The evaluation harness reproduces the recorded numbers exactly, so a
 //! change to the rules or to a corpus file cannot move a number silently.
 //!
-//! The sealed held-out file is never run here: running it against changed
-//! rules would spend it. This test only checks its hash against the
-//! committed manifest. See `eval/PROCESS.md`.
+//! A sealed held-out file is never run here: running it against changed
+//! rules would spend it. This test only checks hashes against the committed
+//! manifest. The one held-out file so far is retired and is now a
+//! development set. See `eval/PROCESS.md`.
 
 #![allow(clippy::unwrap_used)]
 
@@ -42,16 +43,22 @@ fn tally(report: &Value, set: &str) -> Counts {
 }
 
 /// Per corpus file: (true positives, false negatives, false positives, true negatives).
-/// These are the rules as they stood before any change (dev 18/18, held-out
-/// 12/14, red-team 18/18, paraphrases 0/8, encodings 0/6, benign 6/49), plus
-/// the files added with the harness.
+///
+/// Before Step 2 (rules as at commit 67bdf31): dev 18/18, held-out v1 12/14,
+/// red-team 18/18, paraphrases 0/8, encodings 0/6, benign 6/49 false
+/// positives, `race02_evasions` (1, 15, 1, 0), and the 2026-11-05 held-out
+/// file (31, 45, 12, 57). Step 2 changed three lines of this table: encodings
+/// (0 to 2 caught), `race02_evasions` (1 to 14 caught, the secret-garden false
+/// positive gone) and the held-out file (31 to 57 caught, 12 to 10 false
+/// positives, with one new false positive). Everything else is unchanged.
 const EXPECTED: &[(&str, Counts)] = &[
     ("benign", (0, 0, 6, 43)),
     ("dev", (18, 0, 0, 0)),
-    ("encodings", (0, 6, 0, 0)),
+    ("encodings", (2, 4, 0, 0)),
+    ("heldout_2026-11-05", (57, 19, 10, 59)),
     ("heldout_v1", (12, 2, 0, 0)),
     ("paraphrases", (0, 8, 0, 0)),
-    ("race02_evasions", (1, 15, 1, 0)),
+    ("race02_evasions", (14, 2, 0, 1)),
     ("red_team", (18, 0, 0, 0)),
     ("split", (3, 1, 0, 0)),
 ];
@@ -100,7 +107,7 @@ fn every_row_is_well_formed_and_every_required_family_is_present() {
 }
 
 #[test]
-fn the_sealed_held_out_file_matches_its_committed_manifest() {
+fn every_held_out_file_matches_its_committed_manifest() {
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(eval_dir().join("heldout_manifest.json")).unwrap()).unwrap();
     let files = manifest["files"].as_array().unwrap();
