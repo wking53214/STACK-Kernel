@@ -85,7 +85,7 @@ enforcement layer run a re-check after each change
 (`revocation_epoch::*`). The key's validity window is not re-applied by
 `recheck`. Acting on a failed re-check (refusing before spawn, asking a
 running worker to stop) is the admission layer's job, see the
-`stack-admission` README.
+`stack-admission` rustdoc (`CancellableExecutor`, `Admission::enforce_revocations`).
 
 ## 3. Wire format, `stack-capability/1`
 
