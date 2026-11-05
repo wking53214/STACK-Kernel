@@ -359,14 +359,15 @@ pub fn audit_push(event_type: u8, context_id: u64, tokens: u32) {
     }
 }
 
-/// Safe wrapper for audit ring read
+/// Safe wrapper for audit ring read. `Some` for a slot that holds a record,
+/// `None` for a slot that was never written (R2-K-09: this was inverted).
 pub fn audit_read_slot(index: u64) -> Option<AuditRecord> {
     unsafe {
         let mut timestamp = 0u64;
         let mut context_id = 0u64;
         let mut tokens = 0u32;
         
-        if stack_audit_read_slot(index, &mut timestamp, &mut context_id, &mut tokens) != 0 {
+        if stack_audit_read_slot(index, &mut timestamp, &mut context_id, &mut tokens) == 0 {
             Some(AuditRecord {
                 timestamp_ticks: timestamp,
                 context_id,
@@ -1000,6 +1001,26 @@ mod tests {
             return;
         }
         run_in_child("tests::test_revocation_applies_under_sustained_load_through_the_ffi", CHILD_ENV);
+    }
+
+    /// R2-K-09 (step 5): audit_read_slot reported the opposite of the C code.
+    /// The C function returns 0 for a slot that holds a record, and the
+    /// wrapper tested `!= 0`, so a written slot read as None and an empty
+    /// slot as Some(zeros). Only this test pushes to the free-standing ring.
+    #[test]
+    fn test_audit_read_slot_returns_the_record_of_a_written_slot() {
+        const CONTEXT: u64 = 0x00A1_1D17;
+        const SLOTS: u64 = 1024; // SeccompAuditRing<1024> in ffi_wrapper.cpp
+        // Nothing written yet: every slot is empty.
+        let before = (0..SLOTS).filter(|&i| audit_read_slot(i).is_some()).count();
+        assert_eq!(before, 0, "an empty slot must read as None");
+        audit_push(0, CONTEXT, 5);
+        let written: std::vec::Vec<AuditRecord> =
+            (0..SLOTS).filter_map(audit_read_slot).collect();
+        assert_eq!(written.len(), 1, "exactly the one written slot reads as Some");
+        assert_eq!(written[0].context_id, CONTEXT);
+        assert_eq!(written[0].tokens_consumed, 5);
+        assert!(written[0].timestamp_ticks > 0);
     }
 
     /// I-02 (decision B): a transaction on a thread that has not sealed
