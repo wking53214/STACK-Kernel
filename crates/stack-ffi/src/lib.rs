@@ -148,7 +148,13 @@ pub fn host_initialize_and_seal() -> Result<(), HostError> {
 /// for the ones in flight to drain, so it applies under steady load. If they
 /// do not drain in time it returns `TransactionInFlight`: the mask was NOT
 /// applied, nothing is left pending, and the caller retries or escalates. Do
-/// not call it from inside a payload. It needs a completed
+/// not call it from inside a payload.
+///
+/// Governed supervised workers in flight are TERMINATED, not waited for
+/// (R2-K-24): each is killed through its pidfd and its run ends as
+/// [`SupervisedOutcome::Terminated`], so a revocation applies within about a
+/// millisecond of the workers being reaped rather than after their deadline.
+/// In-process transactions can only be waited for. It needs a completed
 /// initialization: `NotInitialized` before (or during) it, and
 /// `InitializationFailed` for good once it has failed.
 pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> Result<(), CapabilityError> {
@@ -287,6 +293,12 @@ pub enum SupervisedOutcome {
     /// still be running. Never a success. `supervised_unconfirmed_count`
     /// says how many such workers are tracked.
     TerminationUnconfirmed,
+    /// The worker was killed because a pending capability change (a
+    /// revocation) asked for it (R2-K-24). Never a success; its tokens were
+    /// spent. A run that had not been forked yet reports this with
+    /// `child_pid` 0 only through the C++ API; the governed call refuses such
+    /// a run with `CapabilityChangePending` instead.
+    Terminated,
     /// A code this crate does not know; carried rather than collapsed.
     Unrecognized(i32),
 }
@@ -307,6 +319,7 @@ impl SupervisedOutcome {
             10 => SupervisedOutcome::InvalidLimits,
             11 => SupervisedOutcome::SigchldIgnored,
             12 => SupervisedOutcome::TerminationUnconfirmed,
+            13 => SupervisedOutcome::Terminated,
             other => SupervisedOutcome::Unrecognized(other),
         }
     }
@@ -639,6 +652,9 @@ pub enum HostAuditEvent {
     SupervisedFailed,
     /// A supervised worker was killed and not confirmed reaped in time.
     SupervisedTerminationUnconfirmed,
+    /// A supervised worker was killed because a pending capability revocation
+    /// asked for it (R2-K-24); its tokens were spent.
+    SupervisedTerminated,
     /// A value this crate does not know; carried rather than collapsed.
     Unrecognized(u8),
 }
@@ -655,6 +671,7 @@ impl HostAuditEvent {
             6 => HostAuditEvent::SupervisedTimedOut,
             7 => HostAuditEvent::SupervisedFailed,
             8 => HostAuditEvent::SupervisedTerminationUnconfirmed,
+            9 => HostAuditEvent::SupervisedTerminated,
             other => HostAuditEvent::Unrecognized(other),
         }
     }
@@ -1635,12 +1652,56 @@ mod tests {
         assert_eq!(SupervisedOutcome::from_code(0), SupervisedOutcome::Completed);
         assert_eq!(SupervisedOutcome::from_code(11), SupervisedOutcome::SigchldIgnored);
         assert_eq!(SupervisedOutcome::from_code(12), SupervisedOutcome::TerminationUnconfirmed);
-        assert_eq!(SupervisedOutcome::from_code(13), SupervisedOutcome::Unrecognized(13));
+        assert_eq!(SupervisedOutcome::from_code(13), SupervisedOutcome::Terminated);
         assert_eq!(HostAuditEvent::from_code(5), HostAuditEvent::SupervisedCompleted);
         assert_eq!(HostAuditEvent::from_code(6), HostAuditEvent::SupervisedTimedOut);
         assert_eq!(HostAuditEvent::from_code(7), HostAuditEvent::SupervisedFailed);
         assert_eq!(HostAuditEvent::from_code(8), HostAuditEvent::SupervisedTerminationUnconfirmed);
-        assert_eq!(HostAuditEvent::from_code(9), HostAuditEvent::Unrecognized(9));
+        assert_eq!(HostAuditEvent::from_code(9), HostAuditEvent::SupervisedTerminated);
+    }
+
+    /// R2-K-24: a pending revocation terminates the governed supervised
+    /// workers in flight. Before, `host_set_capabilities` waited 500 ms and
+    /// returned `Busy` while a 3 s worker ran to its deadline.
+    #[test]
+    fn test_revocation_terminates_in_flight_supervised_workers() {
+        const CHILD_ENV: &str = "STACK_FFI_REVOKE_SUPERVISED_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("grant");
+            let runner = std::thread::spawn(move || {
+                let path = worker_path();
+                let mut out = [0u8; 64];
+                let mut req = governed_request(&path, 6, 0x01, PayloadKind::SpinForever);
+                req.required_tokens = 1;
+                supervised_run_governed(&req, &governed_limits(3_000_000_000), &mut out)
+            });
+            std::thread::sleep(std::time::Duration::from_millis(200)); // the worker is in flight
+            let t0 = std::time::Instant::now();
+            let applied = host_set_capabilities(0x04, 0, 0, 0);
+            let took = t0.elapsed();
+            assert_eq!(applied, Ok(()), "the revocation applied");
+            assert!(took < std::time::Duration::from_secs(1), "applied after {took:?}");
+            let report = runner.join().expect("runner").expect("report");
+            assert_eq!(report.outcome, SupervisedOutcome::Terminated);
+            assert!(!report.result_self_reported);
+            assert!(!report.deadline_fired);
+            assert_eq!(report.signal_number, 9);
+            assert_eq!(audit_count(6, HostAuditEvent::SupervisedTerminated), 1);
+            assert_eq!(audit_count(6, HostAuditEvent::SupervisedCompleted), 0);
+            assert_eq!(audit_count(6, HostAuditEvent::SupervisedTimedOut), 0);
+            // A later run with the revoked capability is refused.
+            let mut out = [0u8; 64];
+            assert_eq!(
+                supervised_run_governed(&governed_request(&path, 6, 0x01, PayloadKind::ReturnBytes), &governed_limits(1_000_000_000), &mut out)
+                    .unwrap_err(),
+                GovernedSupervisedError::CapabilityDenied
+            );
+            assert_eq!(supervised_unconfirmed_count(), 0);
+            return;
+        }
+        run_in_child("tests::test_revocation_terminates_in_flight_supervised_workers", CHILD_ENV);
     }
 
     #[test]

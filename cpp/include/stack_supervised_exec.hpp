@@ -148,6 +148,8 @@
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 
+#include "stack_run_cancel.hpp"
+
 namespace stack::supervised {
 
 enum class Outcome : uint8_t {
@@ -165,7 +167,11 @@ enum class Outcome : uint8_t {
     SigchldIgnored = 11,  // SIGCHLD is ignored in this process; refused before anything was spawned
     // The child was sent SIGKILL and was NOT reaped within Limits::reap_timeout_ns. It may still be
     // running. Never a success; the pid stays tracked (UnconfirmedCount / ReapUnconfirmed).
-    TerminationUnconfirmed = 12
+    TerminationUnconfirmed = 12,
+    // The worker was killed because the caller's CancelHandle was triggered (a pending capability
+    // revocation, R2-K-24). Never a success. A worker the handle was triggered for before it
+    // was forked is not spawned and reports this with child_pid 0.
+    Terminated = 13
 };
 
 /** Upper bound on a deadline: one hour. Larger values are InvalidLimits. */
@@ -374,9 +380,15 @@ public:
      *
      * Completed means: the worker exited 0 before the deadline AND sent a
      * well-formed frame. The frame bytes are the worker's own claim.
+     *
+     * `cancel` (R2-K-24), when given, lets another thread terminate the worker: its pidfd is
+     * published in the handle after the fork, and a Request() kills the worker with SIGKILL
+     * through it. The run is then Terminated, never a success. A worker that exits 0 with a
+     * good frame before the kill takes effect is still Completed: it finished first.
      */
     [[nodiscard]] static ExecutionReport RunWorker(const Limits& limits, const WorkerSpec& spec, uint8_t* result,
-                                                   std::size_t result_capacity) noexcept {
+                                                   std::size_t result_capacity,
+                                                   CancelHandle* cancel = nullptr) noexcept {
         ExecutionReport report{};
         if (!LimitsAreValid(limits, result, result_capacity) || limits.inherit_fd != -1) {
             report.outcome = Outcome::InvalidLimits;
@@ -384,6 +396,11 @@ public:
         }
         if (SigchldIsIgnored()) {
             report.outcome = Outcome::SigchldIgnored;
+            return report;
+        }
+        if (cancel != nullptr && cancel->Requested()) {
+            // Asked to stop before there is anything to stop: spawn nothing (R2-K-24).
+            report.outcome = Outcome::Terminated;
             return report;
         }
         const uint64_t t0 = MonotonicNs();
@@ -450,7 +467,7 @@ public:
         report.child_pid = pid;
         pipe_w.Close();
         image.Close();
-        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity, slot);
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity, slot, cancel);
         return report;
     }
 
@@ -527,10 +544,18 @@ private:
     // kill it, reap it, and classify what was seen. pipe_r is the read end of
     // the result pipe (the write end is already closed here).
     static void Supervise(ExecutionReport& report, const Limits& limits, pid_t pid, FdGuard& pipe_r, uint64_t t0,
-                          uint64_t deadline, uint8_t* result, std::size_t result_capacity, SlotGuard& slot) noexcept {
+                          uint64_t deadline, uint8_t* result, std::size_t result_capacity, SlotGuard& slot,
+                          CancelHandle* cancel = nullptr) noexcept {
         (void)::setpgid(pid, pid);  // the child does the same; whichever runs first wins
         (void)::fcntl(pipe_r.fd, F_SETFL, O_NONBLOCK);
         FdGuard pidfd{PidfdOpen(pid)};
+        // Publish the pidfd for a cancel request, and withdraw it before the descriptor can be
+        // closed or handed to the unconfirmed table (declared after pidfd, so it runs first).
+        struct Armed {
+            CancelHandle* handle;
+            ~Armed() noexcept { if (handle != nullptr) handle->Disarm(); }
+        } armed{cancel};
+        if (cancel != nullptr && pidfd.fd >= 0) cancel->Arm(pidfd.fd);
 
         FrameParser parser{result, result_capacity, static_cast<std::size_t>(limits.max_output_bytes)};
         int status = 0;
@@ -588,6 +613,10 @@ private:
                 }
             }
             if (poll_failed) break;
+            if (!exited && pidfd.fd < 0 && cancel != nullptr && cancel->Requested()) {
+                // No pidfd (kernel older than 5.3): the polling loop honors the request by number.
+                KillChild(pid, -1);
+            }
             if (!exited && pidfd.fd < 0) {
                 const pid_t w = ::waitpid(pid, &status, WNOHANG);
                 if (w == pid) {
@@ -639,7 +668,7 @@ private:
         if (!pipe_eof) DrainPipeAfterExit(pipe_r.fd, parser, pipe_eof);
 
         report.elapsed_ns = MonotonicNs() - t0;
-        Classify(report, status, parser, poll_failed, poll_errno);
+        Classify(report, status, parser, poll_failed, poll_errno, cancel != nullptr && cancel->Requested());
         // Bytes the caller's buffer received from a run that did not complete are
         // not a result; do not leave them there to be mistaken for one.
         if (report.outcome != Outcome::Completed) ScrubResult(result, parser);
@@ -1029,11 +1058,16 @@ private:
     }
 
     static void Classify(ExecutionReport& report, int status, const FrameParser& parser,
-                         bool poll_failed, int poll_errno) noexcept {
+                         bool poll_failed, int poll_errno, bool cancel_requested) noexcept {
         if (WIFSIGNALED(status)) report.signal_number = WTERMSIG(status);
         if (WIFEXITED(status)) report.exit_code = WEXITSTATUS(status);
 
         if (report.deadline_fired) { report.outcome = Outcome::TimedOut; return; }
+        // Killed while a cancel was requested: the supervisor's own SIGKILL (R2-K-24).
+        if (cancel_requested && !poll_failed && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL) {
+            report.outcome = Outcome::Terminated;
+            return;
+        }
         if (poll_failed) {
             report.outcome = Outcome::SupervisorError;
             report.error_number = poll_errno;

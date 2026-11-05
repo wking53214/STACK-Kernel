@@ -446,6 +446,10 @@ impl Executor for SupervisedExecutor {
             O::SigchldIgnored => RunOutcome::Unknown {
                 reason: "SIGCHLD is ignored in this process; the supervisor refused to run".to_owned(),
             },
+            // A pending capability revocation killed the worker (R2-K-24).
+            O::Terminated => RunOutcome::Terminated {
+                signal: report.signal_number,
+            },
             O::TerminationUnconfirmed => RunOutcome::TerminationUnconfirmed {
                 reason: format!(
                     "SIGKILL sent and the worker (pid {}) was not reaped within the bound; it may still be running",

@@ -126,6 +126,9 @@ tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
 - The wait after SIGKILL is bounded (`reap_timeout_ns`, default 2 s). A worker
   that is not reaped in time is `TerminationUnconfirmed`: never a success, still
   tracked (`UnconfirmedCount`, `ReapUnconfirmed`).
+- A run can be terminated from another thread (R2-K-24): `RunWorker` takes an
+  optional `CancelHandle`, publishes the worker's pidfd in it, and a request kills
+  the worker through the pidfd; the outcome is `Terminated`, never a success.
 - Through the FFI the run is governed first: capability mask and rate limit are
   checked by the initialized host before anything is spawned, and one audit event
   records the outcome, timeouts included (`crates/stack-ffi/ABI.md`, section 8).
@@ -234,6 +237,13 @@ in-process path that the FFI exposes:
   a transaction that ran keeps its tokens and is charged its ticks, one
   rejected before it ran costs nothing; a revocation applies under sustained
   load within a bound and no transaction that begins after it runs.
+- tested (R2-K-24): a pending capability revocation terminates the governed
+  supervised workers in flight (SIGKILL through the pidfd, outcome `Terminated`,
+  audited, tokens spent) instead of waiting for them, so the revocation applies
+  in about a millisecond rather than after the workers' deadline (measured
+  0.5 to 0.6 ms with two 3 s workers in flight; asserted below 1 s). New governed
+  runs are refused while a change is pending. In-process transactions are still
+  only waited for.
 - tested (R2-K-20): a governed request consumes at least one token. A request
   for 0 tokens is refused as rate limited on the transaction path and on the
   governed supervised path, before anything runs or spawns, and is audited. It

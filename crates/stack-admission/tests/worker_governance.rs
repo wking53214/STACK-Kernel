@@ -146,6 +146,31 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
     ));
     std::fs::remove_dir_all(&swap_dir).unwrap();
 
+    // A revocation while a worker is in flight terminates it (R2-K-24): the change
+    // applies within a second, the run ends Terminated (not Completed, not a
+    // timeout), and the revoked capability is refused afterwards.
+    let spinner = std::sync::Arc::new(SupervisedExecutor::new(config(worker())).expect("executor"));
+    let in_flight = {
+        let spinner = spinner.clone();
+        std::thread::spawn(move || {
+            let mut slow = ExecutionLimits::with_deadline_ns(3_000_000_000);
+            slow.max_output_bytes = 64;
+            spinner.run(WorkerKind::SpinForever, &slow, b"")
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let t0 = std::time::Instant::now();
+    stack_ffi::host_set_capabilities(0x04, 0, 0, 0).expect("the revocation applies while a worker is in flight");
+    assert!(t0.elapsed() < std::time::Duration::from_secs(1), "applied after {:?}", t0.elapsed());
+    let ended = in_flight.join().unwrap().expect("report");
+    assert_eq!(ended.outcome, RunOutcome::Terminated { signal: 9 });
+    assert!(ended.elapsed_ns < 1_000_000_000, "terminated, not run to its deadline: {}", ended.elapsed_ns);
+    assert!(matches!(
+        spinner.run(WorkerKind::ReturnBytes, &limits(), b""),
+        Err(ExecutorError::Refused(m)) if m.contains("CapabilityDenied")
+    ));
+    stack_ffi::host_set_capabilities(0x01, 0, 0, 0).expect("grant again");
+
     // A timeout is a timeout, not a completion and not an error.
     let mut quick = ExecutionLimits::with_deadline_ns(150_000_000);
     quick.max_output_bytes = 64;

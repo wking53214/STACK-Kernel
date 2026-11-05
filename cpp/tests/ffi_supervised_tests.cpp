@@ -81,13 +81,14 @@ namespace {
 constexpr uint64_t kMs = 1'000'000ULL;
 // Return codes (ffi_wrapper.cpp).
 constexpr int kRan = 0, kNotInitialized = -1, kUnknownKind = -2, kNullArgument = -3, kCapabilityDenied = -4,
-              kRateLimited = -5, kZeroDeadline = -9, kWorkerUnusable = -14, kLimitsInvalid = -15,
+              kRateLimited = -5, kChangePending = -13, kZeroDeadline = -9, kWorkerUnusable = -14, kLimitsInvalid = -15,
               kDigestRequired = -16, kDigestMismatch = -17;
 // Outcome values (stack::supervised::Outcome).
-constexpr int kCompleted = 0, kTimedOut = 1, kSigchldIgnored = 11, kTerminationUnconfirmed = 12;
+constexpr int kCompleted = 0, kTimedOut = 1, kSigchldIgnored = 11, kTerminationUnconfirmed = 12, kTerminated = 13;
 // AuditEventType values (stack_audit.hpp).
 constexpr uint8_t kAuditRateLimited = 1, kAuditCapabilityViolation = 4, kAuditSupervisedCompleted = 5,
-                  kAuditSupervisedTimedOut = 6, kAuditSupervisedFailed = 7, kAuditSupervisedUnconfirmed = 8;
+                  kAuditSupervisedTimedOut = 6, kAuditSupervisedFailed = 7, kAuditSupervisedUnconfirmed = 8,
+                  kAuditSupervisedTerminated = 9;
 constexpr uint64_t kHostAuditSlots = 8192;
 constexpr uint64_t kCap = 0x01;  // the capability bit the tests grant
 constexpr uint32_t kRequest = 100;
@@ -441,18 +442,18 @@ TEST_CASE("Governed supervised: a sealed thread cannot spawn: the worker image c
     ServedRequests(domain);
 }
 
-TEST_CASE("Governed supervised: a revocation waits for a run in flight and then refuses", "[governed]") {
+TEST_CASE("Governed supervised: a revocation terminates a run in flight and then refuses", "[governed]") {
     Setup();
     const uint64_t domain = 11;
     Result running;
     std::thread runner([&] { running = Governed(domain, kCap, 1, 1 /* spin */, 250 * kMs); });
     ::usleep(60'000);  // the run is in flight
     const auto t0 = std::chrono::steady_clock::now();
-    REQUIRE(stack_host_set_capabilities(0x04, 0, 0, 0) == 0);  // waits for the run, then applies
+    REQUIRE(stack_host_set_capabilities(0x04, 0, 0, 0) == 0);  // terminates the run, then applies (R2-K-24)
     const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     runner.join();
-    REQUIRE(running.report.outcome == kTimedOut);
-    REQUIRE(waited_ms >= 100);  // it did wait for the run, bounded by the 500 ms drain limit
+    REQUIRE(running.report.outcome == kTerminated);
+    REQUIRE(waited_ms < 150);  // it did not wait out the 250 ms deadline
     // After the revocation the old capability is refused.
     const int before = g_sigchld.load();
     REQUIRE(Governed(domain, kCap, 1, 0).rc == kCapabilityDenied);
@@ -461,6 +462,98 @@ TEST_CASE("Governed supervised: a revocation waits for a run in flight and then 
     REQUIRE(stack_host_set_capabilities(kCap, 0, 0, 0) == 0);
     REQUIRE(Governed(domain, kCap, 1, 0).rc == kRan);
 }
+
+// R2-K-24: a pending revocation TERMINATES the governed supervised workers in
+// flight. Before, stack_host_set_capabilities waited for them: a 3 s spin worker
+// ran to its deadline while the call returned -2 after 500 ms, three times in a
+// row, and the revoked capability stayed in force.
+TEST_CASE("Governed supervised: a pending revocation terminates in-flight workers within a bound", "[governed][revoke]") {
+    Setup();
+    constexpr long kBoundMs = 1000;
+    Result slow_a, slow_b;
+    std::thread runner_a([&] { slow_a = Governed(1, kCap, kRequest, 1 /* spin */, 3'000 * kMs); });
+    std::thread runner_b([&] { slow_b = Governed(0, kCap, 1, 2 /* block */, 3'000 * kMs); });
+    ::usleep(200'000);  // both workers are in flight
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const int rc = stack_host_set_capabilities(0x04, 0, 0, 0);
+    const auto applied_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+    const long applied_ms = static_cast<long>(applied_us / 1000);
+    // The change has returned applied: both workers are already dead and reaped, so this
+    // process has no child left (SIGCHLD is not counted: simultaneous ones coalesce).
+    const pid_t leftover = ::waitpid(-1, nullptr, WNOHANG);
+    const int leftover_errno = errno;
+    std::fprintf(stderr, "[measured] revocation with two 3 s workers in flight: applied (rc %d) after %ld us\n", rc,
+                 static_cast<long>(applied_us));
+    runner_a.join();
+    runner_b.join();
+    REQUIRE(rc == 0);
+    REQUIRE(applied_ms < kBoundMs);
+    REQUIRE(leftover == -1);
+    REQUIRE(leftover_errno == ECHILD);
+    for (const Result* r : {&slow_a, &slow_b}) {
+        REQUIRE(r->rc == kRan);
+        REQUIRE(r->report.outcome == kTerminated);  // not Completed, not TimedOut
+        REQUIRE(r->report.result_self_reported == 0);
+        REQUIRE(r->report.deadline_fired == 0);
+        REQUIRE(r->report.signal_number == SIGKILL);
+        REQUIRE(r->report.child_pid > 0);
+        REQUIRE_FALSE(Alive(r->report.child_pid));
+        REQUIRE(r->report.elapsed_ns < static_cast<uint64_t>(kBoundMs) * kMs);  // nowhere near the 3 s deadline
+    }
+    // Audited as terminated, with the tokens spent (not refunded).
+    REQUIRE(Audit(1, kAuditSupervisedTerminated).count == 1);
+    REQUIRE(Audit(1, kAuditSupervisedTerminated).tokens == kRequest);
+    REQUIRE(Audit(0, kAuditSupervisedTerminated).count == 1);
+    REQUIRE(Audit(1, kAuditSupervisedCompleted).count == 0);
+    REQUIRE(Audit(1, kAuditSupervisedTimedOut).count == 0);
+
+    // A later run with the revoked capability is refused and spawns nothing.
+    const int before = g_sigchld.load();
+    const Result denied = Governed(1, kCap, 1, 0);
+    REQUIRE(denied.rc == kCapabilityDenied);
+    REQUIRE(denied.report.child_pid == 0);
+    ::usleep(50'000);
+    REQUIRE(g_sigchld.load() == before);
+
+    // Restore the capability; the terminated run kept its 100 tokens.
+    REQUIRE(stack_host_set_capabilities(kCap, 0, 0, 0) == 0);
+    ServedRequests(1, /*already_spent*/ 1);
+}
+
+#ifndef R2K24_NO_SEAM_TESTS
+namespace {
+// Suppresses the cancellation kill, as IneffectiveKill does for the deadline kill, so a
+// worker stays in flight and the change stays pending.
+bool SuppressCancelKill(int) { return true; }
+}  // namespace
+
+TEST_CASE("Governed supervised: new governed runs are refused while a change is pending, and an unkillable run leaves it unapplied", "[governed][revoke]") {
+    Setup();
+    namespace sv = stack::supervised;
+    sv::CancelHandle::SetKillHookForTesting(&SuppressCancelKill);
+    Result slow;
+    std::thread runner([&] { slow = Governed(0, kCap, 1, 1 /* spin */, 1'200 * kMs); });
+    ::usleep(200'000);
+    int change_rc = 99;
+    std::thread changer([&] { change_rc = stack_host_set_capabilities(0x04, 0, 0, 0); });
+    ::usleep(150'000);  // the change is pending now (the worker was not killed)
+    const int before = g_sigchld.load();
+    const Result refused = Governed(0, kCap, 1, 0);
+    REQUIRE(refused.rc == kChangePending);  // held out, not queued
+    REQUIRE(refused.report.child_pid == 0);
+    ::usleep(50'000);
+    REQUIRE(g_sigchld.load() == before);
+    changer.join();
+    sv::CancelHandle::SetKillHookForTesting(nullptr);
+    REQUIRE(change_rc == -2);  // the worker did not drain within 500 ms: NOT applied, nothing left pending
+    runner.join();
+    REQUIRE(slow.report.outcome == kTimedOut);  // it ran to its own deadline
+    // The old mask is still in force and nothing is pending: the host serves again.
+    REQUIRE(Governed(0, kCap, 1, 0).rc == kRan);
+}
+#endif
 
 TEST_CASE("Governed supervised: an ineffective kill is TerminationUnconfirmed and audited", "[governed][reap]") {
     Setup();

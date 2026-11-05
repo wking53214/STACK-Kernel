@@ -256,6 +256,13 @@ int stack_host_initialize_and_seal() {
 // is running or will run with the old one. -2 means it was not applied, no
 // change is left pending and the host serves under the old mask again; the
 // caller retries or escalates. Do not call it from a payload.
+//
+// R2-K-24: governed supervised workers in flight are TERMINATED by a pending
+// change, not waited for: each is sent SIGKILL through its pidfd and its run
+// ends with outcome Terminated (13), audited as SupervisedTerminated (9), with
+// its tokens spent. The change then applies as soon as they are reaped (a few
+// milliseconds), instead of after their deadline. In-process transactions
+// cannot be stopped and are still waited for, up to kCapabilityDrainNs.
 int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t m3) {
     const int state = g_init_state.load(std::memory_order_acquire);
     if (state == kInitFailed) return -3;
@@ -476,8 +483,10 @@ int stack_supervised_run(
 //
 // Return codes. Nothing is spawned and nothing is consumed unless 0:
 //    0  governance passed. The run's outcome is in report->outcome (any
-//       Outcome, including TimedOut and TerminationUnconfirmed). Tokens are
-//       spent when child_pid != 0 and refunded when nothing was spawned.
+//       Outcome, including TimedOut, TerminationUnconfirmed and Terminated).
+//       Tokens are spent when child_pid != 0 and refunded when nothing was
+//       spawned. Terminated (13): a capability change that was waiting killed
+//       the worker (R2-K-24); never a success.
 //   -1  host not initialized
 //   -2  unknown payload kind (above 6)
 //   -3  a null pointer argument, or out null with a non-zero capacity
@@ -562,12 +571,13 @@ int stack_supervised_run_governed(
     supervised::ExecutionReport r{};
     auto governed = g_host->ExecuteGovernedSupervised(
         token, required_tokens, limits->wall_clock_deadline_ns,
-        [&]() -> FfiHost::SupervisedRunResult {
-            r = supervised::SupervisedExecutor::RunWorker(l, spec, out, out_capacity);
+        [&](supervised::CancelHandle& cancel) -> FfiHost::SupervisedRunResult {
+            r = supervised::SupervisedExecutor::RunWorker(l, spec, out, out_capacity, &cancel);
             if (r.child_pid == 0) return FfiHost::SupervisedRunResult::NotSpawned;
             switch (r.outcome) {
                 case supervised::Outcome::Completed: return FfiHost::SupervisedRunResult::Completed;
                 case supervised::Outcome::TimedOut: return FfiHost::SupervisedRunResult::TimedOut;
+                case supervised::Outcome::Terminated: return FfiHost::SupervisedRunResult::Terminated;
                 case supervised::Outcome::TerminationUnconfirmed:
                     return FfiHost::SupervisedRunResult::TerminationUnconfirmed;
                 default: return FfiHost::SupervisedRunResult::Failed;

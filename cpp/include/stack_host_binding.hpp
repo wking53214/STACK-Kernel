@@ -47,6 +47,7 @@
 #include "stack_kinetic_governor.hpp"
 #include "posix_deadline_timer_hardened.hpp"
 #include "stack_audit.hpp"
+#include "stack_run_cancel.hpp"
 
 #include <array>
 #include <atomic>
@@ -58,6 +59,7 @@
 #include <csignal>
 #include <expected>
 #include <mutex>
+#include <type_traits>
 #include <utility>
 
 #include <sys/prctl.h>
@@ -376,6 +378,9 @@ private:
     // transaction guard, which notifies only when it is not zero.
     std::atomic<uint32_t> pending_capability_changes_{0};
     std::condition_variable capability_drained_{};
+    // Governed supervised runs in flight (R2-K-24), newest first. Edited only under
+    // capability_lock_. A pending capability change terminates every run on it.
+    supervised::CancelHandle* supervised_in_flight_ = nullptr;
     mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
     mutable std::mutex capability_lock_{};  // Protects active_host_capabilities_
     SeccompAuditRing<8192> audit_ring_{};  // Layer 5: Governance audit trail (DEFECT #1 FIX)
@@ -459,6 +464,13 @@ public:
      *
      * Do not call this from inside a payload: the calling transaction is
      * itself in flight, so the wait cannot succeed and runs to its bound.
+     *
+     * Governed supervised runs (ExecuteGovernedSupervised) in flight are TERMINATED, not
+     * waited for (R2-K-24): while this call waits, each is sent SIGKILL through its
+     * pidfd and ends as Terminated, so the change applies within the time it takes to kill and
+     * reap them, not the time they would have run. A worker that cannot be killed or reaped
+     * in time (it holds the host in flight until its run returns) makes this return false at
+     * `max_wait`, as for any transaction that does not drain.
      */
     [[nodiscard]] bool SetActiveCapabilitiesWithin(const CapabilityMask256& mask,
                                                    std::chrono::nanoseconds max_wait) noexcept {
@@ -471,6 +483,11 @@ public:
             return false;
         }
         pending_capability_changes_.fetch_add(1, std::memory_order_seq_cst);
+        // R2-K-24: a change that is waiting TERMINATES the governed supervised workers in
+        // flight instead of waiting for them. New ones cannot register while it is pending (they
+        // are refused under this same lock), so the list can only shrink from here. In-process
+        // transactions cannot be stopped and are still waited for.
+        for (supervised::CancelHandle* h = supervised_in_flight_; h != nullptr; h = h->next) h->Request();
         const bool drained = capability_drained_.wait_for(lock, max_wait, [this] {
             return transactions_in_flight_.load(std::memory_order_seq_cst) == 0;
         });
@@ -685,7 +702,8 @@ public:
         TimedOut,                // wall-clock deadline passed; worker killed
         Failed,                  // spawned, ended any other way
         TerminationUnconfirmed,  // killed, not reaped in time; may still be running
-        NotSpawned               // refused or failed before any process existed
+        NotSpawned,              // refused or failed before any process existed
+        Terminated               // killed because a pending capability change asked for it (R2-K-24)
     };
 
     /**
@@ -708,6 +726,13 @@ public:
      * (SupervisedRunResult::NotSpawned). One audit event records the outcome,
      * timeouts included. Compute debt is not charged on this path.
      *
+     * `run` may take a `supervised::CancelHandle&` (R2-K-24). It passes the handle to
+     * SupervisedExecutor::RunWorker; a capability change that starts waiting while the run is
+     * in flight requests it, the worker is killed and `run` reports
+     * SupervisedRunResult::Terminated: audited as SupervisedTerminated, tokens spent, never a
+     * success. A run that was not spawned because the handle was already requested is refused
+     * with CapabilityChangePending (tokens refunded).
+     *
      * No seal is needed and none may be present: a sealed thread's filter
      * forbids fork and exec, so `run` would fail to spawn (NotSpawned).
      */
@@ -723,6 +748,7 @@ public:
         }
 
         CapabilityMask256 snapshot_capabilities{};
+        supervised::CancelHandle cancel;  // outlives lifecycle_guard, which unlinks it
         {
             std::lock_guard<std::mutex> lock(capability_lock_);
             if (pending_capability_changes_.load(std::memory_order_seq_cst) > 0) [[unlikely]] {
@@ -730,21 +756,31 @@ public:
             }
             snapshot_capabilities = active_host_capabilities_;
             transactions_in_flight_.fetch_add(1, std::memory_order_release);
+            // Registered under the same lock as the pending check: a change that starts waiting
+            // afterwards sees this run and requests it (R2-K-24).
+            cancel.next = supervised_in_flight_;
+            if (supervised_in_flight_ != nullptr) supervised_in_flight_->prev = &cancel;
+            supervised_in_flight_ = &cancel;
         }
         struct TransactionGuard {
             std::atomic<uint32_t>& counter;
             const std::atomic<uint32_t>& pending;
             std::mutex& lock;
             std::condition_variable& drained;
+            supervised::CancelHandle*& head;
+            supervised::CancelHandle& self;
             ~TransactionGuard() noexcept {
+                std::lock_guard<std::mutex> lk(lock);
+                if (self.prev != nullptr) self.prev->next = self.next;
+                else head = self.next;
+                if (self.next != nullptr) self.next->prev = self.prev;
                 counter.fetch_sub(1, std::memory_order_seq_cst);
                 if (pending.load(std::memory_order_seq_cst) != 0) [[unlikely]] {
-                    std::lock_guard<std::mutex> lk(lock);
                     drained.notify_all();
                 }
             }
         } lifecycle_guard{transactions_in_flight_, pending_capability_changes_, capability_lock_,
-                          capability_drained_};
+                          capability_drained_, supervised_in_flight_, cancel};
 
         const uint64_t domain_id = token.GetContextId();
         if (!token.Validate(snapshot_capabilities)) [[unlikely]] {
@@ -772,11 +808,22 @@ public:
             }
         }
 
-        const SupervisedRunResult result = run();
+        SupervisedRunResult result;
+        if constexpr (std::is_invocable_v<SupervisedRun&, supervised::CancelHandle&>) {
+            result = run(cancel);
+        } else {
+            result = run();
+        }
         switch (result) {
         case SupervisedRunResult::NotSpawned:
             // Nothing existed to spend the tokens on: the guard refunds them.
             audit_ring_.Push(AuditEventType::SupervisedFailed, domain_id, 0);
+            // Not spawned because a change is waiting: that is the refusal a new run gets.
+            if (cancel.Requested()) return std::unexpected(HostExecutionError::CapabilityChangePending);
+            return {};
+        case SupervisedRunResult::Terminated:
+            guard.Commit();
+            audit_ring_.Push(AuditEventType::SupervisedTerminated, domain_id, required_tokens);
             return {};
         case SupervisedRunResult::Completed:
             guard.Commit();

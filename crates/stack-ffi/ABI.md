@@ -40,6 +40,8 @@ that existed before are unchanged. Additions and changes of meaning:
 | R2-K-20 | `stack_execute_governed_transaction`, `stack_supervised_run_governed` | Behaviour: `required_tokens == 0` is now -5 (rate limited), audited as a rate-limit event, nothing consumed, nothing run or spawned. Before, a zero-token request passed the governor's floor check for free (`available >= Reserved + 0`) and was accepted without limit (2000 of 2000 governed runs at 0 tokens, against 9 of 30 at 100 tokens). A caller that passed 0 must pass at least 1. |
 | R2-K-21 | `int stack_supervised_run_governed(context_id, required_capability_m0, required_tokens, payload_kind, worker_path, worker_sha256, limits, reap_timeout_ns, out, out_capacity, report)` | SIGNATURE CHANGE relative to the previous commit of this series (the symbol is NEW relative to the base, so no base caller breaks): `const uint8_t* worker_sha256` (32 bytes) inserted after `worker_path`. REQUIRED. NULL is -16 (fail closed); an image that does not hash to it is -17. New -14 causes: a symlink in the path, setuid, setgid or group-writable image. |
 | R2-K-21 | `int stack_supervised_image_sha256(const char* path, uint8_t out[32])` | NEW. SHA-256 of a file, for provisioning and for tests. 0, a positive errno, or -3 for a null argument. No trust policy. |
+| R2-K-24 | `stack_host_set_capabilities`, `stack_supervised_run_governed` | A pending change now TERMINATES governed supervised workers in flight instead of waiting for them; the run's `report->outcome` is NEW value 13 `Terminated`. Section 5. |
+| R2-K-24 | host audit ring, `AuditEventType` | NEW value 9 `SupervisedTerminated`, appended. |
 | A3 | `uint64_t stack_supervised_unconfirmed_count(void)`, `uint64_t stack_supervised_reap_unconfirmed(void)` | NEW. Workers sent SIGKILL and not confirmed reaped; re-kill and reap them. |
 | A2 | `stack_supervised_report` | Same size and layout. `reserved[3]` became `result_self_reported` (u8) and `reserved[2]`. Old callers read it as before; it is 1 on `Completed`. |
 | A2 | `stack_supervised_report.outcome` | NEW value 12 `TerminationUnconfirmed`. A caller that switched over the outcome and had a default arm now sees it there. |
@@ -50,6 +52,8 @@ Test-only, present only when compiled with `-DSTACK_FFI_TESTING` (CMake
 `ffi_init_redteam`; never defined by `build.rs`):
 `uint64_t stack_ffi_testing_init_work_runs(void)` and
 `uint64_t stack_ffi_testing_host_constructions(void)`.
+
+`SupervisedOutcome::Terminated` and `HostAuditEvent::SupervisedTerminated` (R2-K-24) are new Rust variants.
 
 Rust additions for decision A in `src/lib.rs`: `supervised_run_governed`,
 `GovernedSupervisedRequest`, `GovernedSupervisedError`,
@@ -239,6 +243,50 @@ Tested:
   times out, applies nothing, leaves nothing pending, and the host serves under
   the old mask; one setter timing out leaves the other holding the host closed.
 
+### Revocation terminates governed supervised workers (R2-K-24)
+
+Decision (approved): a pending revocation terminates the governed supervised
+workers in flight. Before, `stack_host_set_capabilities` waited for them: with
+a 3 s spin worker in flight it returned -2 after 500 ms, three times in a row,
+and the worker ran to its deadline with the revoked capability still in force.
+
+- implemented, tested: while a change waits, every governed supervised run in
+  flight is requested to stop (`CancelHandle`, `cpp/include/stack_run_cancel.hpp`).
+  Its worker is sent SIGKILL through its pidfd, the run ends with outcome
+  `Terminated` (13; Rust `SupervisedOutcome::Terminated`, admission
+  `RunOutcome::Terminated { signal: 9 }`), never a success
+  (`result_self_reported` 0, `deadline_fired` 0), is audited as
+  `SupervisedTerminated` (event 9) with its tokens SPENT (not refunded), and the
+  change applies once the worker is reaped.
+- implemented, tested: new governed runs are refused while a change is pending
+  (-13, as for transactions): nothing is consumed or spawned. A run that was
+  registered but not yet forked when the request came is not spawned and is
+  refused with -13, tokens refunded.
+- tested: with two 3 s workers (a spinner and a blocked one) in flight the
+  change applied after 0.5 to 0.6 ms (measured, development host, five runs;
+  asserted below 1 s) with both workers dead and reaped when it returned, both
+  outcomes `Terminated` with `elapsed_ns` below 1 s, a later run with the revoked
+  capability -4 with nothing spawned, and the terminated run's 100 tokens still
+  spent. Tests: `ffi_supervised_tests.cpp` "a pending revocation terminates
+  in-flight workers within a bound", Rust
+  `test_revocation_terminates_in_flight_supervised_workers`, admission
+  `worker_governance.rs`. The pre-existing "a revocation waits for a run in flight
+  and then refuses" asserted the old wait and was changed to assert termination.
+- tested (through a test-only seam, `STACK_SUPERVISED_TESTING`, that suppresses
+  the cancellation kill): if the worker is not killed, the change stays pending,
+  new governed runs get -13 meanwhile, and the call returns -2 at 500 ms with the
+  mask NOT applied and nothing left pending ("new governed runs are refused while
+  a change is pending, and an unkillable run leaves it unapplied").
+- not changed: in-process transactions (`stack_execute_governed_transaction`)
+  cannot be stopped; a pending change still waits for them, up to 500 ms.
+- not tested: a worker stuck in uninterruptible sleep that SIGKILL cannot end
+  (the same limit as `TerminationUnconfirmed`); then the call is -2 as above and
+  the caller escalates.
+- Behaviour change for callers: a revocation now ends the runs it overlaps. A
+  caller that granted a capability and revokes it mid-run sees `Terminated`, not
+  `TimedOut` or `Completed`. A worker that exits 0 with a good frame before the
+  kill takes effect is still `Completed`: it finished first.
+
 Not tested, and why:
 - The FFI's 500 ms timeout path: the FFI payload is a fixed built-in that
   cannot park, so a transaction cannot be held in flight through the C ABI.
@@ -420,11 +468,12 @@ What is now done (each statement names its test):
 | -16 | `worker_sha256` is NULL. The digest of the worker image is required. Nothing spawned, nothing consumed. |
 | -17 | The image does not hash to `worker_sha256`. Nothing spawned; tokens taken for the call are refunded and one `SupervisedFailed` event with 0 tokens is written. |
 
-  While a worker runs the call counts as in flight, so `stack_host_set_capabilities`
-  waits for it (at most 500 ms, then `-2`) exactly as for a governed transaction.
+  While a worker runs the call counts as in flight. A capability change that
+  is waiting TERMINATES it (R2-K-24, below) instead of waiting for it.
   One audit event records the outcome in the host ring, timeouts included:
   `SupervisedCompleted`, `SupervisedTimedOut`, `SupervisedFailed` (also written
-  with 0 tokens when nothing was spawned) or `SupervisedTerminationUnconfirmed`.
+  with 0 tokens when nothing was spawned), `SupervisedTerminationUnconfirmed` or
+  `SupervisedTerminated` (event 9, tokens spent).
   Tests: `cpp/tests/ffi_supervised_tests.cpp` (ctest `STACKFfiSupervised`) and the
   Rust tests `test_governed_supervised_*`.
 - implemented, tested: SIGCHLD ignored is refused (`SigchldIgnored`, outcome 11)
