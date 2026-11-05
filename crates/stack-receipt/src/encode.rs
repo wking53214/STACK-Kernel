@@ -34,17 +34,17 @@
 //! compare with what the writer would have put there.
 
 use sha2::{Digest, Sha256};
-use stack_authority::Digest32;
+use stack_authority::{Digest32, UseEvidence};
 
 use crate::record::{
-    check_text, Action, ActualAction, Assurance, Attempted, Authorized, CapabilityBinding, DecisionEvidence, Event,
+    check_text, Action, ActualAction, AppliedLimits, Assurance, Attempted, Authorized, CapabilityBinding, DecisionEvidence, Event,
     ExecutionId, ExitObserved, FieldName, FrameStatus, GateOutcome, GatePosition, Handoff, NativeDigest, Observed,
     Outcome, Proposed, Provenance, ReceiptKeyId, Record, Rejected, Subject, Terminal, TerminalObserved,
-    ValidationError, Verdict, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES,
+    ValidationError, Verdict, WorkerBinding, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES,
 };
 
 /// The domain and version tag every canonical record starts with (format
-/// version 1). Every event except [`Event::TerminalObserved`] is written with it.
+/// version 1). Every event is written with it except those that carry a version 2 addition (see [`Event::is_v2`]).
 pub const DOMAIN_TAG: &[u8; 16] = b"stack-receipt/1\n";
 /// The tag of format version 2: a terminal event that carries the
 /// supervisor-observed facts. Only that event is written or accepted under it,
@@ -65,6 +65,15 @@ const TAG_REJECTED: u8 = 3;
 const TAG_ATTEMPTED: u8 = 4;
 const TAG_TERMINAL: u8 = 5;
 const TAG_TERMINAL_OBSERVED: u8 = 6;
+/// `Authorized` with the use store's evidence appended (format version 2).
+const TAG_AUTHORIZED_EVIDENCED: u8 = 7;
+/// `Attempted` with the worker binding appended (format version 2).
+const TAG_ATTEMPTED_WORKER: u8 = 8;
+
+const USE_NOT_PROVIDED: u8 = 1;
+const USE_NON_DURABLE_MEMORY: u8 = 2;
+const USE_DURABLE: u8 = 3;
+const USE_NO_NEW_RECORD: u8 = 4;
 
 const EXIT_NOT_OBSERVED: u8 = 0;
 const EXIT_EXITED: u8 = 1;
@@ -145,6 +154,9 @@ impl Encoder {
     fn u16(&mut self, v: u16) {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
+    fn u32(&mut self, v: u32) {
+        self.buf.extend_from_slice(&v.to_be_bytes());
+    }
     fn u64(&mut self, v: u64) {
         self.buf.extend_from_slice(&v.to_be_bytes());
     }
@@ -187,7 +199,7 @@ pub fn canonical_bytes(record: &Record) -> Result<Vec<u8>, ValidationError> {
     let mut e = Encoder {
         buf: Vec::with_capacity(512),
     };
-    e.raw(if matches!(record.event, Event::TerminalObserved(_)) {
+    e.raw(if record.event.is_v2() {
         DOMAIN_TAG_V2
     } else {
         DOMAIN_TAG
@@ -264,7 +276,7 @@ fn encode_event(e: &mut Encoder, event: &Event) -> Result<(), ValidationError> {
             }
         }
         Event::Authorized(a) => {
-            e.u8(TAG_AUTHORIZED);
+            e.u8(if a.use_evidence.is_some() { TAG_AUTHORIZED_EVIDENCED } else { TAG_AUTHORIZED });
             let c = &a.capability;
             e.digest(&c.cap_digest);
             e.id("capability.cap_id", &c.cap_id)?;
@@ -277,17 +289,47 @@ fn encode_event(e: &mut Encoder, event: &Event) -> Result<(), ValidationError> {
             e.flag(c.one_time);
             e.u64(c.authorized_at_ms);
             encode_action(e, "authorized.action", &a.action)?;
+            if let Some(u) = &a.use_evidence {
+                match u {
+                    UseEvidence::NotProvided => e.u8(USE_NOT_PROVIDED),
+                    UseEvidence::NonDurableMemory => e.u8(USE_NON_DURABLE_MEMORY),
+                    UseEvidence::Durable {
+                        record_hash,
+                        position,
+                        head,
+                    } => {
+                        e.u8(USE_DURABLE);
+                        e.digest(record_hash);
+                        e.u64(*position);
+                        e.digest(head);
+                    }
+                    UseEvidence::NoNewRecord { position, head } => {
+                        e.u8(USE_NO_NEW_RECORD);
+                        e.u64(*position);
+                        e.digest(head);
+                    }
+                }
+            }
         }
         Event::Rejected(r) => {
             e.u8(TAG_REJECTED);
             e.text("rejected.reason", &r.reason, 1, MAX_TEXT_BYTES)?;
         }
         Event::Attempted(a) => {
-            e.u8(TAG_ATTEMPTED);
+            e.u8(if a.worker.is_some() { TAG_ATTEMPTED_WORKER } else { TAG_ATTEMPTED });
             e.text("attempted.action", &a.action.operation, 1, MAX_OPERATION_BYTES)?;
             e.text("attempted.action", &a.action.resource, 1, MAX_TEXT_BYTES)?;
             e.digest(&a.action.argument_digest);
             e.u64(a.started_at_ms);
+            if let Some(w) = &a.worker {
+                e.digest(&w.image_sha256);
+                e.u64(w.limits.wall_clock_deadline_ns);
+                e.u64(w.limits.cpu_seconds);
+                e.u64(w.limits.address_space_bytes);
+                e.u64(w.limits.max_output_bytes);
+                e.u64(w.limits.file_size_bytes);
+                e.u32(w.limits.nofile);
+            }
         }
         Event::Terminal(_) | Event::TerminalObserved(_) => {
             let Some((t, observed)) = event.terminal_parts() else {
@@ -394,6 +436,10 @@ impl<'a> Decoder<'a> {
     fn u16(&mut self) -> Result<u16, DecodeError> {
         let s = self.take(2)?;
         Ok(u16::from_be_bytes(<[u8; 2]>::try_from(s).map_err(|_| DecodeError::Truncated(self.pos))?))
+    }
+    fn u32(&mut self) -> Result<u32, DecodeError> {
+        let s = self.take(4)?;
+        Ok(u32::from_be_bytes(<[u8; 4]>::try_from(s).map_err(|_| DecodeError::Truncated(self.pos))?))
     }
     fn u64(&mut self) -> Result<u64, DecodeError> {
         let s = self.take(8)?;
@@ -537,8 +583,8 @@ fn decode_decision(d: &mut Decoder<'_>) -> Result<DecisionEvidence, DecodeError>
 fn decode_event(d: &mut Decoder<'_>, v2: bool) -> Result<Event, DecodeError> {
     let tag = d.u8()?;
     // A record has exactly one encoding: format version 2 holds only the
-    // observed terminal event, and version 1 never holds it.
-    if v2 != (tag == TAG_TERMINAL_OBSERVED) {
+    // events that carry version 2 additions, and version 1 never holds them.
+    if v2 != matches!(tag, TAG_TERMINAL_OBSERVED | TAG_AUTHORIZED_EVIDENCED | TAG_ATTEMPTED_WORKER) {
         return Err(DecodeError::BadTagByte("event", tag));
     }
     match tag {
@@ -580,7 +626,7 @@ fn decode_event(d: &mut Decoder<'_>, v2: bool) -> Result<Event, DecodeError> {
                 native_digest,
             }))
         }
-        TAG_AUTHORIZED => {
+        TAG_AUTHORIZED | TAG_AUTHORIZED_EVIDENCED => {
             let capability = CapabilityBinding {
                 cap_digest: d.digest()?,
                 cap_id: d.id("capability.cap_id")?,
@@ -594,20 +640,59 @@ fn decode_event(d: &mut Decoder<'_>, v2: bool) -> Result<Event, DecodeError> {
                 authorized_at_ms: d.u64()?,
             };
             let action = decode_action(d, "authorized.action")?;
-            Ok(Event::Authorized(Authorized { capability, action }))
+            let use_evidence = if tag == TAG_AUTHORIZED_EVIDENCED {
+                Some(match d.u8()? {
+                    USE_NOT_PROVIDED => UseEvidence::NotProvided,
+                    USE_NON_DURABLE_MEMORY => UseEvidence::NonDurableMemory,
+                    USE_DURABLE => UseEvidence::Durable {
+                        record_hash: d.digest()?,
+                        position: d.u64()?,
+                        head: d.digest()?,
+                    },
+                    USE_NO_NEW_RECORD => UseEvidence::NoNewRecord {
+                        position: d.u64()?,
+                        head: d.digest()?,
+                    },
+                    other => return Err(DecodeError::BadTagByte("authorized.use_evidence", other)),
+                })
+            } else {
+                None
+            };
+            Ok(Event::Authorized(Authorized {
+                capability,
+                action,
+                use_evidence,
+            }))
         }
         TAG_REJECTED => Ok(Event::Rejected(Rejected {
             reason: d.text("rejected.reason", 1, MAX_TEXT_BYTES)?,
         })),
-        TAG_ATTEMPTED => {
+        TAG_ATTEMPTED | TAG_ATTEMPTED_WORKER => {
             let action = ActualAction {
                 operation: d.text("attempted.action", 1, MAX_OPERATION_BYTES)?,
                 resource: d.text("attempted.action", 1, MAX_TEXT_BYTES)?,
                 argument_digest: d.digest()?,
             };
+            let started_at_ms = d.u64()?;
+            let worker = if tag == TAG_ATTEMPTED_WORKER {
+                Some(WorkerBinding {
+                    image_sha256: d.digest()?,
+                    limits: AppliedLimits {
+                        wall_clock_deadline_ns: d.u64()?,
+                        cpu_seconds: d.u64()?,
+                        address_space_bytes: d.u64()?,
+                        max_output_bytes: d.u64()?,
+                        file_size_bytes: d.u64()?,
+                        nofile: d.u32()?,
+                    },
+                })
+            } else {
+                None
+            };
             Ok(Event::Attempted(Attempted {
                 action,
-                started_at_ms: d.u64()?,
+                started_at_ms,
+                worker,
             }))
         }
         TAG_TERMINAL | TAG_TERMINAL_OBSERVED => {

@@ -29,7 +29,7 @@ use stack_authority::{AuthorizedAction, Clock};
 use crate::log::{Head, LogError, ReceiptLog};
 use crate::record::{
     Action, ActualAction, Attempted, Authorized, CapabilityBinding, Event, ExecutionId, Observed, Outcome, Proposed,
-    Provenance, Record, Rejected, Terminal, TerminalObserved, ValidationError,
+    Provenance, Record, Rejected, Terminal, TerminalObserved, ValidationError, WorkerBinding,
 };
 use crate::sign::{ReceiptSigner, SignError, SignedRecord};
 
@@ -224,6 +224,8 @@ impl Execution<ProposedStage> {
                 operation: action.operation().to_owned(),
                 resource: action.resource().to_owned(),
             },
+            // Receipt format version 2: what the use store returned.
+            use_evidence: Some(*action.use_evidence()),
         })
     }
 
@@ -255,8 +257,30 @@ impl Execution<AuthorizedStage> {
     /// arguments nor the resource to its built-in workers (R2-X-02). The
     /// payload may start only once this returns `Ok`.
     pub fn attempt(self, action: ActualAction, started_at_ms: u64) -> Result<Execution<AttemptedStage>, AttemptUnrecorded> {
-        self.append(Event::Attempted(Attempted { action, started_at_ms }))
-            .map_err(AttemptUnrecorded)?;
+        self.append(Event::Attempted(Attempted {
+            action,
+            started_at_ms,
+            worker: None,
+        }))
+        .map_err(AttemptUnrecorded)?;
+        Ok(self.advance())
+    }
+
+    /// [`Self::attempt`] for a kernel that knows which worker image it pinned
+    /// and which limits it hands the supervisor: records a format version 2
+    /// `Attempted` that binds both, before the payload starts.
+    pub fn attempt_with_worker(
+        self,
+        action: ActualAction,
+        started_at_ms: u64,
+        worker: WorkerBinding,
+    ) -> Result<Execution<AttemptedStage>, AttemptUnrecorded> {
+        self.append(Event::Attempted(Attempted {
+            action,
+            started_at_ms,
+            worker: Some(worker),
+        }))
+        .map_err(AttemptUnrecorded)?;
         Ok(self.advance())
     }
 

@@ -54,7 +54,7 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use digest::Digest32;
 pub use file_store::{FileUseStore, LOG_HEADER, MAX_LOG_BYTES, RECORD_BYTES, RECORD_DOMAIN};
 pub use scope::{validate_path, PathError, ResourceScope, ScopeKind, MAX_PATH_BYTES};
-pub use store::{MemoryUseStore, UseError, UseKey, UseStore};
+pub use store::{MemoryUseStore, UseError, UseEvidence, UseKey, UseStore};
 pub use trust::{
     AnchorStatus, BadSignature, KeyId, PublicKey, Purpose, ResolveError, RevocationList, TrustAnchor, TrustError,
     TrustSet, KEY_ID_DOMAIN,

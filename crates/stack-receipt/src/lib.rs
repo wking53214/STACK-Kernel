@@ -72,4 +72,5 @@ pub use record::{
     Problem, Proposed, Provenance, ReceiptKeyId, Record, Rejected, Stage, Subject, Terminal, TerminalObserved,
     ValidationError, Verdict, EXECUTION_ID_BYTES, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES,
 };
-pub use stack_authority::Digest32;
+pub use record::{AppliedLimits, WorkerBinding};
+pub use stack_authority::{Digest32, UseEvidence};

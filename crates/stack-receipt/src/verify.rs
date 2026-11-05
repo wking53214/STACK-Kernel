@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use sha2::{Digest, Sha256};
-use stack_authority::Digest32;
+use stack_authority::{Digest32, UseEvidence};
 
 use crate::cns::{subject_digest, CnsValue};
 use crate::decision::{check_authorized_decision, DecisionFinding, RosterPolicy};
@@ -108,6 +108,14 @@ pub enum Check {
     /// The supervisor-observed facts of a version 2 terminal agree with its
     /// outcome (Completed only on a clean exit 0 with one valid frame).
     ObservedFactsConsistentWithOutcome,
+    /// The recorded worker image digest is the one the auditor expects.
+    WorkerImageMatchesExpected,
+    /// The recorded worker limits are the ones the auditor expects.
+    WorkerLimitsMatchExpected,
+    /// The recorded native component digest is the one the auditor expects.
+    NativeDigestMatchesExpected,
+    /// A durable use record's position and hashes are well formed.
+    UseEvidenceWellFormed,
 }
 
 impl Check {
@@ -129,6 +137,10 @@ impl Check {
             Self::OutcomeConsistentWithStageOrder => "outcome_consistent_with_stage_order",
             Self::ResultDigestRecomputed => "result_digest_recomputed",
             Self::ObservedFactsConsistentWithOutcome => "observed_facts_consistent_with_outcome",
+            Self::WorkerImageMatchesExpected => "worker_image_matches_expected",
+            Self::WorkerLimitsMatchExpected => "worker_limits_match_expected",
+            Self::NativeDigestMatchesExpected => "native_digest_matches_expected",
+            Self::UseEvidenceWellFormed => "use_evidence_well_formed",
         }
     }
 }
@@ -171,6 +183,23 @@ pub enum Limitation {
     /// supervisor-observed exit and frame facts, so they cannot be checked
     /// against the outcome. A limitation of the old receipt, not a failure.
     SupervisorObservedFactsNotRecorded,
+    /// An `Attempted` record of receipt format version 1 does not bind the
+    /// worker image digest or the limits the supervisor applied, so the
+    /// receipt cannot say which program ran or under which limits. A
+    /// limitation of the old receipt, not a failure.
+    WorkerIdentityNotRecorded,
+    /// The worker image digest and limits are recorded but the auditor
+    /// supplied no expectation to compare them with.
+    WorkerExpectationNotSupplied,
+    /// An `Authorized` record of receipt format version 1 does not bind the
+    /// use store's evidence. A limitation of the old receipt, not a failure.
+    UseEvidenceNotRecorded,
+    /// The use store returned no evidence (a store that predates the API), so
+    /// the receipt cannot show where the one-time use was recorded.
+    UseEvidenceNotProvidedByStore,
+    /// The use was recorded by a non-durable store: it proves nothing about
+    /// the use across a restart.
+    UseEvidenceNonDurable,
 }
 
 impl Limitation {
@@ -191,6 +220,11 @@ impl Limitation {
             Self::LogRollbackNotDetectableWithoutAnchor => "log_rollback_not_detectable_without_anchor",
             Self::TornTailIgnored => "torn_tail_ignored",
             Self::SupervisorObservedFactsNotRecorded => "supervisor_observed_facts_not_recorded",
+            Self::WorkerIdentityNotRecorded => "worker_identity_not_recorded",
+            Self::WorkerExpectationNotSupplied => "worker_expectation_not_supplied",
+            Self::UseEvidenceNotRecorded => "use_evidence_not_recorded",
+            Self::UseEvidenceNotProvidedByStore => "use_evidence_not_provided_by_store",
+            Self::UseEvidenceNonDurable => "use_evidence_non_durable",
         }
     }
 }
@@ -309,6 +343,15 @@ pub enum FindingCode {
     /// that the outcome contradicts (Unreaped without TerminationUnconfirmed,
     /// a valid frame under ResultMissing).
     ObservedFactsContradictOutcome,
+    /// The recorded worker image digest is not the one the auditor expects.
+    WorkerImageMismatch,
+    /// The recorded worker limits are not the ones the auditor expects.
+    WorkerLimitsMismatch,
+    /// The recorded native component digest (or its label) is not the one the
+    /// auditor expects. Independent of the CNS subject digest.
+    NativeDigestMismatch,
+    /// A durable use record claims position 0.
+    UseEvidenceMalformed,
     /// A torn frame was discarded (informational).
     TornTailDiscarded,
     /// A complete unacknowledged frame was adopted (informational).
@@ -377,6 +420,10 @@ impl FindingCode {
             Self::NotAuthorized => "not_authorized",
             Self::WorkerMayStillBeRunning => "worker_may_still_be_running",
             Self::ObservedFactsContradictOutcome => "observed_facts_contradict_outcome",
+            Self::WorkerImageMismatch => "worker_image_mismatch",
+            Self::WorkerLimitsMismatch => "worker_limits_mismatch",
+            Self::NativeDigestMismatch => "native_digest_mismatch",
+            Self::UseEvidenceMalformed => "use_evidence_malformed",
             Self::TornTailDiscarded => "torn_tail_discarded",
             Self::TrailingFrameAdopted => "trailing_frame_adopted",
         }
@@ -418,6 +465,15 @@ pub struct Expectations<'a> {
     pub kernel_id: Option<&'a str>,
     /// The result bytes, to recompute a Completed outcome's digest.
     pub result_bytes: Option<&'a [u8]>,
+    /// The SHA-256 of the worker image the auditor expects the supervisor to
+    /// have run (from the release record).
+    pub worker_image_sha256: Option<&'a Digest32>,
+    /// The limits the auditor expects the supervisor to have applied.
+    pub worker_limits: Option<&'a crate::record::AppliedLimits>,
+    /// The native component digest the auditor expects (for example a
+    /// Sentinel ledger row hash it holds). Compared with the record's
+    /// `native_digest`, never with the CNS subject digest.
+    pub native_digest: Option<&'a crate::record::NativeDigest>,
 }
 
 /// What the execution's records say happened.
@@ -763,14 +819,41 @@ fn verify_execution(
         if p.handoff.is_some() {
             scope.limit(Limitation::HandoffProvenanceNotRechecked);
         }
-        if p.native_digest.is_some() {
-            scope.limit(Limitation::NativeComponentNotVerified);
+        if let Some(n) = &p.native_digest {
+            match exp.native_digest {
+                Some(want) => {
+                    scope.check(Check::NativeDigestMatchesExpected);
+                    if want.label != n.label || !want.digest.ct_eq(&n.digest) {
+                        findings.push(Finding::new(
+                            FindingCode::NativeDigestMismatch,
+                            None,
+                            "recorded native component digest is not the expected one",
+                        ));
+                    }
+                }
+                None => scope.limit(Limitation::NativeComponentNotVerified),
+            }
         }
     }
 
     // Authorization.
     if let Some(a) = authorized {
         scope.limit(Limitation::CapabilitySignatureNotRechecked);
+        match &a.use_evidence {
+            None => scope.limit(Limitation::UseEvidenceNotRecorded),
+            Some(UseEvidence::NotProvided) => scope.limit(Limitation::UseEvidenceNotProvidedByStore),
+            Some(UseEvidence::NonDurableMemory) => scope.limit(Limitation::UseEvidenceNonDurable),
+            Some(UseEvidence::Durable { position, .. } | UseEvidence::NoNewRecord { position, .. }) => {
+                scope.check(Check::UseEvidenceWellFormed);
+                if *position == 0 && matches!(a.use_evidence, Some(UseEvidence::Durable { .. })) {
+                    findings.push(Finding::new(
+                        FindingCode::UseEvidenceMalformed,
+                        None,
+                        "a durable use record cannot be at position 0",
+                    ));
+                }
+            }
+        }
         if let Some(p) = proposed {
             scope.check(Check::RosterComplete);
             match exp.roster_policy {
@@ -821,6 +904,34 @@ fn verify_execution(
 
     // The attempt.
     if let Some(at_) = attempted {
+        match &at_.worker {
+            None => scope.limit(Limitation::WorkerIdentityNotRecorded),
+            Some(w) => {
+                if exp.worker_image_sha256.is_none() && exp.worker_limits.is_none() {
+                    scope.limit(Limitation::WorkerExpectationNotSupplied);
+                }
+                if let Some(want) = exp.worker_image_sha256 {
+                    scope.check(Check::WorkerImageMatchesExpected);
+                    if !want.ct_eq(&w.image_sha256) {
+                        findings.push(Finding::new(
+                            FindingCode::WorkerImageMismatch,
+                            None,
+                            "recorded worker image digest is not the expected one",
+                        ));
+                    }
+                }
+                if let Some(want) = exp.worker_limits {
+                    scope.check(Check::WorkerLimitsMatchExpected);
+                    if *want != w.limits {
+                        findings.push(Finding::new(
+                            FindingCode::WorkerLimitsMismatch,
+                            None,
+                            "recorded worker limits are not the expected ones",
+                        ));
+                    }
+                }
+            }
+        }
         scope.check(Check::ActionConsistent);
         if let Some(a) = authorized {
             if at_.action.as_action() != a.action {

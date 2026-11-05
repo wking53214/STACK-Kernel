@@ -286,6 +286,16 @@ pub trait Executor: Send + Sync + fmt::Debug {
             observed: None,
         })
     }
+
+    /// The worker program and the limits this executor would run `kind` under,
+    /// for the receipt's `Attempted` record (receipt format version 2). The
+    /// default says nothing, so an executor that cannot name its worker
+    /// (a test double) writes a version 1 `Attempted` and the verifier lists
+    /// the missing identity as a limitation.
+    fn worker_binding(&self, kind: WorkerKind, limits: &ExecutionLimits) -> Option<stack_receipt::WorkerBinding> {
+        let _ = (kind, limits);
+        None
+    }
 }
 
 /// Everything the real executor needs from kernel configuration. None of it
@@ -439,6 +449,22 @@ fn completed_conditions_hold(report: &stack_ffi::SupervisedReport) -> bool {
 }
 
 impl Executor for SupervisedExecutor {
+    fn worker_binding(&self, _kind: WorkerKind, limits: &ExecutionLimits) -> Option<stack_receipt::WorkerBinding> {
+        Some(stack_receipt::WorkerBinding {
+            // The digest this executor pinned at construction and that the
+            // supervisor re-verifies against the image it executes on every run.
+            image_sha256: stack_receipt::Digest32::from_bytes(self.worker_sha256),
+            limits: stack_receipt::AppliedLimits {
+                wall_clock_deadline_ns: limits.wall_clock_deadline_ns,
+                cpu_seconds: limits.cpu_seconds,
+                address_space_bytes: limits.address_space_bytes,
+                max_output_bytes: limits.max_output_bytes,
+                file_size_bytes: limits.file_size_bytes,
+                nofile: limits.nofile,
+            },
+        })
+    }
+
     fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError> {
         self.run_with_facts(kind, limits, args).map(|(report, _)| report)
     }

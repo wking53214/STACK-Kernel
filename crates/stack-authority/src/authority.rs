@@ -45,7 +45,7 @@ use crate::capability::{Field, ParseError, SignedCapability, MAX_ID_BYTES, MAX_W
 use crate::clock::Clock;
 use crate::digest::Digest32;
 use crate::scope::is_control;
-use crate::store::{UseError, UseKey, UseStore};
+use crate::store::{UseError, UseEvidence, UseKey, UseStore};
 use crate::trust::{KeyId, ResolveError, RevocationList, TrustSet};
 use crate::CapabilityDigest;
 
@@ -260,6 +260,7 @@ pub struct AuthorizedAction {
     decision_root: Digest32,
     one_time: bool,
     authorized_at_ms: u64,
+    use_evidence: UseEvidence,
 }
 
 impl AuthorizedAction {
@@ -321,6 +322,12 @@ impl AuthorizedAction {
     /// The verifier's clock when it authorized.
     pub const fn authorized_at_ms(&self) -> u64 {
         self.authorized_at_ms
+    }
+
+    /// What the use store returned when it recorded this use: a durable
+    /// record hash and position, a labeled non-durable marker, or nothing.
+    pub const fn use_evidence(&self) -> &UseEvidence {
+        &self.use_evidence
     }
 }
 
@@ -502,7 +509,7 @@ impl Authority {
             return Err(AuthzError::ResourceDenied);
         }
         // 13. Record the use, last.
-        store.record_use(
+        let use_evidence = store.record_use_evidenced(
             &UseKey {
                 cap_id: &cap.cap_id,
                 digest: signed.digest(),
@@ -524,6 +531,7 @@ impl Authority {
             decision_root: cap.decision_root,
             one_time: cap.one_time,
             authorized_at_ms: now,
+            use_evidence,
         })
     }
 }

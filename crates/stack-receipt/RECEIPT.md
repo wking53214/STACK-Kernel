@@ -113,8 +113,7 @@ committed script under `python3 -I` at CNS commit
 
 ### Format version 2: supervisor-observed facts (D1-C)
 
-Status: implemented and tested in this crate and in `stack-admission`'s executor;
-NOT yet written by a real admission run (see "Not wired" below).
+Status: implemented and tested in this crate and in `stack-admission`, which writes it on every real run.
 
 A terminal event may carry the two facts the supervisor observed
 (`cpp/CONTAINMENT.md`, "Supervisor-observed facts and payload claims"):
@@ -151,11 +150,70 @@ The facts are the supervisor's observation. Nothing in a receipt, version 2 or
 not, makes the result bytes anything but the worker's own claim
 (`result_is_self_reported` stays a limitation of every `completed`).
 
-Not wired: `stack-admission`'s `admission.rs` still records its terminal with
-`Recorder::finish`, so an admission run today writes a version 1 terminal and its
-verification carries `supervisor_observed_facts_not_recorded`.
-`Executor::run_observed` and `Recorder::finish_observed` are the two calls that
-close the gap; the change belongs in `admission.rs`.
+Wired (Step 1, R3-K-01): `stack-admission` records its terminal through
+`Executor::run_observed` and `Recorder::finish_observed`, so a real admission run
+writes a version 2 terminal (`tests/observed_terminal.rs`). An executor that
+observes nothing, and a run refused before spawn, still write a version 1 terminal
+and carry `supervisor_observed_facts_not_recorded`.
+
+### Format version 2 additions: worker identity and use evidence (Step 2, R-7, G-5)
+
+Status: implemented and tested (`tests/worker_use_evidence.rs`,
+`stack-admission/tests/worker_use_native.rs`, `stack-authority/tests/use_evidence.rs`).
+Two further version 2 events, under the same `stack-receipt/2` tag and the same
+one-encoding rule; version 1 records are untouched (`tests/compat_v1.rs` pins the
+bytes).
+
+| Event | Version 1 tag byte | Version 2 tag byte | Addition |
+|---|---|---|---|
+| `Attempted` | 4 | 8 | after `started_at_ms`: `image_sha256` (32 bytes), then the limits the supervisor was given as explicit fields: `wall_clock_deadline_ns`, `cpu_seconds`, `address_space_bytes`, `max_output_bytes`, `file_size_bytes` (u64 each), `nofile` (u32). 76 bytes. |
+| `Authorized` | 2 | 7 | after the action: the use store's evidence, a kind byte then `not_provided`, `non_durable_memory`, `durable` (record hash, position u64, head) or `no_new_record` (position, head) |
+
+The limits are written explicitly (76 bytes) and not as a digest: a digest of the
+limits plus the deadline is 40 bytes, but only the explicit form lets a verifier
+state under which limits the worker ran without already knowing them. The deadline
+is recorded in nanoseconds, exactly as applied; `AppliedLimits::wall_clock_deadline_ms`
+rounds up. They are the limits the kernel handed the supervisor. A zero
+`cpu_seconds` or `nofile` means the supervisor derived the value, and the derived
+value is not reported back (so it is not in the record).
+
+`image_sha256` is the digest the supervisor pinned at construction and re-verifies
+against the image it executes on every run (R2-K-21). It is the kernel's statement
+of which program ran; a verifier that holds the release record checks it with
+`Expectations::worker_image_sha256` (finding `worker_image_mismatch`), and the
+limits with `Expectations::worker_limits` (finding `worker_limits_mismatch`). With
+neither supplied the verifier says `worker_expectation_not_supplied`.
+
+Use evidence: `stack-authority`'s `UseStore::record_use_evidenced` returns where
+the use was recorded. `FileUseStore` gives the new record's hash, its position
+(from 1) and the store head; `MemoryUseStore` gives the labeled marker
+`non_durable_memory`, never a position; a store that predates the method gives
+`not_provided`. The verifier reports absence in a version 1 `Authorized` as the
+limitation `use_evidence_not_recorded`, `not_provided` as
+`use_evidence_not_provided_by_store`, `non_durable_memory` as
+`use_evidence_non_durable`, and a durable record at position 0 as the finding
+`use_evidence_malformed`. The evidence is what the store REPORTED. It is not
+checked against the store file here, and two executions claiming the same
+position are not cross-checked (planned).
+
+### Which native component each digest refers to (G-4, R-6)
+
+Four digests sit in a record and are never merged or truncated:
+
+| Field | Refers to | Checked by |
+|---|---|---|
+| `subject.digest` | the CNS content, recomputed by the kernel from the payload's `subject` | `Expectations::subject_content` (`subject_digest_mismatch`) |
+| `handoff` (sender fingerprint, sequence, nonce, assurance) | the Trident handoff: the MAC verification result. The Trident verified the envelope MAC under a shared key and the kernel records that it did so under the Production profile. The MAC itself is not in the record | not re-checked here (`handoff_provenance_not_rechecked`) |
+| `native_digest` (label and digest) | optional: the sender's own digest of its native record, for example a Sentinel ledger row hash, passed in the payload's `native_digest` field and authenticated by the Trident MAC with the rest of the payload | `Expectations::native_digest` (`native_digest_mismatch`); without it `native_component_not_verified` |
+| `capability.cap_digest` | the signed capability bytes | not re-checked (`capability_signature_not_rechecked`) |
+
+The kernel does not recompute the native digest: no Sentinel verification hook
+exists in admission (planned). Tampering with the native digest and tampering with
+the subject digest are caught by different expectations and neither finding implies
+the other (`tests/worker_use_evidence.rs`
+`tampering_the_native_digest_is_caught_and_the_subject_digest_still_checks_out` and
+`tampering_the_cns_subject_digest_is_caught_and_the_native_digest_still_checks_out`;
+the same through a real run in `stack-admission/tests/worker_use_native.rs`).
 
 ### Outcome vocabulary
 

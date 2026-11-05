@@ -25,7 +25,7 @@ payload = { "subject":    { CNS content, integers only },
 | Stage | Does | Fails closed as |
 |---|---|---|
 | 1 handoff | `Trident::verify_wire` under the Production profile; `Assurance::Production`; the sender's own gate claim must be PASS | `Refused { stage: Handoff }`, nothing recorded (no subject to speak of) |
-| 2 payload | strict parse: exactly six fields, bounded strings, lowercase hex, resource path rules | `Refused { stage: Payload }`, nothing recorded |
+| 2 payload | strict parse: exactly six fields plus one optional `native_digest` (label and 64 lowercase hex), bounded strings, resource path rules | `Refused { stage: Payload }`, nothing recorded |
 | 3 binding | the kernel recomputes the subject digest (`cns-digest/1`, restricted v1) and the decision root; every verdict must carry that digest and name one subject; the roster must hold exactly one bound PASS per seat the KERNEL POLICY requires, at the position (`seat_positions`: alpha or omega) the policy states for it, with no two seats sharing a gate name | `Refused { stage: Binding }`, `proposed` then `rejected` recorded |
 | 4 authorization | the operation must be in the kernel's map; then `Authority::authorize` with an `ActionRequest` built from the kernel's own recomputed values, audience and clock, with the durable use store | `Refused { stage: Authorization }`, recorded |
 | 5 write-ahead | `authorized` then `attempted` (operation, resource, SHA-256 of the argument bytes) made durable before the executor is called | no attempt record, no execution: `Refused { stage: Attempt }` |
@@ -58,12 +58,25 @@ itself said `allowed: true` for that decision).
 | Stages 1 to 8 | implemented | `tests/admission.rs`, `tests/execution.rs`, `tests/adversarial.rs` |
 | Kernel policy (seats, operation map, limits, provenance) | implemented, validated | `config::tests` |
 | Executor seam over the supervised C++ worker program, fail-closed when the worker path is unset or unusable, governed before spawn | implemented | `tests/smoke.rs`, `tests/worker_governance.rs`; the only file naming `stack-ffi` is `src/executor.rs` |
+| Worker identity in the receipt: the `Attempted` record binds the worker image SHA-256 the supervisor pinned and the limits it was given (version 2) | implemented | `tests/worker_use_native.rs` |
+| Use evidence in the receipt: the `Authorized` record binds the use store's record hash and position (`FileUseStore`) or a labeled non-durable marker (version 2) | implemented | `tests/worker_use_native.rs` |
+| Native digest kept apart from the CNS subject digest; each tamper caught by its own expectation | implemented | `tests/worker_use_native.rs` |
 | Independent verification of the log | implemented in tests, with fresh trusted keys and the auditor's own expectations | `tests/execution.rs` |
 | Fixtures from the real CNS SuperGate (8 cases) | committed, regenerates byte for byte | `tests/fixtures/gen_cns_governed_decisions.py` |
 | Capability issuer | EXPERIMENTAL: exists only as a test helper with fixture seeds | `tests/common/mod.rs` (the only signing path in the crate) |
 | Real worker programs and argument delivery | PLANNED: the C ABI runs a fixed built-in set | see Limits |
 | UAI-1 envelopes as the decision carrier | BLOCKED: decision pending (register R2-E-06) | none |
 | Two or more hosts sharing replay, use or receipt state | BLOCKED: one VM here, and the stores are single-writer by lock | `a_second_verifier_on_the_same_stores_cannot_start_it_is_locked_not_reconciled` |
+
+### Which native component each digest refers to
+
+The CNS subject digest is the kernel's own recomputation over the payload's
+`subject`. The handoff fields are the result of the Trident MAC verification (the
+MAC is not in the record). The optional `native_digest` is the sender's own digest
+of its native record, for example a Sentinel ledger row hash; it travels inside the
+MAC-authenticated payload, is recorded as given under its label, and is NOT
+recomputed by the kernel (a Sentinel verification hook is planned). See
+`crates/stack-receipt/RECEIPT.md`, "Which native component each digest refers to".
 
 ## 4. Scenario to test
 

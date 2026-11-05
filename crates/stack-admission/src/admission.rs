@@ -683,7 +683,7 @@ impl Admission {
                 nonce: *handoff.nonce.as_bytes(),
                 assurance: Assurance::Production,
             }),
-            native_digest: None,
+            native_digest: request.native_digest.clone(),
         };
         let exec = self
             .recorder
@@ -783,7 +783,17 @@ impl Admission {
             resource: action.resource().to_owned(),
             argument_digest: Digest32::from_bytes(Sha256::digest(&args).into()),
         };
-        let running = match exec.attempt(actual, self.clock.now_unix_ms()) {
+        // The worker image and limits the executor will run under are bound in
+        // the same record (receipt format version 2), when it can name them.
+        let runner: &dyn Executor = match &self.cancellable {
+            Some(c) => c.as_ref(),
+            None => self.executor.as_ref(),
+        };
+        let attempt = match runner.worker_binding(kind, &self.policy.limits) {
+            Some(worker) => exec.attempt_with_worker(actual, self.clock.now_unix_ms(), worker),
+            None => exec.attempt(actual, self.clock.now_unix_ms()),
+        };
+        let running = match attempt {
             Ok(r) => r,
             Err(stack_receipt::AttemptUnrecorded(e)) => {
                 return AdmissionResult::Refused(Refused {

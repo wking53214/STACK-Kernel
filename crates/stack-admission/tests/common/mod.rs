@@ -239,6 +239,10 @@ impl Executor for CountingExecutor {
         self.note_run();
         self.inner.run_observed(kind, limits, args)
     }
+
+    fn worker_binding(&self, kind: WorkerKind, limits: &ExecutionLimits) -> Option<stack_receipt::WorkerBinding> {
+        self.inner.worker_binding(kind, limits)
+    }
 }
 
 /// An executor that returns a fixed answer, for the contradictory and
@@ -819,8 +823,30 @@ pub fn verify_bytes_full(bytes: &[u8], case: &Value, result: Option<&[u8]>) -> L
         audience: Some(KERNEL),
         kernel_id: Some(KERNEL),
         result_bytes: result,
+        worker_image_sha256: Some(&expected_worker_image()),
+        ..Expectations::default()
     };
     stack_receipt::verify_log_bytes(bytes, &receipt_trust(), &exp)
+}
+
+/// The worker image digest an auditor expects: the SHA-256 of the worker
+/// program this build compiled, computed here and not read from any receipt.
+pub fn expected_worker_image() -> Digest32 {
+    let path = std::ffi::CString::new(stack_ffi::WORKER_BUILD_PATH).expect("no NUL");
+    Digest32::from_bytes(stack_ffi::worker_image_sha256(&path).expect("hash the worker build"))
+}
+
+/// The limits an auditor expects the kernel policy to have applied.
+pub fn expected_worker_limits() -> stack_receipt::AppliedLimits {
+    let l = policy().limits;
+    stack_receipt::AppliedLimits {
+        wall_clock_deadline_ns: l.wall_clock_deadline_ns,
+        cpu_seconds: l.cpu_seconds,
+        address_space_bytes: l.address_space_bytes,
+        max_output_bytes: l.max_output_bytes,
+        file_size_bytes: l.file_size_bytes,
+        nofile: l.nofile,
+    }
 }
 
 /// The spellings of a scope's unchecked items.

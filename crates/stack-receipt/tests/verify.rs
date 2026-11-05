@@ -25,6 +25,7 @@ fn full<'a>(content: &'a stack_receipt::CnsValue, policy: &'a RosterPolicy) -> E
         audience: Some("kernel-1"),
         kernel_id: Some("kernel-1"),
         result_bytes: Some(result_bytes()),
+        ..Expectations::default()
     }
 }
 
@@ -74,6 +75,10 @@ fn an_honest_completed_execution_with_every_expectation_is_verified_with_limitat
         Limitation::ResultIsSelfReported,
         // D1-C step 2: a version 1 terminal cannot show the supervisor-observed facts.
         Limitation::SupervisorObservedFactsNotRecorded,
+        // Step 2: version 1 Attempted and Authorized records cannot show the worker
+        // identity or the use store's evidence.
+        Limitation::WorkerIdentityNotRecorded,
+        Limitation::UseEvidenceNotRecorded,
     ];
     want.sort();
     assert_eq!(limits, want);

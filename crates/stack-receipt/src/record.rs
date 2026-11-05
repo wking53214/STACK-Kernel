@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use stack_authority::{AuthorizedAction, Digest32};
+use stack_authority::{AuthorizedAction, Digest32, UseEvidence};
 
 /// Longest identifier (kernel, issuer, capability, audience, component,
 /// version, host, seat, gate), in bytes.
@@ -707,6 +707,11 @@ pub struct Authorized {
     pub capability: CapabilityBinding,
     /// The operation and resource authorized.
     pub action: Action,
+    /// What the use store returned when it recorded the capability's use
+    /// (receipt format version 2). `None` is a version 1 record, which cannot
+    /// show it; the verifier lists that as a limitation. Present means the
+    /// record is written under the version 2 tag.
+    pub use_evidence: Option<UseEvidence>,
 }
 
 /// The kernel refused to execute. Terminal.
@@ -724,6 +729,49 @@ pub struct Attempted {
     pub action: ActualAction,
     /// Wall clock at the start.
     pub started_at_ms: u64,
+    /// The worker image and the limits the supervisor was given (receipt
+    /// format version 2). `None` is a version 1 record, which cannot show
+    /// them. Present means the record is written under the version 2 tag.
+    pub worker: Option<WorkerBinding>,
+}
+
+/// The limits the kernel handed the supervisor for one run, recorded
+/// explicitly so a verifier can state under which limits the worker ran. A
+/// zero `cpu_seconds` or `nofile` means the supervisor derived the value; the
+/// derived value is not reported back and is not in the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedLimits {
+    /// Wall-clock deadline in nanoseconds (exact, not rounded).
+    pub wall_clock_deadline_ns: u64,
+    /// `RLIMIT_CPU` seconds; 0 means derived by the supervisor.
+    pub cpu_seconds: u64,
+    /// `RLIMIT_AS` bytes.
+    pub address_space_bytes: u64,
+    /// Largest accepted result in bytes.
+    pub max_output_bytes: u64,
+    /// `RLIMIT_FSIZE` bytes; 0 forbids regular-file writes.
+    pub file_size_bytes: u64,
+    /// `RLIMIT_NOFILE`; 0 means the supervisor's derived floor.
+    pub nofile: u32,
+}
+
+impl AppliedLimits {
+    /// The deadline in whole milliseconds, rounded up.
+    pub const fn wall_clock_deadline_ms(&self) -> u64 {
+        self.wall_clock_deadline_ns.div_ceil(1_000_000)
+    }
+}
+
+/// Which worker program ran and under which limits: the SHA-256 the
+/// supervisor pinned and verified before exec, and the limits it was given.
+/// Kept apart from every other digest in the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerBinding {
+    /// SHA-256 of the worker image, the digest the supervisor pinned and
+    /// verified against the file it executed.
+    pub image_sha256: Digest32,
+    /// The limits the supervisor was given.
+    pub limits: AppliedLimits,
 }
 
 /// How the run ended. Terminal.
@@ -871,6 +919,19 @@ impl Stage {
 }
 
 impl Event {
+    /// Whether this event is written under the version 2 tag: the observed
+    /// terminal, an `Authorized` that carries use evidence, and an
+    /// `Attempted` that carries a worker binding. Every other event, and these
+    /// without their additions, are version 1 and encode as they always did.
+    pub const fn is_v2(&self) -> bool {
+        match self {
+            Self::TerminalObserved(_) => true,
+            Self::Authorized(a) => a.use_evidence.is_some(),
+            Self::Attempted(a) => a.worker.is_some(),
+            _ => false,
+        }
+    }
+
     /// The stage.
     pub const fn stage(&self) -> Stage {
         match self {
