@@ -106,6 +106,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -142,6 +143,10 @@ inline constexpr std::size_t kMaxOutputBytes = 1u << 20;
  * a ResourceLimit instead of the host's memory.
  */
 inline constexpr uint64_t kDefaultAddressSpaceBytes = 4ULL << 30;
+/** The descriptor a worker program finds its result pipe on. 0, 1 and 2 are /dev/null. */
+inline constexpr int kWorkerResultFd = 3;
+/** Longest worker path accepted (bytes, without the terminator). */
+inline constexpr std::size_t kMaxWorkerPathBytes = 4095;
 
 struct Limits {
     /** Required, 1 .. kMaxWallClockDeadlineNs. */
@@ -180,6 +185,20 @@ struct ExecutionReport {
     bool deadline_fired = false;
     /** Bytes placed in the caller's buffer; meaningful only on Completed. */
     uint64_t result_length = 0;
+};
+
+/**
+ * A worker program for SupervisedExecutor::RunWorker. Everything here is
+ * chosen by kernel configuration, never by the payload or the environment.
+ */
+struct WorkerSpec {
+    /** ABSOLUTE path of the worker executable. The supervisor opens it once, before the fork,
+     *  and executes that open descriptor, so a later swap of the path changes nothing. */
+    const char* executable = nullptr;
+    /** argv[1] as a decimal number: which built-in kind the worker runs. */
+    uint32_t kind = 0;
+    /** Optional argv[2]; used by test workers only. Null for none. */
+    const char* argument = nullptr;
 };
 
 /** Payload entry used by the child: writes up to capacity bytes to out and returns the count. */
@@ -260,6 +279,126 @@ public:
         // Parent.
         report.child_pid = pid;
         pipe_w.Close();
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity);
+        return report;
+    }
+
+    /**
+     * Runs a worker PROGRAM (fork, then exec of a separate executable) under
+     * the same supervision as RunThunk. Unlike RunThunk the child is not a
+     * copy of the caller: after the exec it has none of the caller's memory,
+     * its environment is empty, and it holds only descriptors 0 to 2
+     * (/dev/null) and the result pipe on kWorkerResultFd. The worker installs
+     * the strict seccomp filter itself as its first action
+     * (InstallWorkerFilter); the supervisor does not trust that and still
+     * enforces the deadline, the rlimits and the exit status from outside.
+     *
+     * Completed means: the worker exited 0 before the deadline AND sent a
+     * well-formed frame. The frame bytes are the worker's own claim.
+     */
+    [[nodiscard]] static ExecutionReport RunWorker(const Limits& limits, const WorkerSpec& spec, uint8_t* result,
+                                                   std::size_t result_capacity) noexcept {
+        ExecutionReport report{};
+        if (!LimitsAreValid(limits, result, result_capacity) || limits.inherit_fd != -1) {
+            report.outcome = Outcome::InvalidLimits;
+            return report;
+        }
+        if (SigchldIsIgnored()) {
+            report.outcome = Outcome::SigchldIgnored;
+            return report;
+        }
+        const uint64_t t0 = MonotonicNs();
+        const uint64_t deadline = t0 + limits.wall_clock_deadline_ns;
+
+        // The image is opened and checked before anything is forked, and the
+        // child executes this descriptor, not the path.
+        FdGuard image{-1};
+        {
+            const int err = OpenWorkerImage(spec.executable, image.fd);
+            if (err != 0) {
+                report.outcome = Outcome::SpawnFailed;
+                report.error_number = err;
+                report.elapsed_ns = MonotonicNs() - t0;
+                return report;
+            }
+        }
+        // argv and envp are built here, on the stack: the child allocates nothing.
+        char kind_text[16];
+        FormatDecimal(spec.kind, kind_text);
+        char* argv[4] = {const_cast<char*>(spec.executable), kind_text, const_cast<char*>(spec.argument), nullptr};
+        char* envp[1] = {nullptr};
+
+        int pipe_fds[2] = {-1, -1};
+        if (::pipe2(pipe_fds, O_CLOEXEC) != 0) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+        FdGuard pipe_r{pipe_fds[0]};
+        FdGuard pipe_w{pipe_fds[1]};
+        if (!pipe_r.RaiseAbove(2) || !pipe_w.RaiseAbove(2) || !image.RaiseAbove(2)) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+
+        const pid_t parent_pid = ::getpid();
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+        if (pid == 0) {
+            ::close(pipe_r.fd);
+            WorkerChildMain(limits, image.fd, argv, envp, pipe_w.fd, parent_pid);  // never returns
+        }
+
+        report.child_pid = pid;
+        pipe_w.Close();
+        image.Close();
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity);
+        return report;
+    }
+
+    /**
+     * For a worker program: installs the filter the fork path installs (x32
+     * and foreign architectures killed; read only on fd 0; write only on 1,
+     * 2 and the result pipe; anonymous non-executable mmap; no open, socket,
+     * clone, execve, ptrace), with NO_NEW_PRIVS. Call it first, before the
+     * worker reads anything. Irreversible.
+     */
+    [[nodiscard]] static bool InstallWorkerFilter(int result_fd) noexcept {
+        return InstallFilter(result_fd, -1, ::getpid());
+    }
+
+    /** For a worker program: writes one result frame (magic, length, bytes, checksum) to fd. */
+    [[nodiscard]] static bool WriteResultFrame(int fd, const uint8_t* body, std::size_t len) noexcept {
+        return WriteFrame(fd, body, len);
+    }
+
+    [[nodiscard]] static bool LimitsAreValid(const Limits& limits, const uint8_t* result,
+                                             std::size_t result_capacity) noexcept {
+        if (limits.wall_clock_deadline_ns == 0 || limits.wall_clock_deadline_ns > kMaxWallClockDeadlineNs) return false;
+        if (limits.max_output_bytes > kMaxOutputBytes) return false;
+        if (limits.max_output_bytes > result_capacity) return false;
+        if (result == nullptr && limits.max_output_bytes > 0) return false;
+        if (limits.inherit_fd < -1 || (limits.inherit_fd >= 0 && limits.inherit_fd < 3)) return false;
+        return true;
+    }
+
+private:
+    struct FdGuard;
+
+    // The parent half of a run, shared by the fork-of-caller path and the
+    // worker path: watch the child until it exits or the deadline passes,
+    // kill it, reap it, and classify what was seen. pipe_r is the read end of
+    // the result pipe (the write end is already closed here).
+    static void Supervise(ExecutionReport& report, const Limits& limits, pid_t pid, FdGuard& pipe_r, uint64_t t0,
+                          uint64_t deadline, uint8_t* result, std::size_t result_capacity) noexcept {
         (void)::setpgid(pid, pid);  // the child does the same; whichever runs first wins
         (void)::fcntl(pipe_r.fd, F_SETFL, O_NONBLOCK);
         FdGuard pidfd{PidfdOpen(pid)};
@@ -351,7 +490,7 @@ public:
                 report.outcome = Outcome::SupervisorError;
                 report.error_number = errno;
                 report.elapsed_ns = MonotonicNs() - t0;
-                return report;
+                return;
             }
         }
         // Whatever the child wrote before dying is in the pipe; take it, bounded.
@@ -359,20 +498,8 @@ public:
 
         report.elapsed_ns = MonotonicNs() - t0;
         Classify(report, status, parser, poll_failed, poll_errno);
-        return report;
     }
 
-    [[nodiscard]] static bool LimitsAreValid(const Limits& limits, const uint8_t* result,
-                                             std::size_t result_capacity) noexcept {
-        if (limits.wall_clock_deadline_ns == 0 || limits.wall_clock_deadline_ns > kMaxWallClockDeadlineNs) return false;
-        if (limits.max_output_bytes > kMaxOutputBytes) return false;
-        if (limits.max_output_bytes > result_capacity) return false;
-        if (result == nullptr && limits.max_output_bytes > 0) return false;
-        if (limits.inherit_fd < -1 || (limits.inherit_fd >= 0 && limits.inherit_fd < 3)) return false;
-        return true;
-    }
-
-private:
     // ------------------------------------------------------------------
     // Result frame: magic "STKR", u32 length, bytes, u64 FNV-1a of bytes.
     // ------------------------------------------------------------------
@@ -473,7 +600,8 @@ private:
         kExitSeccomp = 124,
         kExitChildMemory = 125,     // output buffer or payload stack could not be mapped
         kExitResultOverflow = 126,  // payload claimed more than kMaxOutputBytes
-        kExitResultWrite = 127
+        kExitResultWrite = 127,
+        kExitExec = 128             // worker path: execveat of the opened image failed
     };
 
     [[nodiscard]] static uint64_t MonotonicNs() noexcept {
@@ -572,7 +700,7 @@ private:
         }
         if (!WIFEXITED(status)) { report.outcome = Outcome::SupervisorError; return; }
         const int code = WEXITSTATUS(status);
-        if (code >= kExitParentGone && code <= kExitResultWrite) { report.outcome = Outcome::SpawnFailed; return; }
+        if (code >= kExitParentGone && code <= kExitExec) { report.outcome = Outcome::SpawnFailed; return; }
         if (code != 0) { report.outcome = Outcome::ExitedNonZero; return; }
         if (parser.state == FrameParser::State::Done) {
             report.outcome = Outcome::Completed;
@@ -632,6 +760,97 @@ private:
         ::_exit(0);
     }
 
+    // ------------------------------------------------------------------
+    // Worker path.
+    // ------------------------------------------------------------------
+
+    // Opens the worker image and checks the OPEN file, not the path: a
+    // regular file, executable, not world-writable, owned by root or by this
+    // process's effective user. Returns 0 or an errno. The descriptor is
+    // close-on-exec, which is also why a script (shebang) worker cannot be
+    // executed: the interpreter would not find the descriptor. Workers are
+    // ELF programs.
+    [[nodiscard]] static int OpenWorkerImage(const char* path, int& fd_out) noexcept {
+        fd_out = -1;
+        if (path == nullptr || path[0] != '/') return EINVAL;
+        std::size_t n = 0;
+        while (path[n] != '\0') {
+            if (++n > kMaxWorkerPathBytes) return ENAMETOOLONG;
+        }
+        const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return errno;
+        struct stat st{};
+        if (::fstat(fd, &st) != 0) {
+            const int e = errno;
+            ::close(fd);
+            return e;
+        }
+        int err = 0;
+        if (!S_ISREG(st.st_mode)) err = EACCES;
+        else if ((st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0) err = EACCES;
+        else if ((st.st_mode & S_IWOTH) != 0) err = EACCES;
+        else if (st.st_uid != 0 && st.st_uid != ::geteuid()) err = EACCES;
+        if (err != 0) {
+            ::close(fd);
+            return err;
+        }
+        fd_out = fd;
+        return 0;
+    }
+
+    static void FormatDecimal(uint32_t v, char (&out)[16]) noexcept {
+        char tmp[12];
+        std::size_t n = 0;
+        do {
+            tmp[n++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        } while (v != 0);
+        std::size_t i = 0;
+        while (n > 0) out[i++] = tmp[--n];
+        out[i] = '\0';
+    }
+
+    // Child side of RunWorker. Raw syscalls only; every exit is _exit.
+    [[noreturn]] static void WorkerChildMain(const Limits& limits, int image_fd, char* const argv[], char* const envp[],
+                                             int result_fd, pid_t parent_pid) noexcept {
+        (void)::setpgid(0, 0);
+        (void)::prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+        if (::getppid() != parent_pid) ::_exit(kExitParentGone);
+        if (!ResetSignals()) ::_exit(kExitSignalReset);
+        if (!WorkerDescriptors(result_fd, image_fd)) ::_exit(kExitDescriptors);
+        if (!ApplyRlimits(limits, image_fd)) ::_exit(kExitRlimits);
+#ifdef __NR_execveat
+        (void)::syscall(__NR_execveat, image_fd, "", argv, envp, AT_EMPTY_PATH);
+#else
+        (void)argv;
+        (void)envp;
+#endif
+        ::_exit(kExitExec);
+    }
+
+    // Leaves exactly: 0, 1, 2 on /dev/null, the result pipe on kWorkerResultFd
+    // (inheritable), and the image descriptor (close-on-exec, moved to 4 or
+    // above). Everything else is closed. image_fd is updated if it moved.
+    [[nodiscard]] static bool WorkerDescriptors(int result_fd, int& image_fd) noexcept {
+        if (image_fd <= kWorkerResultFd) {
+            const int moved = ::fcntl(image_fd, F_DUPFD_CLOEXEC, kWorkerResultFd + 1);
+            if (moved < 0) return false;
+            ::close(image_fd);
+            image_fd = moved;
+        }
+        if (result_fd != kWorkerResultFd && ::dup2(result_fd, kWorkerResultFd) != kWorkerResultFd) return false;
+        if (::fcntl(kWorkerResultFd, F_SETFD, 0) != 0) return false;
+        const int devnull = ::open("/dev/null", O_RDWR);  // not close-on-exec: dup2 onto itself would keep that
+        if (devnull < 0) return false;
+        for (int fd = 0; fd <= 2; ++fd) {
+            if (devnull != fd && ::dup2(devnull, fd) != fd) return false;
+        }
+        if (devnull > 2 && devnull != image_fd) ::close(devnull);
+        CloseRange(kWorkerResultFd + 1, image_fd - 1);
+        CloseRange(image_fd + 1, ~0);
+        return true;
+    }
+
     static constexpr std::size_t kPayloadStackBytes = 8u << 20;
     static constexpr std::size_t kGuardBytes = 1u << 16;
 
@@ -685,7 +904,8 @@ private:
     }
 
     static void CloseRange(int first, int last) noexcept {
-        if (first > last) return;
+        // last == ~0 means "to the end": compare it as unsigned, not as -1 (R2-K-19).
+        if (last != ~0 && first > last) return;
 #ifdef __NR_close_range
         if (::syscall(__NR_close_range, static_cast<unsigned>(first), static_cast<unsigned>(last), 0) == 0) return;
 #endif

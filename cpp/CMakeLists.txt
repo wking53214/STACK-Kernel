@@ -27,6 +27,25 @@ target_link_libraries(stack_production_hardened PRIVATE Catch2::Catch2WithMain s
 add_executable(stack_supervised_exec_tests tests/supervised_exec_tests.cpp)
 target_link_libraries(stack_supervised_exec_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
 
+# The worker program SupervisedExecutor::RunWorker executes (RACE-02, decision
+# A): stack_worker is the shipped build (kinds 0 to 6), stack_worker_test adds
+# kinds that misbehave on purpose and exists for the tests only. Both are
+# linked statically: the image has no dynamic loader and no environment hooks.
+add_executable(stack_worker worker/stack_worker.cpp)
+target_link_libraries(stack_worker PRIVATE stack_containment)
+target_link_options(stack_worker PRIVATE -static)
+add_executable(stack_worker_test worker/stack_worker.cpp)
+target_compile_definitions(stack_worker_test PRIVATE STACK_WORKER_TEST_KINDS=1)
+target_link_libraries(stack_worker_test PRIVATE stack_containment)
+target_link_options(stack_worker_test PRIVATE -static)
+
+add_executable(stack_worker_exec_tests tests/worker_exec_tests.cpp)
+target_compile_definitions(stack_worker_exec_tests PRIVATE
+    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>"
+    STACK_WORKER_TEST_PATH="$<TARGET_FILE:stack_worker_test>")
+target_link_libraries(stack_worker_exec_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
+add_dependencies(stack_worker_exec_tests stack_worker stack_worker_test)
+
 # The waitpid fallback path (no pidfd) with a late-observed deadline: libc
 # kill, waitpid and syscall are interposed by the program itself, so no test
 # hook exists in the header.
@@ -46,6 +65,8 @@ add_test(NAME STACKTests COMMAND stack_tests)
 add_test(NAME STACKProductionHardened COMMAND stack_production_hardened)
 add_test(NAME STACKSupervisedExec COMMAND stack_supervised_exec_tests)
 set_tests_properties(STACKSupervisedExec PROPERTIES TIMEOUT 300)
+add_test(NAME STACKWorkerExec COMMAND stack_worker_exec_tests)
+set_tests_properties(STACKWorkerExec PROPERTIES TIMEOUT 300)
 add_test(NAME STACKFfiHost COMMAND stack_ffi_tests)
 set_tests_properties(STACKFfiHost PROPERTIES TIMEOUT 300)
 
