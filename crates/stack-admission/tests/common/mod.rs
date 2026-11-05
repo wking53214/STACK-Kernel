@@ -10,13 +10,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stack_admission::{
-    Admission, BuildError, ExecutionLimits, Executor, ExecutorError, KernelPolicy, Parts, Refused, RunReport,
+    Admission, AdmissionResult, BuildError, ExecutionLimits, Executor, ExecutorError, KernelPolicy, Parts, Refused, RunReport,
     SupervisedExecutor, WorkerKind,
 };
 use stack_authority::{
@@ -173,18 +173,85 @@ pub fn policy() -> KernelPolicy {
     }
 }
 
-/// The side-effect witness: counts every run the executor is asked for.
-/// A refusal test asserts the count is untouched.
+/// The side-effect witness: counts every run the executor is asked for and
+/// records which receipt stages were already durable in the log FILE at
+/// the instant the run began. A refusal test asserts the count is
+/// untouched; the ordering test asserts `attempted` was on disk first.
+///
+/// The built-in workers cannot write a counter file themselves: they run
+/// under a seccomp filter that kills any `open(2)`. This wrapper sits at
+/// the executor seam, which is the only place a run can be observed from
+/// outside the worker.
 #[derive(Debug)]
 pub struct CountingExecutor {
     pub inner: Box<dyn Executor>,
     pub runs: Arc<AtomicUsize>,
+    pub receipts: PathBuf,
+    pub seen: Arc<Mutex<Vec<Vec<ReceiptStage>>>>,
 }
 
 impl Executor for CountingExecutor {
     fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError> {
         self.runs.fetch_add(1, Ordering::SeqCst);
+        let stages = std::fs::read(&self.receipts)
+            .ok()
+            .and_then(|b| stack_receipt::parse_log(&b).ok())
+            .map(|p| p.records.iter().map(|r| r.record().stage()).collect())
+            .unwrap_or_default();
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.push(stages);
+        }
         self.inner.run(kind, limits, args)
+    }
+}
+
+/// An executor that returns a fixed answer, for the contradictory and
+/// failing reports a real supervisor should never produce.
+#[derive(Debug)]
+pub struct ScriptedExecutor(pub Result<RunReport, ExecutorError>);
+
+impl Executor for ScriptedExecutor {
+    fn run(&self, _: WorkerKind, _: &ExecutionLimits, _: &[u8]) -> Result<RunReport, ExecutorError> {
+        self.0.clone()
+    }
+}
+
+/// A durable log whose `append` fails on chosen calls (1-based), without
+/// touching the file: receipt generation breaks at a chosen point.
+#[derive(Debug)]
+pub struct FailingFileLog {
+    pub inner: FileReceiptLog,
+    pub fail_on: Vec<usize>,
+    pub calls: usize,
+}
+
+impl FailingFileLog {
+    pub fn open(dir: &Path, fail_on: &[usize]) -> Self {
+        let inner = FileReceiptLog::open(receipts_path(dir), KERNEL, &[receipt_public_key(KERNEL)]).unwrap();
+        Self {
+            inner,
+            fail_on: fail_on.to_vec(),
+            calls: 0,
+        }
+    }
+}
+
+impl ReceiptLog for FailingFileLog {
+    fn kernel_id(&self) -> &str {
+        self.inner.kernel_id()
+    }
+    fn head(&self) -> Result<stack_receipt::Head, stack_receipt::LogError> {
+        self.inner.head()
+    }
+    fn append(&mut self, record: &stack_receipt::SignedRecord) -> Result<(), stack_receipt::LogError> {
+        self.calls += 1;
+        if self.fail_on.contains(&self.calls) {
+            return Err(stack_receipt::LogError::Poisoned);
+        }
+        self.inner.append(record)
+    }
+    fn is_durable(&self) -> bool {
+        self.inner.is_durable()
     }
 }
 
@@ -288,9 +355,12 @@ impl Builder {
     pub fn build(self) -> Result<Harness, BuildError> {
         let runs = Arc::new(AtomicUsize::new(0));
         let inner = self.executor.unwrap_or_else(|| Box::new(SupervisedExecutor));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let executor = Box::new(CountingExecutor {
             inner,
             runs: Arc::clone(&runs),
+            receipts: receipts_path(&self.dir),
+            seen: Arc::clone(&seen),
         });
         let receipt_log: Box<dyn ReceiptLog> = match self.receipt_log {
             Some(l) => l,
@@ -321,6 +391,7 @@ impl Builder {
             clock: self.clock,
             admission,
             runs,
+            seen,
             policy: self.policy,
             next_seq: AtomicU64::new(1),
         })
@@ -343,6 +414,7 @@ pub struct Harness {
     pub clock: Arc<ManualClock>,
     pub admission: Admission,
     pub runs: Arc<AtomicUsize>,
+    pub seen: Arc<Mutex<Vec<Vec<ReceiptStage>>>>,
     pub policy: KernelPolicy,
     next_seq: AtomicU64,
 }
@@ -405,6 +477,18 @@ impl Harness {
             Ok(a) => panic!("expected a refusal, got {a:?}"),
             Err(r) => r,
         }
+    }
+
+    /// Runs `payload` through the whole pipeline in a fresh envelope.
+    pub fn process(&self, payload: Value) -> AdmissionResult {
+        self.admission.process(&self.envelope(payload))
+    }
+
+    /// Verifies the receipt log as an auditor who supplies everything it
+    /// can: the case's subject content, the kernel's required roster, the
+    /// audience, and (when given) the result bytes.
+    pub fn verify_full(&self, case: &Value, result: Option<&[u8]>) -> LogVerification {
+        verify_bytes_full(&self.receipt_bytes(), case, result)
     }
 
     /// The receipt log file's bytes (read without the lock).
@@ -576,4 +660,29 @@ pub fn honest_payload(case: &Value, operation: &str) -> Value {
 /// The all-PASS fixture case.
 pub fn all_pass() -> Value {
     case("all_pass")
+}
+
+// ---------------------------------------------------------------------------
+// Independent verification
+// ---------------------------------------------------------------------------
+
+/// The auditor's expectations, built from nothing the producer wrote
+/// except the case's public subject content: fresh trusted keys, the
+/// kernel's required roster, the expected kernel and audience.
+pub fn verify_bytes_full(bytes: &[u8], case: &Value, result: Option<&[u8]>) -> LogVerification {
+    let content = stack_admission::cns_value(&case["subject"]).unwrap();
+    let roster = policy().roster_policy();
+    let exp = Expectations {
+        subject_content: Some(&content),
+        roster_policy: Some(&roster),
+        audience: Some(KERNEL),
+        kernel_id: Some(KERNEL),
+        result_bytes: result,
+    };
+    stack_receipt::verify_log_bytes(bytes, &receipt_trust(), &exp)
+}
+
+/// The spellings of a scope's unchecked items.
+pub fn not_checked(v: &LogVerification) -> Vec<&'static str> {
+    v.scope.not_checked.iter().map(|l| l.as_str()).collect()
 }

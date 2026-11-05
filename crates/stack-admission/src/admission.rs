@@ -18,13 +18,15 @@
 use std::fmt;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use stack_authority::{
-    ActionRequest, Authority, AuthorityConfig, AuthorizedAction, AuthzError, Clock, RevocationList, TrustSet,
-    UseStore,
+    ActionRequest, Authority, AuthorityConfig, AuthorizedAction, AuthzError, Clock, Digest32, RevocationList,
+    TrustSet, UseStore,
 };
 use stack_receipt::{
-    Action, Assurance, AuthorizedStage, Execution, ExecutionId, Handoff, Head, ProposedStage, Proposed,
-    ReceiptLog, ReceiptSigner, RecordError, Recorder, Subject, MAX_TEXT_BYTES,
+    Action, ActualAction, Assurance, AuthorizedStage, Execution, ExecutionId, Handoff, Head, Outcome, Proposed,
+    ProposedStage, ReceiptLog, ReceiptSigner, RecordError, Recorder, Subject, Terminal, TerminalUnrecorded,
+    MAX_TEXT_BYTES,
 };
 use stack_trident::canonical::{to_canonical_bytes, CanonicalError, Limits};
 use stack_trident::{
@@ -35,7 +37,7 @@ use stack_trident::{
 use crate::binding::{self, BindingFinding};
 use crate::clock::KernelClock;
 use crate::config::{ConfigError, KernelPolicy};
-use crate::executor::{Executor, WorkerKind};
+use crate::executor::{Executor, RunOutcome, WorkerKind};
 use crate::payload::{self, PayloadError};
 
 /// What the operator hands the kernel to build its boundaries from. Every
@@ -206,7 +208,6 @@ pub struct Admitted {
     pub(crate) action: AuthorizedAction,
     pub(crate) kind: WorkerKind,
     pub(crate) args: Vec<u8>,
-    #[expect(dead_code, reason = "consumed by the execution stage added in Step 3")]
     pub(crate) exec: Execution<AuthorizedStage>,
 }
 
@@ -243,6 +244,88 @@ impl Admitted {
     }
 }
 
+/// What a successful admission carries. Success means exactly one thing:
+/// the worker exited 0 within the deadline with a well-formed result frame
+/// AND the terminal record is durable. It does not mean the action was
+/// legitimate, and the result bytes are the worker's own claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Success {
+    /// The execution id, for the independent verifier.
+    pub execution_id: ExecutionId,
+    /// The worker's exit status (0).
+    pub exit_code: i32,
+    /// The bytes the worker sent. Self-reported: a hostile worker can
+    /// forge a well-formed result.
+    pub result: Vec<u8>,
+    /// SHA-256 of `result`, as recorded in the terminal record.
+    pub result_digest: Digest32,
+    /// Monotonic time of the run as the executor measured it.
+    pub elapsed_ns: u64,
+    /// The sequence of the terminal record.
+    pub terminal_sequence: u64,
+}
+
+/// A run that ended in anything but a recorded `Completed`, with its
+/// terminal record durable. The receipt is honest about what happened;
+/// the outcome is not success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsuccessful {
+    /// The execution id.
+    pub execution_id: ExecutionId,
+    /// How the run ended.
+    pub outcome: Outcome,
+    /// Monotonic time of the run as the executor measured it.
+    pub elapsed_ns: u64,
+    /// The sequence of the terminal record.
+    pub terminal_sequence: u64,
+}
+
+/// A run whose terminal record could not be made durable. The attempt
+/// stays open in the log; an auditor reads the execution as INCOMPLETE
+/// with outcome `unknown`, whatever was observed. Never success, even if
+/// the observed outcome was `Completed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalLost {
+    /// The execution id.
+    pub execution_id: ExecutionId,
+    /// What the kernel observed and could not record.
+    pub observed: Outcome,
+    /// Why the terminal record failed.
+    pub error: RecordError,
+}
+
+/// What [`Admission::process`] returns. Only [`AdmissionResult::Success`]
+/// is success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "an admission result that is dropped hides a refusal or a failure"]
+pub enum AdmissionResult {
+    /// Completed, and the terminal record is durable.
+    Success(Success),
+    /// Refused at stages 1 to 5. Nothing ran.
+    Refused(Refused),
+    /// Ran (or may have) and did not complete; the terminal is recorded.
+    Unsuccessful(Unsuccessful),
+    /// Ran (or may have); the terminal could not be recorded.
+    TerminalLost(TerminalLost),
+}
+
+impl AdmissionResult {
+    /// Whether this is a recorded `Completed`. The only success.
+    pub const fn is_success(&self) -> bool {
+        matches!(self, Self::Success(_))
+    }
+
+    /// The execution id, when one was drawn.
+    pub const fn execution_id(&self) -> Option<ExecutionId> {
+        match self {
+            Self::Success(s) => Some(s.execution_id),
+            Self::Refused(r) => r.execution_id,
+            Self::Unsuccessful(u) => Some(u.execution_id),
+            Self::TerminalLost(t) => Some(t.execution_id),
+        }
+    }
+}
+
 /// The kernel's admission boundary.
 #[derive(Debug)]
 pub struct Admission {
@@ -252,16 +335,14 @@ pub struct Admission {
     authority: Authority,
     use_store: Box<dyn UseStore>,
     recorder: Recorder,
-    #[expect(dead_code, reason = "called by the execution stage added in Step 3")]
     executor: Box<dyn Executor>,
     clock: Arc<dyn Clock>,
 }
 
-/// A reason string a `rejected` record can carry: at most
-/// [`MAX_TEXT_BYTES`], cut at a character boundary, control characters
-/// replaced.
-fn reason_text(stage: Stage, reason: &RefusalReason) -> String {
-    let full: String = format!("{}: {reason}", stage.as_str())
+/// Text a receipt record can carry: at most [`MAX_TEXT_BYTES`], cut at a
+/// character boundary, control characters replaced.
+fn clean_text(text: &str) -> String {
+    let full: String = text
         .chars()
         .map(|c| if c < '\u{20}' || c == '\u{7f}' { ' ' } else { c })
         .collect();
@@ -270,6 +351,11 @@ fn reason_text(stage: Stage, reason: &RefusalReason) -> String {
         end = end.saturating_sub(1);
     }
     full.get(..end).unwrap_or("refused").to_owned()
+}
+
+/// A reason string a `rejected` record can carry.
+fn reason_text(stage: Stage, reason: &RefusalReason) -> String {
+    clean_text(&format!("{}: {reason}", stage.as_str()))
 }
 
 impl Admission {
@@ -473,6 +559,152 @@ impl Admission {
             args,
             exec,
         })
+    }
+
+    /// The whole pipeline: stages 1 to 4 ([`Admission::admit`]), then
+    /// [`Admission::execute`]. Every failure is a typed variant;
+    /// `Success` only for a recorded `Completed`.
+    pub fn process(&self, envelope_bytes: &[u8]) -> AdmissionResult {
+        match self.admit(envelope_bytes) {
+            Ok(admitted) => self.execute(admitted),
+            Err(refused) => AdmissionResult::Refused(refused),
+        }
+    }
+
+    /// Stages 5 to 8 for a request that was admitted. The permission to
+    /// call this is the [`Admitted`] value, which only [`Admission::admit`]
+    /// can make.
+    pub fn execute(&self, admitted: Admitted) -> AdmissionResult {
+        let Admitted {
+            execution_id,
+            action,
+            kind,
+            args,
+            exec,
+        } = admitted;
+
+        // ---- 5. Write-ahead: the attempt is durable before anything runs.
+        // If it is not, nothing runs. The one-time capability was consumed
+        // by stage 4 and stays consumed; the log holds `authorized` with no
+        // attempt, which an auditor reads as INCOMPLETE and not attempted.
+        let actual = ActualAction {
+            operation: action.operation().to_owned(),
+            resource: action.resource().to_owned(),
+            argument_digest: Digest32::from_bytes(Sha256::digest(&args).into()),
+        };
+        let running = match exec.attempt(actual, self.clock.now_unix_ms()) {
+            Ok(r) => r,
+            Err(stack_receipt::AttemptUnrecorded(e)) => {
+                return AdmissionResult::Refused(Refused {
+                    stage: Stage::Attempt,
+                    reason: RefusalReason::Receipt(e.clone()),
+                    execution_id: Some(execution_id),
+                    recorded: false,
+                    record_error: Some(e),
+                });
+            }
+        };
+
+        // ---- 6. Execution through the seam, under the kernel's limits.
+        let wall = std::time::Instant::now();
+        let report = self.executor.run(kind, &self.policy.limits, &args);
+        let measured_ns = u64::try_from(wall.elapsed().as_nanos()).unwrap_or(u64::MAX);
+
+        // ---- 7. The terminal event from what was observed. Anything the
+        // executor could not report is Unknown; an executor that claims a
+        // completion after its own deadline fired, or a result longer than
+        // the cap, is not believed.
+        let (outcome, result, elapsed_ns) = match report {
+            Ok(report) => {
+                let elapsed = report.elapsed_ns;
+                let (outcome, result) = self.observed(report.outcome, report.deadline_fired);
+                (outcome, result, elapsed)
+            }
+            Err(e) => (
+                Outcome::Unknown {
+                    reason: clean_text(&format!("executor failed: {e}")),
+                },
+                None,
+                measured_ns,
+            ),
+        };
+        let terminal = Terminal {
+            outcome: outcome.clone(),
+            completed_at_ms: self.clock.now_unix_ms(),
+            elapsed_ns,
+        };
+        match running.finish(terminal) {
+            Ok(closed) => match (&outcome, result) {
+                (Outcome::Completed { exit_code, result_digest }, Some(result)) => {
+                    // ---- 8. Success: a recorded Completed.
+                    AdmissionResult::Success(Success {
+                        execution_id,
+                        exit_code: *exit_code,
+                        result,
+                        result_digest: *result_digest,
+                        elapsed_ns,
+                        terminal_sequence: closed.terminal_sequence,
+                    })
+                }
+                _ => AdmissionResult::Unsuccessful(Unsuccessful {
+                    execution_id,
+                    outcome,
+                    elapsed_ns,
+                    terminal_sequence: closed.terminal_sequence,
+                }),
+            },
+            Err(TerminalUnrecorded { observed_outcome, error }) => AdmissionResult::TerminalLost(TerminalLost {
+                execution_id,
+                observed: observed_outcome,
+                error,
+            }),
+        }
+    }
+
+    /// The receipt outcome for an executor's observation, and the result
+    /// bytes when (and only when) it is a believable completion.
+    fn observed(&self, outcome: RunOutcome, deadline_fired: bool) -> (Outcome, Option<Vec<u8>>) {
+        match outcome {
+            RunOutcome::Completed { exit_code, result } => {
+                let too_long = u64::try_from(result.len()).map_or(true, |n| n > self.policy.limits.max_output_bytes);
+                if deadline_fired || too_long {
+                    (
+                        Outcome::Unknown {
+                            reason: "executor reported a completion that contradicts its own report".to_owned(),
+                        },
+                        None,
+                    )
+                } else {
+                    (
+                        Outcome::Completed {
+                            exit_code,
+                            result_digest: Digest32::from_bytes(Sha256::digest(&result).into()),
+                        },
+                        Some(result),
+                    )
+                }
+            }
+            RunOutcome::TimedOut => (Outcome::TimedOut, None),
+            RunOutcome::Terminated { signal } => (Outcome::Terminated { signal }, None),
+            RunOutcome::TerminationUnconfirmed { reason } => (
+                Outcome::TerminationUnconfirmed {
+                    reason: clean_text(&reason),
+                },
+                None,
+            ),
+            RunOutcome::Crashed { signal } => (Outcome::Crashed { signal }, None),
+            RunOutcome::SeccompViolation { signal } => (Outcome::SeccompViolation { signal }, None),
+            RunOutcome::ResourceLimit { signal } => (Outcome::ResourceLimit { signal }, None),
+            RunOutcome::ResultMissing { exit_code } => (Outcome::ResultMissing { exit_code }, None),
+            RunOutcome::ExitedNonZero { exit_code } => (Outcome::ExitedNonZero { exit_code }, None),
+            RunOutcome::ResultOversized => (Outcome::ResultOversized, None),
+            RunOutcome::Unknown { reason } => (
+                Outcome::Unknown {
+                    reason: clean_text(&reason),
+                },
+                None,
+            ),
+        }
     }
 }
 

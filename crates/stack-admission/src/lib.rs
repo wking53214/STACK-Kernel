@@ -38,10 +38,8 @@
 //! independently verified and still planned. Nothing here claims more
 //! than a named test proves.
 //!
-//! Step 1: the crate skeleton, the kernel policy types, the executor seam
-//! and its supervised implementation. Step 2: stages 1 to 4,
-//! [`Admission::new`] and [`Admission::admit`], the strict payload parse
-//! ([`payload`]) and the CNS binding ([`binding`]).
+//! Stages 1 to 4 are [`Admission::admit`]; stages 5 to 8 are
+//! [`Admission::execute`]; [`Admission::process`] is all of them.
 
 #![forbid(unsafe_code)]
 
@@ -52,7 +50,10 @@ pub mod config;
 pub mod executor;
 pub mod payload;
 
-pub use admission::{Admission, Admitted, BuildError, Parts, RefusalReason, Refused, Stage};
+pub use admission::{
+    Admission, AdmissionResult, Admitted, BuildError, Parts, RefusalReason, Refused, Stage, Success, TerminalLost,
+    Unsuccessful,
+};
 pub use binding::{cns_value, BindingFinding};
 pub use clock::KernelClock;
 pub use config::{ConfigError, KernelPolicy};
