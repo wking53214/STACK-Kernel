@@ -35,7 +35,7 @@ One log per kernel. One execution has events in this order and no other
 | `proposed` | the request arrives, before any check | subject (identity, CNS digest), decision evidence (root, seats, verdicts exactly as CNS rendered them), proposed action, optional Trident handoff provenance, optional native digest | no |
 | `authorized` | `stack-authority` returned an `AuthorizedAction` | capability binding (digest, id, issuer, issuer key id, policy ref, audience, subject digest, decision root, one-time, authorized-at), authorized action | no |
 | `rejected` | the kernel refused, before or after authorization | reason | yes |
-| `attempted` | BEFORE the payload starts (write-ahead) | actual action (operation, resource, argument digest as INTENDED by the producer, not proof the worker received them; see R2-X-02), started-at | no |
+| `attempted` | BEFORE the payload starts (write-ahead) | actual action (operation, resource, argument digest, all as INTENDED by the producer: the executor delivers neither the arguments nor the resource to the worker, so none of them is proof of what the worker received; see R2-X-02), started-at | no |
 | terminal | the run ended | outcome, completed-at, monotonic elapsed | yes |
 | `interrupted` (an outcome) | the kernel stopped the run before any kill | reason | yes |
 | `unknown` (an outcome) | the kernel could not observe the end | reason | yes |
@@ -192,7 +192,9 @@ content. Reject: `log_corrupt`, `sequence_gap`, `prev_hash_mismatch`,
 `decision_root_mismatch`, `empty_roster`, `duplicate_seat`,
 `required_seat_missing`, `required_seat_not_passed`, `verdict_not_pass`,
 `verdict_unbound`, `verdict_for_unseated_gate`, `verdict_count_mismatch`,
-`omega_before_alpha`, `capability_decision_root_mismatch`,
+`omega_before_alpha`, `duplicate_verdict`, `seat_not_judged`,
+`duplicate_gate_name`, `required_seat_wrong_position`,
+`capability_decision_root_mismatch`,
 `capability_subject_mismatch`, `authorized_action_differs_from_proposed`,
 `actual_action_differs_from_authorized`, `audience_mismatch`,
 `subject_digest_mismatch`, `result_digest_mismatch`. Incomplete:

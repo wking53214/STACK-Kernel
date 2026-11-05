@@ -250,6 +250,9 @@ pub enum SupervisedOutcome {
     SupervisorError,
     /// The limits were rejected before anything was spawned.
     InvalidLimits,
+    /// SIGCHLD is ignored in this process (SIG_IGN or SA_NOCLDWAIT), so the
+    /// run could not be supervised; refused before anything was spawned.
+    SigchldIgnored,
     /// A code this crate does not know; carried rather than collapsed.
     Unrecognized(i32),
 }
@@ -268,6 +271,7 @@ impl SupervisedOutcome {
             8 => SupervisedOutcome::SpawnFailed,
             9 => SupervisedOutcome::SupervisorError,
             10 => SupervisedOutcome::InvalidLimits,
+            11 => SupervisedOutcome::SigchldIgnored,
             other => SupervisedOutcome::Unrecognized(other),
         }
     }
@@ -1173,6 +1177,33 @@ mod tests {
         too_big.max_output_bytes = 65;
         let report = supervised_run(PayloadKind::ReturnBytes, &too_big, &mut out).expect("report");
         assert_eq!(report.outcome, SupervisedOutcome::InvalidLimits);
+    }
+
+    /// P2 finding 9: with SIGCHLD set to SIG_IGN the kernel reaps the child,
+    /// waitpid fails with ECHILD, and even a real timeout came back as
+    /// SupervisorError. The run is now refused up front with its own outcome.
+    /// The disposition is process-wide, so this runs in a child copy of the
+    /// test binary and cannot disturb the other tests' forks.
+    #[test]
+    fn test_supervised_run_is_refused_while_sigchld_is_ignored() {
+        const CHILD_ENV: &str = "STACK_FFI_SIGCHLD_CHILD";
+        extern "C" {
+            fn signal(signum: i32, handler: usize) -> usize;
+        }
+        const SIGCHLD: i32 = 17;
+        const SIG_IGN: usize = 1;
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let mut out = [0u8; 64];
+            let before = unsafe { signal(SIGCHLD, SIG_IGN) };
+            let report = supervised_run(PayloadKind::BlockForever, &supervised_limits(), &mut out).expect("report");
+            unsafe { signal(SIGCHLD, before) };
+            assert_eq!(report.outcome, SupervisedOutcome::SigchldIgnored, "{report:?}");
+            assert_eq!(report.child_pid, 0, "nothing may be forked");
+            let after = supervised_run(PayloadKind::BlockForever, &supervised_limits(), &mut out).expect("report");
+            assert_eq!(after.outcome, SupervisedOutcome::TimedOut, "the default disposition runs again");
+            return;
+        }
+        run_in_child("tests::test_supervised_run_is_refused_while_sigchld_is_ignored", CHILD_ENV);
     }
 
     #[test]

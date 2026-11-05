@@ -200,7 +200,8 @@ pub struct Refused {
 
 /// A request that passed every admission check. It carries the one
 /// permission that exists, the [`AuthorizedAction`], and the open receipt
-/// handle. Nothing has run. Dropping it leaves the execution `authorized`
+/// handle. Nothing has run, and outside this crate nothing can: only
+/// [`Admission::process`] executes. Dropping it leaves the execution `authorized`
 /// with nothing after it, which the verifier reports as INCOMPLETE.
 #[must_use = "an admitted request that is dropped was authorized and never attempted"]
 pub struct Admitted {
@@ -547,10 +548,10 @@ impl Admission {
         // The permission exists. Record it; without the record nothing runs.
         let exec = exec.authorize(&action).map_err(|e| Refused {
             stage: Stage::Authorization,
-            reason: RefusalReason::Receipt(e),
+            reason: RefusalReason::Receipt(e.clone()),
             execution_id: Some(execution_id),
             recorded: false,
-            record_error: None,
+            record_error: Some(e),
         })?;
         Ok(Admitted {
             execution_id,
@@ -562,7 +563,7 @@ impl Admission {
     }
 
     /// The whole pipeline: stages 1 to 4 ([`Admission::admit`]), then
-    /// [`Admission::execute`]. Every failure is a typed variant;
+    /// stages 5 to 8 on the same instance. Every failure is a typed variant;
     /// `Success` only for a recorded `Completed`.
     pub fn process(&self, envelope_bytes: &[u8]) -> AdmissionResult {
         match self.admit(envelope_bytes) {
@@ -571,10 +572,22 @@ impl Admission {
         }
     }
 
-    /// Stages 5 to 8 for a request that was admitted. The permission to
-    /// call this is the [`Admitted`] value, which only [`Admission::admit`]
-    /// can make.
-    pub fn execute(&self, admitted: Admitted) -> AdmissionResult {
+    /// Stages 5 to 8 for a request that was admitted. Crate-private on
+    /// purpose: an [`Admitted`] is bound to nothing but its own
+    /// permission, so a public `execute` would let a caller hold one past
+    /// the capability's expiry or revocation, or run it on a second
+    /// `Admission` whose executor and limits differ from the one that
+    /// admitted it. [`Admission::process`] is the only public path and
+    /// runs both halves on one instance without a gap.
+    ///
+    /// ```compile_fail,E0624
+    /// fn misuse(a: &stack_admission::Admission, b: &stack_admission::Admission, bytes: &[u8]) {
+    ///     if let Ok(admitted) = a.admit(bytes) {
+    ///         let _ = b.execute(admitted);
+    ///     }
+    /// }
+    /// ```
+    pub(crate) fn execute(&self, admitted: Admitted) -> AdmissionResult {
         let Admitted {
             execution_id,
             action,
@@ -671,7 +684,9 @@ impl Admission {
         match outcome {
             RunOutcome::Completed { exit_code, result } => {
                 let too_long = u64::try_from(result.len()).map_or(true, |n| n > self.policy.limits.max_output_bytes);
-                if deadline_fired || too_long {
+                // Completed is exit 0 by definition; another code is the
+                // executor contradicting itself, and is not believed.
+                if deadline_fired || too_long || exit_code != 0 {
                     (
                         Outcome::Unknown {
                             reason: "executor reported a completion that contradicts its own report".to_owned(),

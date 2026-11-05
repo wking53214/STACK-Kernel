@@ -27,6 +27,14 @@ target_link_libraries(stack_production_hardened PRIVATE Catch2::Catch2WithMain s
 add_executable(stack_supervised_exec_tests tests/supervised_exec_tests.cpp)
 target_link_libraries(stack_supervised_exec_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
 
+# The waitpid fallback path (no pidfd) with a late-observed deadline: libc
+# kill, waitpid and syscall are interposed by the program itself, so no test
+# hook exists in the header.
+add_executable(stack_supervised_fallback_tests tests/supervised_fallback_tests.cpp)
+target_link_libraries(stack_supervised_fallback_tests PRIVATE stack_containment atomic ${CMAKE_DL_LIBS})
+add_test(NAME STACKSupervisedFallback COMMAND stack_supervised_fallback_tests)
+set_tests_properties(STACKSupervisedFallback PROPERTIES TIMEOUT 120)
+
 # The shipped FFI host (crates/stack-ffi/src/ffi_wrapper.cpp) through its C
 # entry points: the same object, parameters and calibration a Rust caller gets.
 set(STACK_FFI_WRAPPER ${CMAKE_CURRENT_SOURCE_DIR}/../crates/stack-ffi/src/ffi_wrapper.cpp)

@@ -155,6 +155,10 @@ pub fn policy() -> KernelPolicy {
         kernel_id: KERNEL.into(),
         audience: KERNEL.into(),
         required_seats: vec!["Governance_Gateway:door".into(), "DIT:judge".into()],
+        seat_positions: BTreeMap::from([
+            ("Governance_Gateway:door".to_owned(), stack_receipt::GatePosition::Alpha),
+            ("DIT:judge".to_owned(), stack_receipt::GatePosition::Omega),
+        ]),
         operations: BTreeMap::from([
             ("echo".to_owned(), WorkerKind::ReturnBytes),
             ("spin".to_owned(), WorkerKind::SpinForever),

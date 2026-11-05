@@ -13,6 +13,7 @@ use stack_receipt::{
 fn policy() -> RosterPolicy {
     RosterPolicy {
         required_seats: vec!["Governance_Gateway:door".into(), "DIT:judge".into()],
+        ..RosterPolicy::default()
     }
 }
 

@@ -119,6 +119,7 @@ fn any_change_to_seats_or_verdicts_changes_the_root() {
 fn policy(seats: &[&str]) -> RosterPolicy {
     RosterPolicy {
         required_seats: seats.iter().map(|s| (*s).to_owned()).collect(),
+        ..RosterPolicy::default()
     }
 }
 
@@ -273,4 +274,93 @@ fn the_shared_fixture_decision_recomputes_and_differs_from_every_real_root() {
     for case in load_cases() {
         assert_ne!(evidence(&case).root, d.root);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Roster shape: one bound verdict per seat, gate names unique, positions
+// ---------------------------------------------------------------------------
+
+fn verdict(gate: &str, position: GatePosition) -> Verdict {
+    Verdict {
+        gate: gate.into(),
+        position,
+        outcome: GateOutcome::Pass,
+        subject: "x".into(),
+        digest: "d".into(),
+    }
+}
+
+fn roster(seats: &[&str], verdicts: Vec<Verdict>) -> DecisionEvidence {
+    let seats: Vec<String> = seats.iter().map(|s| (*s).to_owned()).collect();
+    DecisionEvidence {
+        root: decision_root(&seats, &verdicts),
+        seats,
+        verdicts,
+    }
+}
+
+fn positioned() -> RosterPolicy {
+    RosterPolicy::new(["Governance_Gateway:door", "DIT:judge"])
+        .with_position("Governance_Gateway:door", GatePosition::Alpha)
+        .with_position("DIT:judge", GatePosition::Omega)
+}
+
+#[test]
+fn a_benign_positioned_roster_has_no_finding() {
+    let d = roster(
+        &["Governance_Gateway:door", "DIT:judge"],
+        vec![verdict("door", GatePosition::Alpha), verdict("judge", GatePosition::Omega)],
+    );
+    assert_eq!(check_authorized_decision(&d, Some(&positioned())), vec![]);
+    assert_eq!(check_authorized_decision(&d, None), vec![]);
+}
+
+#[test]
+fn two_verdicts_for_one_gate_do_not_stand_in_for_two_seats() {
+    // P2 finding 1: the counts agree (2 and 2), so the old check saw nothing
+    // and DIT:judge was never judged.
+    let d = roster(
+        &["Governance_Gateway:door", "DIT:judge"],
+        vec![verdict("door", GatePosition::Alpha), verdict("door", GatePosition::Alpha)],
+    );
+    let f = check_authorized_decision(&d, None);
+    assert!(f.contains(&DecisionFinding::DuplicateVerdict("door".into())), "{f:?}");
+    assert!(f.contains(&DecisionFinding::SeatNotJudged("DIT:judge".into())), "{f:?}");
+    let f = check_authorized_decision(&d, Some(&positioned()));
+    assert!(f.contains(&DecisionFinding::DuplicateVerdict("door".into())), "{f:?}");
+}
+
+#[test]
+fn two_seats_that_share_a_gate_name_are_refused() {
+    // P2 finding 2: DIT:judge was counted as passed by Evil's verdict.
+    let d = roster(
+        &["DIT:judge", "Evil:judge"],
+        vec![verdict("judge", GatePosition::Omega), verdict("judge", GatePosition::Omega)],
+    );
+    let f = check_authorized_decision(&d, Some(&RosterPolicy::new(["DIT:judge"])));
+    assert!(f.contains(&DecisionFinding::DuplicateGateName("judge".into())), "{f:?}");
+    assert!(f.contains(&DecisionFinding::DuplicateVerdict("judge".into())), "{f:?}");
+    // And with distinct verdict counts the roster alone is still refused.
+    let d = roster(&["DIT:judge", "Evil:judge"], vec![verdict("judge", GatePosition::Omega)]);
+    let f = check_authorized_decision(&d, None);
+    assert!(f.contains(&DecisionFinding::DuplicateGateName("judge".into())), "{f:?}");
+}
+
+#[test]
+fn a_required_seat_at_the_wrong_position_is_refused() {
+    // P2 finding 3: a single door verdict at omega was accepted.
+    let d = roster(&["Governance_Gateway:door"], vec![verdict("door", GatePosition::Omega)]);
+    let policy = RosterPolicy::new(["Governance_Gateway:door"]).with_position("Governance_Gateway:door", GatePosition::Alpha);
+    let f = check_authorized_decision(&d, Some(&policy));
+    assert_eq!(
+        f,
+        vec![DecisionFinding::RequiredSeatWrongPosition {
+            seat: "Governance_Gateway:door".into(),
+            expected: GatePosition::Alpha,
+            found: GatePosition::Omega,
+        }]
+    );
+    // A policy that names no position leaves the position unchecked.
+    let loose = RosterPolicy::new(["Governance_Gateway:door"]);
+    assert_eq!(check_authorized_decision(&d, Some(&loose)), vec![]);
 }

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use stack_receipt::record::check_text;
-use stack_receipt::{Provenance, RosterPolicy, ValidationError, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS};
+use stack_receipt::{GatePosition, Provenance, RosterPolicy, ValidationError, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS};
 
 use crate::executor::{ExecutionLimits, LimitsError, WorkerKind};
 
@@ -34,6 +34,10 @@ pub enum ConfigError {
     /// A required seat is listed twice.
     #[error("required seat listed twice: {0}")]
     DuplicateSeat(String),
+    /// A required seat has no stated position, or a position is stated for
+    /// a seat that is not required.
+    #[error("seat_positions must list exactly the required seats; mismatch at: {0}")]
+    SeatPositions(String),
     /// No operation is mapped: nothing could ever execute.
     #[error("operations is empty; no operation name maps to a worker")]
     NoOperations,
@@ -61,6 +65,11 @@ pub struct KernelPolicy {
     /// A CNS root does not commit to the required roster (register D-11),
     /// so the kernel holds it.
     pub required_seats: Vec<String>,
+    /// The position (alpha or omega) each required seat must hold. Every
+    /// required seat is listed and nothing else is: a seat whose position
+    /// is not stated could be satisfied by a verdict from the wrong end of
+    /// the run.
+    pub seat_positions: BTreeMap<String, GatePosition>,
     /// Operation name to the worker it runs. An operation not listed here
     /// is refused before authorization, whatever any capability says.
     pub operations: BTreeMap<String, WorkerKind>,
@@ -87,6 +96,14 @@ impl KernelPolicy {
                 return Err(ConfigError::DuplicateSeat(seat.clone()));
             }
         }
+        for seat in &self.required_seats {
+            if !self.seat_positions.contains_key(seat) {
+                return Err(ConfigError::SeatPositions(seat.clone()));
+            }
+        }
+        if let Some(extra) = self.seat_positions.keys().find(|k| !self.required_seats.contains(k)) {
+            return Err(ConfigError::SeatPositions(extra.clone()));
+        }
         if self.operations.is_empty() {
             return Err(ConfigError::NoOperations);
         }
@@ -103,6 +120,7 @@ impl KernelPolicy {
     pub fn roster_policy(&self) -> RosterPolicy {
         RosterPolicy {
             required_seats: self.required_seats.clone(),
+            seat_positions: self.seat_positions.clone(),
         }
     }
 
@@ -121,6 +139,10 @@ mod tests {
             kernel_id: "kernel-a".into(),
             audience: "kernel-a".into(),
             required_seats: vec!["Governance_Gateway:door".into(), "DIT:judge".into()],
+            seat_positions: BTreeMap::from([
+                ("Governance_Gateway:door".to_owned(), GatePosition::Alpha),
+                ("DIT:judge".to_owned(), GatePosition::Omega),
+            ]),
             operations: BTreeMap::from([("echo".to_owned(), WorkerKind::ReturnBytes)]),
             limits: ExecutionLimits::with_deadline_ns(300_000_000),
             provenance: Provenance {
@@ -138,6 +160,15 @@ mod tests {
         assert_eq!(p.worker_for("echo"), Some(WorkerKind::ReturnBytes));
         assert_eq!(p.worker_for("rm"), None);
         assert_eq!(p.roster_policy().required_seats, p.required_seats);
+        assert_eq!(p.roster_policy().seat_positions, p.seat_positions);
+    }
+
+    #[test]
+    fn a_policy_that_leaves_the_address_space_inherited_is_refused() {
+        let mut p = policy();
+        assert_eq!(p.limits.address_space_bytes, ExecutionLimits::DEFAULT_ADDRESS_SPACE_BYTES);
+        p.limits.address_space_bytes = 0;
+        assert_eq!(p.validate(), Err(ConfigError::Limits(LimitsError::AddressSpace)));
     }
 
     #[test]

@@ -24,7 +24,7 @@ Pinned against:
 |---|---|---|
 | Gate vocabulary, verdict shape, subject digest, decision root | CNS | `cns/gate.py`, `cns_composition/super_gate.py` |
 | Translating a decision into a capability, after checking it | the ISSUER, outside the kernel and outside CNS | not in this repository; a TEST FIXTURE in `crates/stack-admission/tests/common/mod.rs` |
-| Which seats a decision must carry for this kernel | the kernel's policy (configuration) | `KernelPolicy::required_seats` |
+| Which seats a decision must carry for this kernel | the kernel's policy (configuration) | `KernelPolicy::required_seats` and `KernelPolicy::seat_positions` |
 | Whether an action is permitted | the kernel, only by `Authority::authorize` | `stack-authority` |
 | What happened | the receipt, and its independent verifier | `stack-receipt` |
 

@@ -361,8 +361,10 @@ impl Action {
     }
 }
 
-/// The action actually run: operation, resource and the digest of the
-/// argument bytes handed to the payload.
+/// The action the kernel intends to run: operation, resource and the digest
+/// of the argument bytes it intends to pass. Intent, not delivery: today's
+/// executor hands neither the resource nor the arguments to the worker
+/// (R2-X-02).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActualAction {
     /// The operation run.
@@ -695,10 +697,11 @@ pub struct Rejected {
     pub reason: String,
 }
 
-/// Written before the payload starts: the kernel is about to run this.
+/// Written before the payload starts: the kernel intends to run this. It
+/// is not proof of what the worker was given (R2-X-02).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attempted {
-    /// What is about to run.
+    /// What the kernel intends to run.
     pub action: ActualAction,
     /// Wall clock at the start.
     pub started_at_ms: u64,

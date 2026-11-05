@@ -227,6 +227,7 @@ fn an_auditor_with_other_expectations_rejects_the_same_log() {
             "DIT:judge".into(),
             "HERALD:confidence".into(),
         ],
+        ..stack_receipt::RosterPolicy::default()
     };
     let content = stack_admission::cns_value(&case["subject"]).unwrap();
     let v = stack_receipt::verify_log_bytes(
@@ -530,4 +531,53 @@ fn an_executor_failure_or_a_contradictory_report_is_unknown_never_completed() {
         .executor(Box::new(ScriptedExecutor(report(completed(b"ok".to_vec()), false))))
         .start();
     assert!(h.process(honest_payload(&case, "echo")).is_success());
+}
+
+// ---------------------------------------------------------------------------
+// P2 review findings 6 and 10
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_executor_that_lies_about_a_nonzero_exit_is_never_completed() {
+    // Finding 6: Completed means exit 0. A plug-in executor that reports
+    // Completed with another code is contradicting its own definition.
+    let case = all_pass();
+    for code in [1, 3, -1] {
+        let dir = TempDir::new("lying-exit");
+        let lie = RunOutcome::Completed {
+            exit_code: code,
+            result: RESULT.to_vec(),
+        };
+        let h = Builder::new(dir.path())
+            .executor(Box::new(ScriptedExecutor(report(lie, false))))
+            .start();
+        let r = h.process(honest_payload(&case, "echo"));
+        let AdmissionResult::Unsuccessful(u) = &r else {
+            panic!("exit {code}: expected Unsuccessful, got {r:?}");
+        };
+        assert!(!r.is_success(), "exit {code}");
+        assert_ne!(u.outcome.kind(), OutcomeKind::Completed, "exit {code}");
+        let v = h.verify_full(&case, None);
+        assert_ne!(v.executions[0].execution.outcome, Some(OutcomeKind::Completed), "exit {code}");
+    }
+}
+
+#[test]
+fn an_authorized_record_that_cannot_be_written_carries_its_error() {
+    // Finding 10. Append calls: 1 proposed, 2 authorized.
+    let dir = TempDir::new("authorized-fail");
+    let h = Builder::new(dir.path())
+        .receipt_log(Box::new(FailingFileLog::open(dir.path(), &[2])))
+        .start();
+    let r = h.process(honest_payload(&all_pass(), "echo"));
+    let AdmissionResult::Refused(refused) = &r else {
+        panic!("expected a refusal, got {r:?}");
+    };
+    assert_eq!(refused.stage, Stage::Authorization);
+    let RefusalReason::Receipt(e) = &refused.reason else {
+        panic!("expected a receipt reason, got {:?}", refused.reason);
+    };
+    assert!(!refused.recorded);
+    assert_eq!(refused.record_error.as_ref(), Some(e), "the error must not be dropped");
+    assert_eq!(h.runs(), 0);
 }

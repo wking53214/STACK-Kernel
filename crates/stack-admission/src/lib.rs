@@ -38,8 +38,9 @@
 //! independently verified and still planned. Nothing here claims more
 //! than a named test proves.
 //!
-//! Stages 1 to 4 are [`Admission::admit`]; stages 5 to 8 are
-//! [`Admission::execute`]; [`Admission::process`] is all of them.
+//! Stages 1 to 4 are [`Admission::admit`]; stages 5 to 8 are the crate's
+//! private `execute`; [`Admission::process`] is all of them and the only
+//! public way to run an admitted request.
 
 #![forbid(unsafe_code)]
 
