@@ -360,7 +360,35 @@ pub enum SupervisedCallError {
 /// Forking a multithreaded process copies only the calling thread; a child
 /// that deadlocks on a lock another thread held is killed at the deadline
 /// and reported `TimedOut`, never `Completed`.
-pub fn supervised_run(
+///
+/// This is an `unsafe fn` (R2-K-22) so that safe code cannot reach the
+/// ungoverned path by accident. The C symbol `stack_supervised_run` keeps its
+/// name and signature for ABI compatibility; nothing in this repository calls
+/// it except this crate's own tests.
+///
+/// # Safety
+///
+/// The caller takes responsibility for everything the governed entry would
+/// have checked: it is NOT checked against the capability mask or the rate
+/// limit, it writes no audit event, and the payload runs in a fork of this
+/// process with a copy of its memory. Call it only for a trusted, built-in
+/// payload, from a process that can tolerate `fork`, and never for a payload
+/// that came from outside. Use [`supervised_run_governed`] otherwise.
+///
+/// ```compile_fail,E0133
+/// // R2-K-22: the ungoverned run is not callable from safe code.
+/// let limits = stack_ffi::SupervisedLimits {
+///     wall_clock_deadline_ns: 1_000_000_000,
+///     cpu_seconds: 0,
+///     address_space_bytes: 1 << 30,
+///     max_output_bytes: 64,
+///     file_size_bytes: 0,
+///     nofile: 0,
+/// };
+/// let mut out = [0u8; 64];
+/// let _ = stack_ffi::supervised_run(stack_ffi::PayloadKind::ReturnBytes, &limits, &mut out);
+/// ```
+pub unsafe fn supervised_run(
     kind: PayloadKind,
     limits: &SupervisedLimits,
     out: &mut [u8],
@@ -1320,6 +1348,18 @@ mod tests {
             file_size_bytes: 0,
             nofile: 0,
         }
+    }
+
+    /// The legacy run is an `unsafe fn` (R2-K-22). These tests exercise the
+    /// C++ fork path itself with built-in payloads, so they call it through
+    /// this local wrapper, which shadows the glob import.
+    fn supervised_run(
+        kind: PayloadKind,
+        limits: &SupervisedLimits,
+        out: &mut [u8],
+    ) -> Result<SupervisedReport, SupervisedCallError> {
+        // SAFETY: built-in payloads only, in a test process.
+        unsafe { super::supervised_run(kind, limits, out) }
     }
 
     /// The supervised runs fork this test process; the harness is

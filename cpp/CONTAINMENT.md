@@ -65,7 +65,10 @@ deadline expiry is `TimedOut` even if the child exited in the same instant.
 Ambiguity is never reported as success.
 
 The FFI (`crates/stack-ffi`) exposes the same executor over a fixed set of
-built-in payloads and its Rust tests repeat the spin, block, crash, abort,
+built-in payloads (the ungoverned fork-of-caller entry, `stack_supervised_run`, is
+kept as a C symbol for ABI compatibility; its Rust wrapper is an `unsafe fn`
+since R2-K-22, so safe Rust reaches only the governed worker entry; tested by
+`crates/stack-ffi/tests/api_surface.rs`) and its Rust tests repeat the spin, block, crash, abort,
 exit, forbidden-syscall, return-bytes and invalid-limits cases.
 
 ## The clean worker path (decision A, RACE-02)

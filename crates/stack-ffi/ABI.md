@@ -43,7 +43,7 @@ that existed before are unchanged. Additions and changes of meaning:
 | A3 | `uint64_t stack_supervised_unconfirmed_count(void)`, `uint64_t stack_supervised_reap_unconfirmed(void)` | NEW. Workers sent SIGKILL and not confirmed reaped; re-kill and reap them. |
 | A2 | `stack_supervised_report` | Same size and layout. `reserved[3]` became `result_self_reported` (u8) and `reserved[2]`. Old callers read it as before; it is 1 on `Completed`. |
 | A2 | `stack_supervised_report.outcome` | NEW value 12 `TerminationUnconfirmed`. A caller that switched over the outcome and had a default arm now sees it there. |
-| A3 | `stack_supervised_run` | Unchanged signature and behaviour. Now documented LEGACY: its child is a fork of the caller, it makes no capability or rate-limit check and writes no audit event. Not for untrusted payloads. Nothing in this repository calls it except its own tests. |
+| A3 | `stack_supervised_run` | Unchanged signature and behaviour. Now documented LEGACY: its child is a fork of the caller, it makes no capability or rate-limit check and writes no audit event. Not for untrusted payloads. Nothing in this repository calls it except its own tests. R2-K-22: the C symbol is kept unchanged for ABI compatibility; the Rust wrapper `supervised_run` is now `pub unsafe fn` (with a `# Safety` section), so safe Rust can no longer reach it. Tested: `tests/api_surface.rs` (source guard: no safe public function reaches the symbol; `supervised_run` is `unsafe`) and a `compile_fail,E0133` doc test on `supervised_run`. |
 | A3 | host audit ring, `AuditEventType` | NEW values 5 `SupervisedCompleted`, 6 `SupervisedTimedOut`, 7 `SupervisedFailed`, 8 `SupervisedTerminationUnconfirmed`, appended so 0 to 4 keep their numbers. `stack_host_audit_read_slot` returns them. |
 
 Test-only, present only when compiled with `-DSTACK_FFI_TESTING` (CMake
@@ -58,7 +58,7 @@ Rust additions for decision A in `src/lib.rs`: `supervised_run_governed`,
 `SupervisedReport::result_self_reported`, `HostAuditEvent::{SupervisedCompleted,
 SupervisedTimedOut, SupervisedFailed, SupervisedTerminationUnconfirmed}`,
 `WORKER_BUILD_PATH`, `TESTING_WORKER_PATH` (hidden). `supervised_run` is
-documented legacy. `stack-admission`: `SupervisedExecutor` is no longer a unit
+documented legacy and an `unsafe fn` (R2-K-22). `stack-admission`: `SupervisedExecutor` is no longer a unit
 struct; it is built by `SupervisedExecutor::new(WorkerConfig)`, which fails
 closed (new `ExecutorError::{Refused, WorkerUnavailable}`).
 
