@@ -372,12 +372,11 @@ impl CancelToken {
 /// ignores the token, which is the honest state of an executor with no way
 /// to stop a worker: the run goes on and its real outcome is recorded.
 ///
-/// The hook lives here and not on [`Executor`] itself. Implemented and
-/// tested for test executors only. LIMITATION: `SupervisedExecutor` (the
-/// FFI worker) does not implement it yet; the FFI side of termination
-/// belongs to the `stack-ffi` work, and until that exists a signed
-/// capability revoked mid-run does not stop a real worker (the capability
-/// MASK revocation in the host still does). Use
+/// The hook lives here and not on [`Executor`] itself. Implemented and tested
+/// for test executors and for `SupervisedExecutor` (the FFI worker): a cancel
+/// asks the host, by run id, to SIGKILL the real worker through its pidfd, so a
+/// signed capability revoked mid-run ends the run as `Terminated` (never a
+/// success) within a bounded time (`tests/revocation_real_worker.rs`). Use
 /// [`Admission::with_cancellable_executor`] to install one.
 pub trait CancellableExecutor: Executor {
     /// As [`Executor::run`], stopping the worker and returning a

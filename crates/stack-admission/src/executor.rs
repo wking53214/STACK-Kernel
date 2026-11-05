@@ -24,8 +24,12 @@ use std::ffi::CString;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use stack_authority::AuthorizedAction;
+
+use crate::admission::{CancelToken, CancellableExecutor};
 
 /// Longest wall-clock deadline the supervisor accepts: one hour.
 pub const MAX_DEADLINE_NS: u64 = 3_600_000_000_000;
@@ -515,7 +519,7 @@ impl Executor for SupervisedExecutor {
         limits: &ExecutionLimits,
         args: &[u8],
     ) -> Result<RunReport, ExecutorError> {
-        self.run_with_facts(authorization, kind, limits, args).map(|(report, _)| report)
+        self.run_with_facts(authorization, kind, limits, args, None).map(|(report, _)| report)
     }
 
     fn run_observed_authorized(
@@ -525,11 +529,56 @@ impl Executor for SupervisedExecutor {
         limits: &ExecutionLimits,
         args: &[u8],
     ) -> Result<ObservedRun, ExecutorError> {
-        self.run_with_facts(authorization, kind, limits, args)
+        self.run_with_facts(authorization, kind, limits, args, None)
             .map(|(report, observed)| ObservedRun {
                 report,
                 observed: Some(observed),
             })
+    }
+}
+
+/// Run ids for the host's table of runs that can be stopped. Process wide, so two
+/// executors in one process never name the same run.
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The stop hook for the real worker (R-5 remainder). A [`CancelToken`] that fires
+/// while a run is in flight asks the host, by run id, to SIGKILL the worker through
+/// its pidfd: the same kill a capability-mask revocation uses. The run then ends as
+/// `Terminated`, which is never a success, and its receipt says so.
+impl CancellableExecutor for SupervisedExecutor {
+    fn run_cancellable_observed(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+        cancel: &CancelToken,
+    ) -> Result<ObservedRun, ExecutorError> {
+        let run_id = NEXT_RUN_ID.fetch_add(1, Ordering::SeqCst);
+        let finished = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Wake on the token (it notifies at once); the timeout only lets
+                // this thread see that the run is over.
+                while !finished.load(Ordering::Acquire) {
+                    if cancel.wait_cancelled(Duration::from_millis(10)) {
+                        // The host may not have registered the run yet (a cancel can
+                        // beat the spawn): keep asking until it has, or the run ends.
+                        while !finished.load(Ordering::Acquire) && !stack_ffi::supervised_cancel(run_id) {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        return;
+                    }
+                }
+            });
+            let r = self.run_with_facts(authorization, kind, limits, args, Some(run_id));
+            finished.store(true, Ordering::Release);
+            r
+        });
+        result.map(|(report, observed)| ObservedRun {
+            report,
+            observed: Some(observed),
+        })
     }
 }
 
@@ -543,6 +592,7 @@ impl SupervisedExecutor {
         kind: WorkerKind,
         limits: &ExecutionLimits,
         _args: &[u8],
+        run_id: Option<u64>,
     ) -> Result<(RunReport, stack_receipt::Observed), ExecutorError> {
         let capacity = usize::try_from(limits.max_output_bytes.min(MAX_OUTPUT_BYTES))
             .map_err(|_| ExecutorError::Call("result cap does not fit".to_owned()))?;
@@ -564,8 +614,11 @@ impl SupervisedExecutor {
             worker_sha256: Some(self.worker_sha256),
             reap_timeout_ns: self.reap_timeout_ns,
         };
-        let report = stack_ffi::supervised_run_governed(authorization, &request, &ffi_limits, &mut out)
-            .map_err(|e| ExecutorError::Refused(format!("{e:?}")))?;
+        let result = match run_id {
+            Some(id) => stack_ffi::supervised_run_governed_cancellable(authorization, id, &request, &ffi_limits, &mut out),
+            None => stack_ffi::supervised_run_governed(authorization, &request, &ffi_limits, &mut out),
+        };
+        let report = result.map_err(|e| ExecutorError::Refused(format!("{e:?}")))?;
         use stack_ffi::SupervisedOutcome as O;
         let outcome = match report.outcome {
             O::Completed if !completed_conditions_hold(&report) => RunOutcome::Unknown {

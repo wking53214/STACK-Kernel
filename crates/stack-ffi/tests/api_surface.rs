@@ -98,7 +98,7 @@ fn the_safe_governed_entry_points_take_an_authorized_action_and_the_raw_ones_are
     let fns = pub_functions(src);
     let find = |n: &str| fns.iter().find(|f| f.0 == n).unwrap_or_else(|| panic!("no pub fn {n}: {:?}", fns.iter().map(|f| &f.0).collect::<Vec<_>>()));
 
-    for name in ["supervised_run_governed", "execute_governed_transaction"] {
+    for name in ["supervised_run_governed", "supervised_run_governed_cancellable", "execute_governed_transaction"] {
         let (_, is_unsafe, signature, _) = find(name);
         assert!(!is_unsafe, "{name} must be safe");
         assert!(
@@ -135,6 +135,7 @@ fn the_safe_governed_entry_points_take_an_authorized_action_and_the_raw_ones_are
     // The authorized symbols are called exactly once each from safe code, with the digest.
     for (name, sym) in [
         ("supervised_run_governed", "stack_supervised_run_authorized("),
+        ("supervised_run_governed_cancellable", "stack_supervised_run_authorized_cancellable("),
         ("execute_governed_transaction", "stack_execute_governed_transaction_authorized("),
     ] {
         let (_, _, _, body) = find(name);
@@ -152,7 +153,16 @@ fn only_the_named_functions_can_start_governed_execution() {
     for (name, is_unsafe, _, body) in pub_functions(src) {
         let calls_c = ["stack_supervised_run", "stack_execute_governed_transaction"]
             .iter()
-            .any(|s| body.contains(&format!("{s}(")) || body.contains(&format!("{s}_governed(")) || body.contains(&format!("{s}_authorized(")));
+            .any(|s| {
+                [
+                    "(",
+                    "_governed(",
+                    "_authorized(",
+                    "_authorized_cancellable(",
+                ]
+                .iter()
+                .any(|suffix| body.contains(&format!("{s}{suffix}")))
+            });
         if calls_c {
             starts.push((name, is_unsafe));
         }
@@ -165,6 +175,7 @@ fn only_the_named_functions_can_start_governed_execution() {
             ("execute_governed_transaction_unauthorized".to_owned(), true),
             ("supervised_run".to_owned(), true),
             ("supervised_run_governed".to_owned(), false),
+            ("supervised_run_governed_cancellable".to_owned(), false),
             ("supervised_run_governed_unauthorized".to_owned(), true),
         ]
     );

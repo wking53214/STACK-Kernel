@@ -54,6 +54,10 @@ that existed before are unchanged. Additions and changes of meaning:
 | D2-A | host audit ring, `AuditEventType` | NEW value 10 `AuthorizationBound`, appended. `context_id` carries the capability LABEL (first 8 bytes of the digest, big endian), `tokens` the rate-limit domain. Recorded before the governance checks. The label is NOT an integrity value; the full digest lives in the receipt. |
 | D2-A | `stack_execute_governed_transaction`, `stack_supervised_run_governed` | Unchanged signatures and behaviour. They name no authorization: they are the RAW entry points, and the host cannot tell who asked. |
 | D2-A | Rust `execute_governed_transaction`, `supervised_run_governed` | BREAKING for Rust callers: the safe functions now take `authorization: &AuthorizedAction` (`stack-authority`) first and call the `_authorized` symbols. The old behaviour is `unsafe fn execute_governed_transaction_unauthorized` and `unsafe fn supervised_run_governed_unauthorized`. New: `capability_label`, `host_worker_spawn_count`, `HostAuditEvent::AuthorizationBound`, `TransactionError::AuthorizationRequired`, `GovernedSupervisedError::AuthorizationRequired`. New dependency edge `stack-ffi -> stack-authority` (stack-authority depends on no workspace crate: no cycle). Tested: `tests/api_surface.rs`, the `compile_fail` doc tests. |
+| R-5 | `int stack_supervised_run_authorized_cancellable(const uint8_t* capability_digest, uint64_t run_id, <the arguments of stack_supervised_run_authorized after the digest>)` | NEW. As `stack_supervised_run_authorized`, and the run can be stopped by `run_id`: caller-chosen, non-zero, not already in flight, 64 runs at a time. New code -19: the id is 0, in flight, or the table is full; nothing spawned or consumed. Status: implemented, tested (`ffi_authorized_caller.c`; `tests/authorized_run.rs`). |
+| R-5 | `int stack_supervised_cancel(uint64_t run_id)` | NEW. 1 when a run with that id is in flight (its worker is SIGKILLed through the pidfd now, or the moment it is spawned), 0 for an unknown, finished or zero id: a no-op that touches nothing. The run ends with outcome 13 `Terminated` and `exit_observed` 3, audited as `SupervisedTerminated`, tokens spent: the same path as a capability-mask revocation (R2-K-24). |
+| R-5 | `uint64_t stack_supervised_in_flight_count(void)` | NEW. Runs started with the cancellable entry that are past governance with a worker spawning or running. For tests and operators. |
+| R-5 | Rust | NEW `supervised_run_governed_cancellable`, `supervised_cancel`, `supervised_in_flight_count`, `GovernedSupervisedError::RunIdUnavailable`. `stack-admission`: `SupervisedExecutor` implements `CancellableExecutor` (`tests/revocation_real_worker.rs`). |
 
 Test-only, present only when compiled with `-DSTACK_FFI_TESTING` (CMake
 `ffi_init_redteam`; never defined by `build.rs`):
@@ -501,6 +505,7 @@ What is now done (each statement names its test):
 | -16 | `worker_sha256` is NULL. The digest of the worker image is required. Nothing spawned, nothing consumed. |
 | -17 | The image does not hash to `worker_sha256`. Nothing spawned; tokens taken for the call are refunded and one `SupervisedFailed` event with 0 tokens is written. |
 | -18 | `stack_supervised_run_authorized` only: the capability digest is NULL or all zero (D2-A). Nothing checked, spawned, consumed or audited. |
+| -19 | `stack_supervised_run_authorized_cancellable` only: `run_id` is 0, already in flight, or the table is full (R-5). Nothing spawned or consumed. |
 
   While a worker runs the call counts as in flight. A capability change that
   is waiting TERMINATES it (R2-K-24, below) instead of waiting for it.

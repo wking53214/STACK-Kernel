@@ -83,6 +83,28 @@ extern "C" {
         out_capacity: usize,
         report: *mut SupervisedReportFfi,
     ) -> i32;
+    /// R-5. As `stack_supervised_run_authorized`, plus a caller-chosen non-zero
+    /// run id the run can be stopped by. -19 when the id is 0, in flight, or the
+    /// table is full.
+    pub fn stack_supervised_run_authorized_cancellable(
+        capability_digest: *const u8,
+        run_id: u64,
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        payload_kind: u32,
+        worker_path: *const core::ffi::c_char,
+        worker_sha256: *const u8,
+        limits: *const SupervisedLimitsFfi,
+        reap_timeout_ns: u64,
+        out: *mut u8,
+        out_capacity: usize,
+        report: *mut SupervisedReportFfi,
+    ) -> i32;
+    /// R-5. Stops the run named `run_id`: 1 when it was in flight, 0 for a no-op.
+    pub fn stack_supervised_cancel(run_id: u64) -> i32;
+    /// R-5. Runs in flight past governance that can be stopped by id.
+    pub fn stack_supervised_in_flight_count() -> u64;
     pub fn stack_host_worker_spawn_count() -> u64;
     pub fn stack_supervised_image_sha256(path: *const core::ffi::c_char, out: *mut u8) -> i32;
     pub fn stack_supervised_unconfirmed_count() -> u64;
@@ -706,6 +728,9 @@ pub enum GovernedSupervisedError {
     /// (D2-A). Nothing was checked, spawned or consumed. The safe API cannot
     /// produce this; a raw C caller can.
     AuthorizationRequired,
+    /// The run id is 0, already names a run in flight, or the table of runs that
+    /// can be stopped by id is full (R-5). Nothing was spawned or consumed.
+    RunIdUnavailable,
     /// A code this crate does not know.
     Unrecognized(i32),
 }
@@ -788,6 +813,60 @@ pub fn supervised_run_governed(
     governed_result(rc, &ffi_report)
 }
 
+/// [`supervised_run_governed`] for a run that can be stopped from another
+/// thread (R-5): `run_id` is chosen by the caller, must not be 0 and must not
+/// name a run already in flight ([`GovernedSupervisedError::RunIdUnavailable`]),
+/// and [`supervised_cancel`] with it kills the worker through its pidfd, the same
+/// kill a capability-mask revocation uses. A stopped run returns `Ok` with
+/// [`SupervisedOutcome::Terminated`], audited as `SupervisedTerminated`; it is
+/// never a success. The host keeps 64 such runs at a time.
+pub fn supervised_run_governed_cancellable(
+    authorization: &AuthorizedAction,
+    run_id: u64,
+    request: &GovernedSupervisedRequest<'_>,
+    limits: &SupervisedLimits,
+    out: &mut [u8],
+) -> Result<SupervisedReport, GovernedSupervisedError> {
+    let ffi_limits = SupervisedLimitsFfi::from(limits);
+    let mut ffi_report = SupervisedReportFfi::default();
+    let digest = authorization.cap_digest().as_bytes();
+    // SAFETY: as in `supervised_run_governed`.
+    let rc = unsafe {
+        stack_supervised_run_authorized_cancellable(
+            digest.as_ptr(),
+            run_id,
+            request.context_id,
+            request.required_capability_m0,
+            request.required_tokens,
+            request.kind.code(),
+            request.worker_path.as_ptr(),
+            request.worker_sha256.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()),
+            &ffi_limits,
+            request.reap_timeout_ns,
+            out.as_mut_ptr(),
+            out.len(),
+            &mut ffi_report,
+        )
+    };
+    governed_result(rc, &ffi_report)
+}
+
+/// Stops the run that was started with this `run_id` by
+/// [`supervised_run_governed_cancellable`]. `true` when a run with that id was in
+/// flight: its worker is killed now, or the moment it is spawned. `false` when no
+/// run has that id (never started, already finished, or 0): a no-op that touches
+/// nothing. Callable from any thread. It needs no authorization because it can
+/// only end a run early, never start or widen one.
+pub fn supervised_cancel(run_id: u64) -> bool {
+    unsafe { stack_supervised_cancel(run_id) == 1 }
+}
+
+/// Runs started with [`supervised_run_governed_cancellable`] that are past
+/// governance and have a worker spawning or running. For tests and operators.
+pub fn supervised_in_flight_count() -> u64 {
+    unsafe { stack_supervised_in_flight_count() }
+}
+
 /// The governed supervised run WITHOUT any authorization. It checks the
 /// capability mask and the rate limit, and nothing shows who asked.
 ///
@@ -862,6 +941,7 @@ fn governed_result(rc: i32, report: &SupervisedReportFfi) -> Result<SupervisedRe
         -16 => Err(GovernedSupervisedError::WorkerDigestRequired),
         -17 => Err(GovernedSupervisedError::WorkerDigestMismatch),
         -18 => Err(GovernedSupervisedError::AuthorizationRequired),
+        -19 => Err(GovernedSupervisedError::RunIdUnavailable),
         other => Err(GovernedSupervisedError::Unrecognized(other)),
     }
 }

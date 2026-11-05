@@ -29,7 +29,7 @@ use stack_authority::{
 };
 use stack_ffi::{
     capability_label, host_audit_read_slot, host_initialize, host_set_capabilities, host_worker_spawn_count,
-    supervised_run_governed, worker_image_sha256, GovernedSupervisedError, GovernedSupervisedRequest, HostAuditEvent,
+    supervised_run_governed, supervised_run_governed_cancellable, worker_image_sha256, GovernedSupervisedError, GovernedSupervisedRequest, HostAuditEvent,
     PayloadKind, SupervisedLimits, SupervisedOutcome, WORKER_BUILD_PATH,
 };
 
@@ -221,4 +221,105 @@ fn the_audit_label_is_not_the_digest_and_two_authorizations_have_two_labels() {
     // 64 bits of a 256-bit digest: a label, which says nothing about integrity.
     assert_eq!(std::mem::size_of_val(&la) * 8, 64);
     assert_eq!(a.cap_digest().as_bytes().len() * 8, 256);
+}
+
+// ---------------------------------------------------------------------------
+// R-5 remainder: stopping a run by id
+// ---------------------------------------------------------------------------
+
+fn spin_limits() -> SupervisedLimits {
+    SupervisedLimits {
+        wall_clock_deadline_ns: 3_000_000_000,
+        ..limits()
+    }
+}
+
+/// Waits until `n` cancellable runs are past governance with a worker spawning or running.
+fn wait_for_in_flight(n: u64) {
+    let begun = std::time::Instant::now();
+    while stack_ffi::supervised_in_flight_count() < n {
+        assert!(begun.elapsed() < std::time::Duration::from_secs(5), "the worker was not spawned");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn cancelling_a_running_spin_worker_by_id_kills_it_within_a_second_as_terminated() {
+    let _g = serial();
+    let auth = authorization("cap-ffi-cancel");
+    let run = std::thread::spawn(move || {
+        let mut out = [0u8; 64];
+        supervised_run_governed_cancellable(&auth, 9001, &request(&worker_path(), 6, 0x01, 1, PayloadKind::SpinForever), &spin_limits(), &mut out)
+    });
+    wait_for_in_flight(1);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let t = std::time::Instant::now();
+    assert!(stack_ffi::supervised_cancel(9001), "the run is in flight");
+    let report = run.join().unwrap().unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_secs(1), "killed in {:?}", t.elapsed());
+    assert_eq!(report.outcome, SupervisedOutcome::Terminated);
+    assert_eq!(report.exit_observed, stack_ffi::ExitObserved::KilledBySupervisor(9));
+    assert!(!report.deadline_fired);
+    assert!(!report.result_self_reported);
+    assert_eq!(
+        (0..8192u64).filter_map(host_audit_read_slot).filter(|r| r.context_id == 6 && r.event == HostAuditEvent::SupervisedTerminated).count(),
+        1
+    );
+    // Its slot is free again.
+    assert!(!stack_ffi::supervised_cancel(9001));
+}
+
+#[test]
+fn cancelling_an_unknown_or_finished_run_is_a_harmless_no_op() {
+    let _g = serial();
+    let auth = authorization("cap-ffi-cancel-noop");
+    let path = worker_path();
+    let mut out = [0u8; 64];
+    let spawns = host_worker_spawn_count();
+    assert!(!stack_ffi::supervised_cancel(424_242), "unknown id");
+    assert!(!stack_ffi::supervised_cancel(0), "id 0 names nothing");
+    let report = supervised_run_governed_cancellable(&auth, 9002, &request(&path, 7, 0x01, 1, PayloadKind::ReturnBytes), &limits(), &mut out).unwrap();
+    assert_eq!(report.outcome, SupervisedOutcome::Completed);
+    assert!(!stack_ffi::supervised_cancel(9002), "the run finished: nothing to stop");
+    assert_eq!(host_worker_spawn_count(), spawns + 1, "no spawn, and nothing killed, by the no-ops");
+    // And the id is reusable afterwards.
+    let again = supervised_run_governed_cancellable(&auth, 9002, &request(&path, 7, 0x01, 1, PayloadKind::ReturnBytes), &limits(), &mut out).unwrap();
+    assert_eq!(again.outcome, SupervisedOutcome::Completed);
+}
+
+#[test]
+fn an_unrelated_run_is_unaffected_when_another_is_cancelled_and_an_id_in_flight_cannot_be_reused() {
+    let _g = serial();
+    let auth = authorization("cap-ffi-cancel-pair");
+    let spawn_spin = |id: u64, domain: u64| {
+        let auth = auth.clone();
+        std::thread::spawn(move || {
+            let mut out = [0u8; 64];
+            supervised_run_governed_cancellable(&auth, id, &request(&worker_path(), domain, 0x01, 1, PayloadKind::SpinForever), &spin_limits(), &mut out)
+        })
+    };
+    let victim = spawn_spin(9003, 8);
+    let bystander = spawn_spin(9004, 9);
+    wait_for_in_flight(2);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Reusing an id that is in flight is refused and spawns nothing.
+    let path = worker_path();
+    let mut out = [0u8; 64];
+    let before = host_worker_spawn_count();
+    assert_eq!(
+        supervised_run_governed_cancellable(&auth, 9003, &request(&path, 10, 0x01, 1, PayloadKind::ReturnBytes), &limits(), &mut out).unwrap_err(),
+        GovernedSupervisedError::RunIdUnavailable
+    );
+    assert_eq!(
+        supervised_run_governed_cancellable(&auth, 0, &request(&path, 10, 0x01, 1, PayloadKind::ReturnBytes), &limits(), &mut out).unwrap_err(),
+        GovernedSupervisedError::RunIdUnavailable
+    );
+    assert_eq!(host_worker_spawn_count(), before);
+
+    assert!(stack_ffi::supervised_cancel(9003));
+    assert_eq!(victim.join().unwrap().unwrap().outcome, SupervisedOutcome::Terminated);
+    // The bystander runs on to its own deadline: it is timed out, and the host says so.
+    let b = bystander.join().unwrap().unwrap();
+    assert_eq!(b.outcome, SupervisedOutcome::TimedOut);
+    assert!(b.deadline_fired);
 }

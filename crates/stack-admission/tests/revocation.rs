@@ -5,9 +5,8 @@
 //! receipt are made by `stack_receipt::verify_log_bytes` with fresh trusted
 //! keys. The executor here is a test double: it counts runs, blocks until
 //! released or cancelled, and honours the cancel token the way a real
-//! executor must. The real FFI executor does not implement the hook yet
-//! (see `CancellableExecutor`), so none of these tests claim anything about
-//! `SupervisedExecutor`.
+//! executor must. None of these tests claim anything about `SupervisedExecutor`;
+//! the real worker is stopped and tested in `revocation_real_worker.rs`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

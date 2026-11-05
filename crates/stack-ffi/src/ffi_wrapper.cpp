@@ -189,6 +189,86 @@ static uint64_t DigestLabel(const uint8_t* digest) noexcept {
     return label;
 }
 
+// ---------------------------------------------------------------------------
+// In-flight run registry (R-5 remainder). A caller that wants to be able to stop
+// a governed supervised run names it with a non-zero run id of its own choosing
+// (stack_supervised_run_authorized_cancellable) and stops it with
+// stack_supervised_cancel(run_id). A stop is the SAME kill the capability-mask
+// revocation uses: CancelHandle::Request, which SIGKILLs through the worker's
+// pidfd, so the run ends as Terminated (13), audited as SupervisedTerminated.
+//
+// Fixed table, no allocation, one spin lock (this file uses no std::mutex). A
+// slot is claimed before governance, so an id cannot be in two runs at once; the
+// run's CancelHandle is attached when governance has passed and detached, under
+// the same lock, before the handle goes out of scope. Cancel calls
+// handle->Request() under the lock, so after DetachHandle returns no cancel can
+// touch the handle. A cancel that arrives before the handle exists is remembered
+// (cancel_pending) and delivered at attach; one that arrives for an id that is
+// not registered (never started, or already finished) is a no-op returning 0.
+// ---------------------------------------------------------------------------
+static constexpr std::size_t kMaxInFlightRuns = 64;
+
+struct RunSlot {
+    uint64_t run_id;                      // 0 = free
+    supervised::CancelHandle* handle;     // null until governance passed / after the run
+    bool cancel_pending;
+};
+static RunSlot g_runs[kMaxInFlightRuns]{};
+static std::atomic_flag g_runs_lock = ATOMIC_FLAG_INIT;
+
+struct RunsLock {
+    RunsLock() noexcept { while (g_runs_lock.test_and_set(std::memory_order_acquire)) {} }
+    ~RunsLock() noexcept { g_runs_lock.clear(std::memory_order_release); }
+};
+
+// Claims a slot for run_id. False when the id is already in flight or the table is full.
+static bool ClaimRun(uint64_t run_id) noexcept {
+    RunsLock lock;
+    RunSlot* free_slot = nullptr;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) return false;
+        if (slot.run_id == 0 && free_slot == nullptr) free_slot = &slot;
+    }
+    if (free_slot == nullptr) return false;
+    *free_slot = RunSlot{run_id, nullptr, false};
+    return true;
+}
+
+static void AttachRun(uint64_t run_id, supervised::CancelHandle& handle) noexcept {
+    RunsLock lock;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) {
+            slot.handle = &handle;
+            if (slot.cancel_pending) handle.Request();
+            return;
+        }
+    }
+}
+
+static void DetachRun(uint64_t run_id) noexcept {
+    RunsLock lock;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) { slot.handle = nullptr; return; }
+    }
+}
+
+static void ReleaseRun(uint64_t run_id) noexcept {
+    RunsLock lock;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) { slot = RunSlot{0, nullptr, false}; return; }
+    }
+}
+
+// Releases the claimed slot on every exit path of the run.
+struct RunClaim {
+    uint64_t run_id;
+    explicit RunClaim(uint64_t id) noexcept : run_id(id) {}
+    ~RunClaim() noexcept { if (run_id != 0) ReleaseRun(run_id); }
+    RunClaim(const RunClaim&) = delete;
+    RunClaim& operator=(const RunClaim&) = delete;
+};
+static constexpr int kRunIdUnavailable = -19;
+
 // The one-time process work. Runs on exactly one thread, the one that moved
 // the state to InProgress. The order matters: the two steps that can fail
 // come first, so a failure constructs no host.
@@ -596,6 +676,7 @@ int stack_supervised_run(
 // ---------------------------------------------------------------------------
 static int SupervisedRunGovernedImpl(
     const uint8_t* capability_digest,
+    uint64_t run_id,
     uint64_t context_id,
     uint64_t required_capability_m0,
     uint32_t required_tokens,
@@ -648,10 +729,20 @@ static int SupervisedRunGovernedImpl(
     // governance runs, so a refusal by governance is attributable too.
     if (capability_digest != nullptr) g_host->RecordAuthorizationLabel(DigestLabel(capability_digest), context_id);
 
+    // R-5: a run that may be stopped by id claims its id before governance.
+    if (run_id != 0 && !ClaimRun(run_id)) return kRunIdUnavailable;
+    RunClaim claim(run_id);
+
     supervised::ExecutionReport r{};
     auto governed = g_host->ExecuteGovernedSupervised(
         token, required_tokens, limits->wall_clock_deadline_ns,
         [&](supervised::CancelHandle& cancel) -> FfiHost::SupervisedRunResult {
+            // The handle is detached before this lambda returns, while it is still alive.
+            struct Attached {
+                uint64_t id;
+                Attached(uint64_t i, supervised::CancelHandle& h) noexcept : id(i) { if (id != 0) AttachRun(id, h); }
+                ~Attached() noexcept { if (id != 0) DetachRun(id); }
+            } attached(run_id, cancel);
             r = supervised::SupervisedExecutor::RunWorker(l, spec, out, out_capacity, &cancel);
             if (r.child_pid != 0) g_worker_spawns.fetch_add(1, std::memory_order_relaxed);
             if (r.child_pid == 0) return FfiHost::SupervisedRunResult::NotSpawned;
@@ -696,7 +787,7 @@ int stack_supervised_run_governed(
     size_t out_capacity,
     stack_supervised_report* report)
 {
-    return SupervisedRunGovernedImpl(nullptr, context_id, required_capability_m0, required_tokens, payload_kind,
+    return SupervisedRunGovernedImpl(nullptr, 0, context_id, required_capability_m0, required_tokens, payload_kind,
                                      worker_path, worker_sha256, limits, reap_timeout_ns, out, out_capacity, report);
 }
 
@@ -726,9 +817,69 @@ int stack_supervised_run_authorized(
 {
     if (report) std::memset(report, 0, sizeof *report);
     if (!DigestIsPresent(capability_digest)) return kAuthorizationRequired;
-    return SupervisedRunGovernedImpl(capability_digest, context_id, required_capability_m0, required_tokens,
+    return SupervisedRunGovernedImpl(capability_digest, 0, context_id, required_capability_m0, required_tokens,
                                      payload_kind, worker_path, worker_sha256, limits, reap_timeout_ns, out,
                                      out_capacity, report);
+}
+
+// R-5. As stack_supervised_run_authorized, and the run can be stopped by id with
+// stack_supervised_cancel(run_id). run_id is chosen by the caller and must be
+// non-zero and not in flight; the table holds 64 runs. Added return code:
+//  -19  run_id is 0, is already in flight, or the table is full. Nothing was
+//       spawned or consumed. (The authorization event, if any, is already written.)
+// A stopped run ends with outcome Terminated (13) and exit_observed 3 (killed by
+// the supervisor), is audited as SupervisedTerminated with its tokens spent, and is
+// never a success: the same path as a capability-mask revocation (R2-K-24).
+int stack_supervised_run_authorized_cancellable(
+    const uint8_t* capability_digest,
+    uint64_t run_id,
+    uint64_t context_id,
+    uint64_t required_capability_m0,
+    uint32_t required_tokens,
+    uint32_t payload_kind,
+    const char* worker_path,
+    const uint8_t* worker_sha256,
+    const stack_supervised_limits* limits,
+    uint64_t reap_timeout_ns,
+    uint8_t* out,
+    size_t out_capacity,
+    stack_supervised_report* report)
+{
+    if (report) std::memset(report, 0, sizeof *report);
+    if (!DigestIsPresent(capability_digest)) return kAuthorizationRequired;
+    if (run_id == 0) return kRunIdUnavailable;
+    return SupervisedRunGovernedImpl(capability_digest, run_id, context_id, required_capability_m0, required_tokens,
+                                     payload_kind, worker_path, worker_sha256, limits, reap_timeout_ns, out,
+                                     out_capacity, report);
+}
+
+// R-5. How many runs started with stack_supervised_run_authorized_cancellable are in
+// flight past governance: their handle is attached and their worker is being spawned
+// or is running. For tests and operators.
+uint64_t stack_supervised_in_flight_count() {
+    RunsLock lock;
+    uint64_t n = 0;
+    for (const RunSlot& slot : g_runs) {
+        if (slot.run_id != 0 && slot.handle != nullptr) ++n;
+    }
+    return n;
+}
+
+// R-5. Asks the run named run_id to stop. Returns 1 when a run with that id is in
+// flight (the kill is sent now, or at once when its worker is spawned), 0 when no
+// run has that id (never started, already finished, or id 0): a harmless no-op that
+// touches nothing. Callable from any thread.
+int stack_supervised_cancel(uint64_t run_id) {
+    if (run_id == 0) return 0;
+    RunsLock lock;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) {
+            if (slot.handle != nullptr) slot.handle->Request();
+            else slot.cancel_pending = true;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 // Number of supervised worker processes this host has spawned, by any entry point.

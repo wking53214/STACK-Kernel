@@ -89,9 +89,11 @@ running worker to stop) is the admission layer's job, see the
 and its tests (`stack-admission/tests/revocation.rs`: revoked between
 authorize and spawn, revoked while running, unrelated capability unaffected,
 unreadable revocation list fails closed). Implemented and tested with a test
-executor; [limitation] the FFI `SupervisedExecutor` does not yet implement
-the stop hook, so a signed capability revoked mid-run does not stop a real
-worker.
+executor, and with the real worker: `SupervisedExecutor` implements the stop
+hook, so a signed capability revoked while a 3 s spin worker runs kills that
+worker (measured 58 ms from revocation to a recorded, dead worker, asserted
+under 1 s), the receipt terminal is a non-success `Terminated`, and an unrelated
+run is unaffected (`stack-admission/tests/revocation_real_worker.rs`).
 
 ## 3. Wire format, `stack-capability/1`
 
