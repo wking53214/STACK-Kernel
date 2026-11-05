@@ -1113,6 +1113,7 @@ dependencies = [
  "stack-authority",
  "stack-ffi",
  "stack-receipt",
+ "stack-sentinel",
  "stack-trident",
  "thiserror",
 ]
