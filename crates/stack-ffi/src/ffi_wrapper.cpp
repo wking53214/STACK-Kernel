@@ -372,8 +372,25 @@ struct stack_supervised_report {
     int32_t error_number;
     int32_t child_pid;
     uint8_t deadline_fired;
-    uint8_t reserved[3];
+    // 1 when result bytes were delivered (outcome Completed): they are the
+    // worker's own claim and nothing more (RACE-02). Was reserved[0]; the
+    // struct has the same size and layout, old callers read it as zero.
+    uint8_t result_self_reported;
+    uint8_t reserved[2];
 };
+
+static void FillReport(stack_supervised_report* report, const supervised::ExecutionReport& r) {
+    report->elapsed_ns = r.elapsed_ns;
+    report->result_length = r.result_length;
+    report->outcome = static_cast<int32_t>(r.outcome);
+    report->exit_code = r.exit_code;
+    report->signal_number = r.signal_number;
+    report->error_number = r.error_number;
+    report->child_pid = static_cast<int32_t>(r.child_pid);
+    report->deadline_fired = r.deadline_fired ? 1 : 0;
+    report->result_self_reported = r.result_self_reported ? 1 : 0;
+    report->reserved[0] = report->reserved[1] = 0;
+}
 
 static const char kFfiPayloadBytes[] = "stack-ffi-payload-v1";
 
@@ -435,16 +452,128 @@ int stack_supervised_run(
     const supervised::ExecutionReport r =
         supervised::SupervisedExecutor::RunThunk(l, &stack_ffi_builtin_payload, &kind, out, out_capacity);
 
-    report->elapsed_ns = r.elapsed_ns;
-    report->result_length = r.result_length;
-    report->outcome = static_cast<int32_t>(r.outcome);
-    report->exit_code = r.exit_code;
-    report->signal_number = r.signal_number;
-    report->error_number = r.error_number;
-    report->child_pid = static_cast<int32_t>(r.child_pid);
-    report->deadline_fired = r.deadline_fired ? 1 : 0;
-    report->reserved[0] = report->reserved[1] = report->reserved[2] = 0;
+    FillReport(report, r);
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Governed supervised run in a clean worker process (RACE-02, decision A).
+//
+// stack_supervised_run above is the LEGACY entry: its child is a fork of this
+// process, it runs without any capability or rate-limit check, and it is kept
+// only so existing callers keep linking. It is NOT for untrusted payloads and
+// stack-admission no longer calls it.
+//
+// stack_supervised_run_governed takes the same context, capability and token
+// arguments as stack_execute_governed_transaction, validates the capability
+// mask and consumes rate-limit tokens through the initialized host BEFORE
+// anything is spawned, and only then forks and execs the worker program at
+// worker_path (an ABSOLUTE path chosen by kernel configuration, never by the
+// payload or the environment). The worker runs one of the built-in kinds 0 to
+// 6 inside its own seccomp filter. One audit event records the outcome in the
+// host audit ring (see stack_host_audit_read_slot), timeouts included.
+//
+// Return codes. Nothing is spawned and nothing is consumed unless 0:
+//    0  governance passed. The run's outcome is in report->outcome (any
+//       Outcome, including TimedOut and TerminationUnconfirmed). Tokens are
+//       spent when child_pid != 0 and refunded when nothing was spawned.
+//   -1  host not initialized
+//   -2  unknown payload kind (above 6)
+//   -3  a null pointer argument, or out null with a non-zero capacity
+//   -4  capability validation failed, including a request that names no
+//       capability bit at all (required_capability_m0 == 0)
+//   -5  rate limited (also: more than 100 tokens, domain id 16 or more)
+//   -9  wall_clock_deadline_ns was 0
+//  -12  initialization failed (latched)
+//  -13  a capability change is pending; retry
+//  -14  worker_path is unusable (null, relative, missing, not a regular
+//       executable file, world-writable, or owned by someone else)
+//  -15  the other limits are invalid (deadline above one hour, output above
+//       the buffer or 1 MiB, reap_timeout_ns above one minute)
+// reap_timeout_ns 0 means the default, 2 s. On a non-zero return the report is
+// zeroed. Do not call from a sealed thread: the seal forbids open, fork and
+// exec, so the worker image cannot be opened and the call is -14 with nothing
+// spawned and nothing consumed.
+// ---------------------------------------------------------------------------
+int stack_supervised_run_governed(
+    uint64_t context_id,
+    uint64_t required_capability_m0,
+    uint32_t required_tokens,
+    uint32_t payload_kind,
+    const char* worker_path,
+    const stack_supervised_limits* limits,
+    uint64_t reap_timeout_ns,
+    uint8_t* out,
+    size_t out_capacity,
+    stack_supervised_report* report)
+{
+    if (!report) return -3;
+    std::memset(report, 0, sizeof *report);
+    const int state = g_init_state.load(std::memory_order_acquire);
+    if (state == kInitFailed) return -12;
+    if (state != kInitReady) return -1;
+    if (!limits || (!out && out_capacity != 0)) return -3;
+    if (payload_kind > 6) return -2;
+    if (limits->wall_clock_deadline_ns == 0) return -9;
+
+    supervised::Limits l;
+    l.wall_clock_deadline_ns = limits->wall_clock_deadline_ns;
+    l.cpu_seconds = limits->cpu_seconds;
+    l.address_space_bytes = limits->address_space_bytes;
+    l.max_output_bytes = limits->max_output_bytes;
+    l.file_size_bytes = limits->file_size_bytes;
+    l.nofile = limits->nofile;
+    l.inherit_fd = -1;
+    if (reap_timeout_ns != 0) l.reap_timeout_ns = reap_timeout_ns;
+    if (!supervised::SupervisedExecutor::LimitsAreValid(l, out, out_capacity)) return -15;
+    if (supervised::SupervisedExecutor::CheckWorkerImage(worker_path) != 0) return -14;
+
+    supervised::WorkerSpec spec;
+    spec.executable = worker_path;
+    spec.kind = payload_kind;
+
+    // A request that names no capability would pass any mask: refuse it.
+    if (required_capability_m0 == 0) return -4;
+    host::CapabilityMask256 required_mask(required_capability_m0, 0, 0, 0);
+    host::SIMDCapabilityToken token(context_id, required_mask);
+
+    supervised::ExecutionReport r{};
+    auto governed = g_host->ExecuteGovernedSupervised(
+        token, required_tokens, limits->wall_clock_deadline_ns,
+        [&]() -> FfiHost::SupervisedRunResult {
+            r = supervised::SupervisedExecutor::RunWorker(l, spec, out, out_capacity);
+            if (r.child_pid == 0) return FfiHost::SupervisedRunResult::NotSpawned;
+            switch (r.outcome) {
+                case supervised::Outcome::Completed: return FfiHost::SupervisedRunResult::Completed;
+                case supervised::Outcome::TimedOut: return FfiHost::SupervisedRunResult::TimedOut;
+                case supervised::Outcome::TerminationUnconfirmed:
+                    return FfiHost::SupervisedRunResult::TerminationUnconfirmed;
+                default: return FfiHost::SupervisedRunResult::Failed;
+            }
+        });
+    if (!governed.has_value()) {
+        switch (governed.error()) {
+            case host::HostExecutionError::CapabilityValidationFailed: return -4;
+            case host::HostExecutionError::RateLimitExceeded: return -5;
+            case host::HostExecutionError::InvalidHardTimeout: return -9;
+            case host::HostExecutionError::CapabilityChangePending: return -13;
+            default: return -3;
+        }
+    }
+    FillReport(report, r);
+    return 0;
+}
+
+// Supervised workers that were sent SIGKILL and not yet confirmed reaped
+// (outcome TerminationUnconfirmed). They may still be running.
+uint64_t stack_supervised_unconfirmed_count() {
+    return supervised::SupervisedExecutor::UnconfirmedCount();
+}
+
+// Re-sends SIGKILL to each unconfirmed worker and reaps the ones that have
+// gone. Returns how many remain unconfirmed.
+uint64_t stack_supervised_reap_unconfirmed() {
+    return supervised::SupervisedExecutor::ReapUnconfirmed();
 }
 
 // Number of times the built-in governed payload has run in this process.

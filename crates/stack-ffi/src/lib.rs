@@ -42,7 +42,33 @@ extern "C" {
         out_capacity: usize,
         report: *mut SupervisedReportFfi,
     ) -> i32;
+    pub fn stack_supervised_run_governed(
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        payload_kind: u32,
+        worker_path: *const core::ffi::c_char,
+        limits: *const SupervisedLimitsFfi,
+        reap_timeout_ns: u64,
+        out: *mut u8,
+        out_capacity: usize,
+        report: *mut SupervisedReportFfi,
+    ) -> i32;
+    pub fn stack_supervised_unconfirmed_count() -> u64;
+    pub fn stack_supervised_reap_unconfirmed() -> u64;
 }
+
+/// Absolute path of the `stack_worker` program this build compiled (static,
+/// built by `build.rs` from `cpp/worker/stack_worker.cpp`). For tests and
+/// development. A production kernel names its own worker by absolute path in
+/// its configuration; nothing here is read from the environment.
+pub const WORKER_BUILD_PATH: &str = env!("STACK_WORKER_BUILD_PATH");
+
+/// Absolute path of the test build of the worker, which carries kinds that
+/// misbehave on purpose (forged frames, self kill, denied syscalls). Tests
+/// only; never a production worker.
+#[doc(hidden)]
+pub const TESTING_WORKER_PATH: &str = env!("STACK_WORKER_TEST_BUILD_PATH");
 
 /// C layout of `stack_supervised_limits` in ffi_wrapper.cpp.
 #[repr(C)]
@@ -69,7 +95,9 @@ pub struct SupervisedReportFfi {
     pub error_number: i32,
     pub child_pid: i32,
     pub deadline_fired: u8,
-    pub reserved: [u8; 3],
+    /// 1 when result bytes were delivered: the worker's own claim.
+    pub result_self_reported: u8,
+    pub reserved: [u8; 2],
 }
 
 /// Process initialization only (I-02): constructs the host once, registers the
@@ -253,6 +281,10 @@ pub enum SupervisedOutcome {
     /// SIGCHLD is ignored in this process (SIG_IGN or SA_NOCLDWAIT), so the
     /// run could not be supervised; refused before anything was spawned.
     SigchldIgnored,
+    /// The worker was sent SIGKILL and was not reaped within the bound; it may
+    /// still be running. Never a success. `supervised_unconfirmed_count`
+    /// says how many such workers are tracked.
+    TerminationUnconfirmed,
     /// A code this crate does not know; carried rather than collapsed.
     Unrecognized(i32),
 }
@@ -272,6 +304,7 @@ impl SupervisedOutcome {
             9 => SupervisedOutcome::SupervisorError,
             10 => SupervisedOutcome::InvalidLimits,
             11 => SupervisedOutcome::SigchldIgnored,
+            12 => SupervisedOutcome::TerminationUnconfirmed,
             other => SupervisedOutcome::Unrecognized(other),
         }
     }
@@ -295,6 +328,11 @@ pub struct SupervisedReport {
     pub deadline_fired: bool,
     /// Bytes placed at the start of the buffer; meaningful only on Completed.
     pub result_length: u64,
+    /// True when result bytes were delivered (`Completed`). They are the
+    /// worker's own claim: an untrusted process wrote them, and nothing beyond
+    /// "a well-formed frame came from a process that exited 0 in time" may be
+    /// inferred from them.
+    pub result_self_reported: bool,
 }
 
 /// Why `supervised_run` could not even produce a report.
@@ -308,9 +346,14 @@ pub enum SupervisedCallError {
     Unrecognized(i32),
 }
 
-/// Runs a built-in payload in a supervised child process (a fork of this
-/// process) with a wall-clock deadline that ends in SIGKILL, and returns
-/// the classified report. The result bytes land at the start of `out`.
+/// LEGACY. Runs a built-in payload in a supervised child process that is a
+/// fork of this process, with a wall-clock deadline that ends in SIGKILL, and
+/// returns the classified report. The result bytes land at the start of `out`.
+///
+/// NOT for untrusted payloads and ungoverned: the child holds a copy of this
+/// process's memory, and no capability or rate-limit check is made. Use
+/// [`supervised_run_governed`], which runs a separate worker program after
+/// those checks. Kept so existing callers keep linking.
 ///
 /// Forking a multithreaded process copies only the calling thread; a child
 /// that deadlocks on a lock another thread held is killed at the deadline
@@ -349,11 +392,141 @@ pub fn supervised_run(
             child_pid: ffi_report.child_pid,
             deadline_fired: ffi_report.deadline_fired != 0,
             result_length: ffi_report.result_length,
+            result_self_reported: ffi_report.result_self_reported != 0,
         }),
         -1 => Err(SupervisedCallError::NullArgument),
         -2 => Err(SupervisedCallError::UnknownPayloadKind),
         other => Err(SupervisedCallError::Unrecognized(other)),
     }
+}
+
+/// A governed supervised run: the same context, capability and token
+/// arguments as [`execute_governed_transaction`], plus the worker to run.
+#[derive(Debug, Clone, Copy)]
+pub struct GovernedSupervisedRequest<'a> {
+    /// The rate-limit domain (0..16).
+    pub context_id: u64,
+    /// The capability bits the run requires. Must name at least one bit: a
+    /// request that names none would pass any mask and is refused.
+    pub required_capability_m0: u64,
+    /// Tokens the run costs (at most 100). Spent when a worker was spawned.
+    pub required_tokens: u32,
+    /// Which built-in worker kind to run.
+    pub kind: PayloadKind,
+    /// ABSOLUTE path of the worker program, from kernel configuration.
+    pub worker_path: &'a core::ffi::CStr,
+    /// Bound on the wait for a killed worker to be reaped; 0 means 2 s.
+    pub reap_timeout_ns: u64,
+}
+
+/// Why a governed supervised run was refused. In every case nothing was
+/// spawned and nothing was consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GovernedSupervisedError {
+    /// The host is not initialized (call [`host_initialize`] first).
+    NotInitialized,
+    /// Initialization failed (latched).
+    InitializationFailed,
+    /// The C side does not know this payload kind.
+    UnknownPayloadKind,
+    /// A null pointer reached the C side.
+    NullArgument,
+    /// The capability mask does not cover the request, or it names no bit.
+    CapabilityDenied,
+    /// Rate limited, a request above 100 tokens, or an unknown domain.
+    RateLimited,
+    /// The wall-clock deadline was zero.
+    InvalidDeadline,
+    /// A capability change is pending; retry.
+    CapabilityChangePending,
+    /// The worker path is null, relative, missing, not a regular executable
+    /// file, world-writable, or owned by someone else.
+    WorkerUnavailable,
+    /// The other limits are invalid (deadline above an hour, output above the
+    /// buffer or 1 MiB, reap bound above a minute).
+    InvalidLimits,
+    /// A code this crate does not know.
+    Unrecognized(i32),
+}
+
+/// Runs a built-in worker kind in a separate worker PROGRAM (fork then exec;
+/// the worker has none of this process's memory, an empty environment, and
+/// only descriptors 0 to 2 and its result pipe) after the capability and
+/// rate-limit checks of the initialized host, with a wall-clock deadline that
+/// ends in SIGKILL. `Err` means the request was refused before anything was
+/// spawned. `Ok` carries the outcome, which may be any [`SupervisedOutcome`],
+/// timeouts and `TerminationUnconfirmed` included; one audit event records it
+/// (see [`host_audit_read_slot`]).
+///
+/// `Completed` means the worker exited 0 within the deadline and sent a
+/// well-formed frame. The bytes are self-reported (`result_self_reported`).
+/// Do not call this from a sealed thread (it fails with `WorkerUnavailable`).
+pub fn supervised_run_governed(
+    request: &GovernedSupervisedRequest<'_>,
+    limits: &SupervisedLimits,
+    out: &mut [u8],
+) -> Result<SupervisedReport, GovernedSupervisedError> {
+    let ffi_limits = SupervisedLimitsFfi {
+        wall_clock_deadline_ns: limits.wall_clock_deadline_ns,
+        cpu_seconds: limits.cpu_seconds,
+        address_space_bytes: limits.address_space_bytes,
+        max_output_bytes: limits.max_output_bytes,
+        file_size_bytes: limits.file_size_bytes,
+        nofile: limits.nofile,
+        reserved: 0,
+    };
+    let mut ffi_report = SupervisedReportFfi::default();
+    let rc = unsafe {
+        stack_supervised_run_governed(
+            request.context_id,
+            request.required_capability_m0,
+            request.required_tokens,
+            request.kind.code(),
+            request.worker_path.as_ptr(),
+            &ffi_limits,
+            request.reap_timeout_ns,
+            out.as_mut_ptr(),
+            out.len(),
+            &mut ffi_report,
+        )
+    };
+    match rc {
+        0 => Ok(SupervisedReport {
+            outcome: SupervisedOutcome::from_code(ffi_report.outcome),
+            elapsed_ns: ffi_report.elapsed_ns,
+            exit_code: ffi_report.exit_code,
+            signal_number: ffi_report.signal_number,
+            error_number: ffi_report.error_number,
+            child_pid: ffi_report.child_pid,
+            deadline_fired: ffi_report.deadline_fired != 0,
+            result_length: ffi_report.result_length,
+            result_self_reported: ffi_report.result_self_reported != 0,
+        }),
+        -1 => Err(GovernedSupervisedError::NotInitialized),
+        -2 => Err(GovernedSupervisedError::UnknownPayloadKind),
+        -3 => Err(GovernedSupervisedError::NullArgument),
+        -4 => Err(GovernedSupervisedError::CapabilityDenied),
+        -5 => Err(GovernedSupervisedError::RateLimited),
+        -9 => Err(GovernedSupervisedError::InvalidDeadline),
+        -12 => Err(GovernedSupervisedError::InitializationFailed),
+        -13 => Err(GovernedSupervisedError::CapabilityChangePending),
+        -14 => Err(GovernedSupervisedError::WorkerUnavailable),
+        -15 => Err(GovernedSupervisedError::InvalidLimits),
+        other => Err(GovernedSupervisedError::Unrecognized(other)),
+    }
+}
+
+/// Supervised workers that were sent SIGKILL and not yet confirmed reaped
+/// (outcome [`SupervisedOutcome::TerminationUnconfirmed`]). They may still be
+/// running.
+pub fn supervised_unconfirmed_count() -> u64 {
+    unsafe { stack_supervised_unconfirmed_count() }
+}
+
+/// Re-sends SIGKILL to each unconfirmed worker and reaps the ones that have
+/// gone. Returns how many remain unconfirmed.
+pub fn supervised_reap_unconfirmed() -> u64 {
+    unsafe { stack_supervised_reap_unconfirmed() }
 }
 
 /// Safe wrapper for audit ring push
@@ -402,6 +575,14 @@ pub enum HostAuditEvent {
     SoftwareDeadlineExceeded,
     HardwareTimerPreempted,
     CapabilityViolation,
+    /// A supervised worker run completed (exit 0 in time, well-formed frame).
+    SupervisedCompleted,
+    /// A supervised worker run passed its wall-clock deadline and was killed.
+    SupervisedTimedOut,
+    /// A supervised worker run ended any other way, or nothing was spawned.
+    SupervisedFailed,
+    /// A supervised worker was killed and not confirmed reaped in time.
+    SupervisedTerminationUnconfirmed,
     /// A value this crate does not know; carried rather than collapsed.
     Unrecognized(u8),
 }
@@ -414,6 +595,10 @@ impl HostAuditEvent {
             2 => HostAuditEvent::SoftwareDeadlineExceeded,
             3 => HostAuditEvent::HardwareTimerPreempted,
             4 => HostAuditEvent::CapabilityViolation,
+            5 => HostAuditEvent::SupervisedCompleted,
+            6 => HostAuditEvent::SupervisedTimedOut,
+            7 => HostAuditEvent::SupervisedFailed,
+            8 => HostAuditEvent::SupervisedTerminationUnconfirmed,
             other => HostAuditEvent::Unrecognized(other),
         }
     }
@@ -1250,5 +1435,207 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    // ----- Governed supervised runs in a clean worker (RACE-02, decision A) -----
+    //
+    // The host is process global and these tests set its capability mask, so
+    // each runs in a child copy of the test binary (as the sealing tests do).
+
+    fn worker_path() -> std::ffi::CString {
+        std::ffi::CString::new(WORKER_BUILD_PATH).expect("worker path has no NUL")
+    }
+
+    fn governed_request<'a>(
+        path: &'a std::ffi::CStr,
+        domain: u64,
+        caps: u64,
+        kind: PayloadKind,
+    ) -> GovernedSupervisedRequest<'a> {
+        GovernedSupervisedRequest {
+            context_id: domain,
+            required_capability_m0: caps,
+            required_tokens: LARGEST_REQUEST,
+            kind,
+            worker_path: path,
+            reap_timeout_ns: 0,
+        }
+    }
+
+    fn governed_limits(deadline_ns: u64) -> SupervisedLimits {
+        SupervisedLimits {
+            wall_clock_deadline_ns: deadline_ns,
+            cpu_seconds: 0,
+            address_space_bytes: 1 << 30,
+            max_output_bytes: 64,
+            file_size_bytes: 0,
+            nofile: 0,
+        }
+    }
+
+    /// How many 100-token governed supervised runs a domain serves before it
+    /// is rate limited: 9 from a full bucket, plus one per 100 ms of refill.
+    fn served_runs(path: &std::ffi::CStr, domain: u64) -> (u32, u128) {
+        let t0 = std::time::Instant::now();
+        let mut out = [0u8; 64];
+        let mut ok = 0;
+        for _ in 0..40 {
+            match supervised_run_governed(
+                &governed_request(path, domain, 0x01, PayloadKind::ReturnBytes),
+                &governed_limits(2_000_000_000),
+                &mut out,
+            ) {
+                Ok(r) => {
+                    assert_eq!(r.outcome, SupervisedOutcome::Completed);
+                    ok += 1;
+                }
+                Err(GovernedSupervisedError::RateLimited) => break,
+                Err(e) => panic!("unexpected refusal {e:?}"),
+            }
+        }
+        (ok, t0.elapsed().as_millis())
+    }
+
+    fn audit_count(domain: u64, event: HostAuditEvent) -> usize {
+        (0..8192u64)
+            .filter_map(host_audit_read_slot)
+            .filter(|r| r.context_id == domain && r.event == event)
+            .count()
+    }
+
+    /// The enum mapping, including the new code.
+    #[test]
+    fn test_supervised_outcome_codes_map_including_termination_unconfirmed() {
+        assert_eq!(SupervisedOutcome::from_code(0), SupervisedOutcome::Completed);
+        assert_eq!(SupervisedOutcome::from_code(11), SupervisedOutcome::SigchldIgnored);
+        assert_eq!(SupervisedOutcome::from_code(12), SupervisedOutcome::TerminationUnconfirmed);
+        assert_eq!(SupervisedOutcome::from_code(13), SupervisedOutcome::Unrecognized(13));
+        assert_eq!(HostAuditEvent::from_code(5), HostAuditEvent::SupervisedCompleted);
+        assert_eq!(HostAuditEvent::from_code(6), HostAuditEvent::SupervisedTimedOut);
+        assert_eq!(HostAuditEvent::from_code(7), HostAuditEvent::SupervisedFailed);
+        assert_eq!(HostAuditEvent::from_code(8), HostAuditEvent::SupervisedTerminationUnconfirmed);
+        assert_eq!(HostAuditEvent::from_code(9), HostAuditEvent::Unrecognized(9));
+    }
+
+    #[test]
+    fn test_governed_supervised_completes_self_reported_and_is_audited() {
+        const CHILD_ENV: &str = "STACK_FFI_GOVERNED_OK_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let mut out = [0u8; 64];
+            let r = supervised_run_governed(
+                &governed_request(&path, 3, 0x01, PayloadKind::ReturnBytes),
+                &governed_limits(2_000_000_000),
+                &mut out,
+            )
+            .expect("governed run");
+            assert_eq!(r.outcome, SupervisedOutcome::Completed);
+            assert!(r.result_self_reported, "the result is the worker's own claim");
+            assert!(r.child_pid > 0 && r.child_pid != std::process::id() as i32);
+            let n = usize::try_from(r.result_length).expect("length");
+            assert_eq!(&out[..n], SUPERVISED_PAYLOAD_BYTES);
+            assert_eq!(audit_count(3, HostAuditEvent::SupervisedCompleted), 1);
+            assert_eq!(supervised_unconfirmed_count(), 0);
+            // 100 tokens were spent: at most 8 (plus refill) more.
+            let (ok, ms) = served_runs(&path, 3);
+            assert!(ok <= 8 + (ms / 100) as u32 + 1, "served {ok} in {ms} ms");
+            return;
+        }
+        run_in_child("tests::test_governed_supervised_completes_self_reported_and_is_audited", CHILD_ENV);
+    }
+
+    #[test]
+    fn test_governed_supervised_refusals_spawn_nothing_and_consume_nothing() {
+        const CHILD_ENV: &str = "STACK_FFI_GOVERNED_REFUSE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            let mut out = [0u8; 64];
+            // Before initialization.
+            assert_eq!(
+                supervised_run_governed(
+                    &governed_request(&path, 4, 0x01, PayloadKind::ReturnBytes),
+                    &governed_limits(1_000_000_000),
+                    &mut out
+                )
+                .unwrap_err(),
+                GovernedSupervisedError::NotInitialized
+            );
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let lim = governed_limits(1_000_000_000);
+            let req = |caps| governed_request(&path, 4, caps, PayloadKind::ReturnBytes);
+            // Invalid capability, and a request that names none.
+            assert_eq!(supervised_run_governed(&req(0x02), &lim, &mut out).unwrap_err(), GovernedSupervisedError::CapabilityDenied);
+            assert_eq!(supervised_run_governed(&req(0), &lim, &mut out).unwrap_err(), GovernedSupervisedError::CapabilityDenied);
+            assert!(audit_count(4, HostAuditEvent::CapabilityViolation) >= 1);
+            // A zero deadline.
+            assert_eq!(
+                supervised_run_governed(&req(0x01), &governed_limits(0), &mut out).unwrap_err(),
+                GovernedSupervisedError::InvalidDeadline
+            );
+            // Worker paths: relative, missing, not executable.
+            for bad in ["stack_worker", "/nonexistent/stack_worker", "/etc/hostname"] {
+                let p = std::ffi::CString::new(bad).expect("no NUL");
+                assert_eq!(
+                    supervised_run_governed(&governed_request(&p, 4, 0x01, PayloadKind::ReturnBytes), &lim, &mut out).unwrap_err(),
+                    GovernedSupervisedError::WorkerUnavailable,
+                    "{bad}"
+                );
+            }
+            // Output cap above the buffer.
+            let mut big = governed_limits(1_000_000_000);
+            big.max_output_bytes = 65;
+            assert_eq!(supervised_run_governed(&req(0x01), &big, &mut out).unwrap_err(), GovernedSupervisedError::InvalidLimits);
+            // Nothing above spent a token: the domain still serves its full 9.
+            let (ok, ms) = served_runs(&path, 4);
+            assert!(ok >= 9 && ok <= 9 + (ms / 100) as u32 + 1, "served {ok} in {ms} ms");
+            // Exhausted now: refused, and the audit ring says so.
+            assert_eq!(
+                supervised_run_governed(&req(0x01), &lim, &mut out).unwrap_err(),
+                GovernedSupervisedError::RateLimited
+            );
+            assert!(audit_count(4, HostAuditEvent::RateLimitTriggered) >= 1);
+            return;
+        }
+        run_in_child("tests::test_governed_supervised_refusals_spawn_nothing_and_consume_nothing", CHILD_ENV);
+    }
+
+    #[test]
+    fn test_governed_supervised_timeouts_are_killed_audited_and_leave_nothing_behind() {
+        const CHILD_ENV: &str = "STACK_FFI_GOVERNED_TIMEOUT_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let deadline = 150_000_000u64;
+            let mut out = [0u8; 64];
+            let mut worst = 0u64;
+            for (i, kind) in [PayloadKind::SpinForever, PayloadKind::BlockForever].into_iter().enumerate() {
+                let mut req = governed_request(&path, 5 + i as u64, 0x01, kind);
+                req.required_tokens = 1;
+                let r = supervised_run_governed(&req, &governed_limits(deadline), &mut out).expect("report");
+                assert_eq!(r.outcome, SupervisedOutcome::TimedOut);
+                assert!(r.deadline_fired && !r.result_self_reported);
+                assert!(r.elapsed_ns >= deadline && r.elapsed_ns <= deadline + 1_000_000_000);
+                worst = worst.max(r.elapsed_ns);
+                assert_eq!(audit_count(5 + i as u64, HostAuditEvent::SupervisedTimedOut), 1);
+                assert_eq!(audit_count(5 + i as u64, HostAuditEvent::SupervisedCompleted), 0);
+            }
+            std::eprintln!("[measured] rust governed timeouts at 150 ms: worst {} ms", worst / 1_000_000);
+            // The other ways to end are never Completed.
+            for kind in [PayloadKind::Crash, PayloadKind::Abort, PayloadKind::ExitNonZero, PayloadKind::ForbiddenSyscall] {
+                let mut req = governed_request(&path, 7, 0x01, kind);
+                req.required_tokens = 1;
+                let r = supervised_run_governed(&req, &governed_limits(2_000_000_000), &mut out).expect("report");
+                assert_ne!(r.outcome, SupervisedOutcome::Completed, "{kind:?}");
+                assert!(!r.result_self_reported);
+            }
+            assert_eq!(audit_count(7, HostAuditEvent::SupervisedFailed), 4);
+            assert_eq!(supervised_unconfirmed_count(), 0);
+            return;
+        }
+        run_in_child("tests::test_governed_supervised_timeouts_are_killed_audited_and_leave_nothing_behind", CHILD_ENV);
     }
 }

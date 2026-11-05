@@ -70,6 +70,16 @@ set(STACK_FFI_WRAPPER ${CMAKE_CURRENT_SOURCE_DIR}/../crates/stack-ffi/src/ffi_wr
 add_executable(stack_ffi_tests tests/ffi_host_tests.cpp ${STACK_FFI_WRAPPER})
 target_link_libraries(stack_ffi_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic pthread)
 
+# Governed supervised runs through the shipped wrapper (R2-K-13): governance
+# before spawn, one audit event per outcome, refunds, revocation. Built with
+# STACK_SUPERVISED_TESTING for the ineffective-kill seam (inert until used).
+add_executable(ffi_supervised_tests tests/ffi_supervised_tests.cpp ${STACK_FFI_WRAPPER})
+target_compile_definitions(ffi_supervised_tests PRIVATE
+    STACK_SUPERVISED_TESTING=1
+    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>")
+target_link_libraries(ffi_supervised_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic pthread)
+add_dependencies(ffi_supervised_tests stack_worker)
+
 enable_testing()
 add_test(NAME STACKTests COMMAND stack_tests)
 add_test(NAME STACKProductionHardened COMMAND stack_production_hardened)
@@ -79,6 +89,8 @@ add_test(NAME STACKWorkerExec COMMAND stack_worker_exec_tests)
 set_tests_properties(STACKWorkerExec PROPERTIES TIMEOUT 300)
 add_test(NAME STACKWorkerReap COMMAND stack_worker_reap_tests)
 set_tests_properties(STACKWorkerReap PROPERTIES TIMEOUT 300)
+add_test(NAME STACKFfiSupervised COMMAND ffi_supervised_tests)
+set_tests_properties(STACKFfiSupervised PROPERTIES TIMEOUT 300)
 add_test(NAME STACKFfiHost COMMAND stack_ffi_tests)
 set_tests_properties(STACKFfiHost PROPERTIES TIMEOUT 300)
 

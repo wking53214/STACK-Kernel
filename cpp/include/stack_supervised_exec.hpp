@@ -425,6 +425,19 @@ public:
     }
 
     /**
+     * Checks a worker path the way RunWorker does before it forks (absolute,
+     * opens, regular, executable, not world-writable, owned by root or the
+     * effective user) and closes it again. Returns 0 or an errno. For a caller
+     * that wants to refuse a request before it spends anything on it.
+     */
+    [[nodiscard]] static int CheckWorkerImage(const char* path) noexcept {
+        int fd = -1;
+        const int err = OpenWorkerImage(path, fd);
+        if (err == 0) ::close(fd);
+        return err;
+    }
+
+    /**
      * For a worker program: installs the filter the fork path installs (x32
      * and foreign architectures killed; read only on fd 0; write only on 1,
      * 2 and the result pipe; anonymous non-executable mmap; no open, socket,
