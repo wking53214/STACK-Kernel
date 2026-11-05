@@ -55,7 +55,8 @@ fn verdict_outcomes_serialize_to_the_cns_strings() {
 
 /// The eleven Rust copies of the vocabulary. Eight spell the wire value with
 /// `as_str`. The three ANC strategy crates use `label` for it (their metric
-/// label); their `as_str` is the upper-case name used in log fields.
+/// label); their `as_str` gives the same lower-case CNS spelling, used in log
+/// fields.
 #[test]
 fn every_workspace_copy_spells_the_cns_strings() {
     let copies: [(&str, [&str; 3]); 11] = [
