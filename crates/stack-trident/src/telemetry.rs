@@ -26,7 +26,7 @@ pub const QUARANTINED_SENDERS: &str = "stack_trident_quarantined_senders";
 /// Gauge. Entries in the replay cache. No labels.
 pub const REPLAY_CACHE_ENTRIES: &str = "stack_trident_replay_cache_entries";
 /// Counter. Transitions into the halted state. Label: `cause` (poisoned,
-/// operator).
+/// operator, store_failure).
 pub const HALTS_TOTAL: &str = "stack_trident_halts_total";
 /// Counter. Operator resets. No labels.
 pub const OPERATOR_RESETS_TOTAL: &str = "stack_trident_operator_resets_total";
@@ -47,6 +47,12 @@ pub const BREAKER_UNTRACKED_TOTAL: &str = "stack_trident_breaker_untracked_total
 /// force. Any non-zero rate means the verifier is refusing valid work or
 /// will lose quarantines on restart; alert on it. No labels.
 pub const STORE_FAILURES_TOTAL: &str = "stack_trident_store_failures_total";
+/// Counter. Acceptance commits the replay store refused as already
+/// consumed (check-and-commit conflict: nonce, sequence or epoch floor).
+/// Each one refused an envelope with `replay`, `sequence_not_increasing`
+/// or `issued_before_epoch`. On a store shared by several verifiers a
+/// non-zero rate is a replay caught by the store. No labels.
+pub const STORE_CONFLICTS_TOTAL: &str = "stack_trident_store_conflicts_total";
 
 /// Span around one verification.
 pub const SPAN_VERIFY: &str = "stack.trident.verify";
@@ -68,6 +74,9 @@ pub(crate) enum HaltCause {
     Poisoned,
     /// An operator called `operator_halt`.
     Operator,
+    /// Under the Production profile, a quarantine mark the durable store
+    /// failed to persist.
+    StoreFailure,
 }
 
 impl HaltCause {
@@ -75,6 +84,7 @@ impl HaltCause {
         match self {
             Self::Poisoned => "poisoned",
             Self::Operator => "operator",
+            Self::StoreFailure => "store_failure",
         }
     }
 }

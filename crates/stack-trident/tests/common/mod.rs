@@ -5,6 +5,8 @@
 // Test-only fixture helpers: a failed unwrap here is a failed test.
 #![allow(clippy::unwrap_used)]
 
+pub mod conformance;
+
 use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
