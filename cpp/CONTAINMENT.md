@@ -83,6 +83,17 @@ tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
 5 cases); the governed FFI path is `cpp/tests/ffi_supervised_tests.cpp`
 (`STACKFfiSupervised`, 13 cases).
 
+Two cases in `worker_reap_tests.cpp` (tagged `[pid-reuse]`) simulate a real pid
+reuse by writing `/proc/sys/kernel/ns_last_pid`, which requires root or
+`CAP_SYS_ADMIN`. They are the separate ctest entry `STACKWorkerReapPidReuse`
+with the ctest label `needs-root`; `STACKWorkerReap` runs the other cases with
+`~[pid-reuse]`. They are never skipped: as an ordinary user they fail at once
+with a message naming `ns_last_pid` and `CAP_SYS_ADMIN`. CI exercises them in
+the `cpp` job in a second step under `sudo`
+(`ctest -L needs-root`), after the first step ran everything else as the
+ordinary runner user (`ctest -LE needs-root`). Locally:
+`sudo -E env PATH=$PATH ctest --test-dir <build> -L needs-root`.
+
 - The worker is a separate program, `stack_worker`, exec'd from an image
   descriptor opened before the fork from an absolute path given by kernel
   configuration, never from the payload or the environment. Its environment is
@@ -114,7 +125,7 @@ tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
   would run with no seccomp filter (the worker installs its own). That mode is
   for callers who accept it; it is not what the FFI offers.
 - Pid reuse and the tracking table (R2-K-23; implemented and tested in
-  `worker_reap_tests.cpp`, root needed for the reuse tests). With a pidfd the
+  `worker_reap_tests.cpp`; the two reuse cases need root, see below). With a pidfd the
   supervisor signals and reaps the worker only through the descriptor, never by
   a pid number that may have been reused after someone else reaped the worker;
   a worker that is gone answers ESRCH/ECHILD and is forgotten. The process group
