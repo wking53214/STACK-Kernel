@@ -1580,12 +1580,28 @@ mod tests {
                 supervised_run_governed(&req, &lim, &mut out).unwrap_err(),
                 GovernedSupervisedError::WorkerDigestMismatch
             );
-            let touch = std::ffi::CString::new("/usr/bin/touch").expect("no NUL");
-            let other = governed_request(&touch, 4, 0x01, PayloadKind::ReturnBytes);
-            assert_eq!(
-                supervised_run_governed(&other, &lim, &mut out).unwrap_err(),
-                GovernedSupervisedError::WorkerDigestMismatch
-            );
+            // Another program: a copy of this test binary (a real ELF that is not
+            // the worker) in a private directory, regular, mode 0755, owned by the
+            // current euid. It passes the symlink, owner and mode checks on every
+            // host, so only the digest refuses it. No host binary is involved.
+            let dir = std::env::temp_dir().join(std::format!("stack_ffi_other_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("fixture dir");
+            let other_path = dir.join("other_program");
+            std::fs::copy(std::env::current_exe().expect("current exe"), &other_path).expect("copy test binary");
+            std::fs::set_permissions(&other_path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).expect("mode");
+            let other_c = std::ffi::CString::new(other_path.to_str().expect("utf8 path")).expect("no NUL");
+            let other = governed_request(&other_c, 4, 0x01, PayloadKind::ReturnBytes);
+            let refused = supervised_run_governed(&other, &lim, &mut out).unwrap_err();
+            // A symlink to the very same program is refused as unavailable, before
+            // any digest comparison.
+            let link_path = dir.join("link");
+            std::os::unix::fs::symlink(&other_path, &link_path).expect("symlink");
+            let link_c = std::ffi::CString::new(link_path.to_str().expect("utf8 path")).expect("no NUL");
+            let linked = governed_request(&link_c, 4, 0x01, PayloadKind::ReturnBytes);
+            let link_refused = supervised_run_governed(&linked, &lim, &mut out).unwrap_err();
+            std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+            assert_eq!(refused, GovernedSupervisedError::WorkerDigestMismatch);
+            assert_eq!(link_refused, GovernedSupervisedError::WorkerUnavailable);
             // The pinned image runs, and the tokens were not kept by the refusals.
             let (ok, ms) = served_runs(&path, 4);
             assert!(ok >= 9 && ok <= 9 + (ms / 100) as u32 + 1, "served {ok} in {ms} ms");
