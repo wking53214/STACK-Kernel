@@ -118,9 +118,9 @@ set_tests_properties(STACKWorkerExec PROPERTIES TIMEOUT 300)
 add_test(NAME STACKWorkerImage COMMAND stack_worker_image_tests)
 set_tests_properties(STACKWorkerImage PROPERTIES TIMEOUT 300)
 # The two pid-reuse cases write /proc/sys/kernel/ns_last_pid and so need
-# CAP_SYS_ADMIN. They are a separate ctest entry with the label "needs-root" so
-# CI can run everything else as an ordinary user (ctest -LE needs-root) and
-# these under sudo (ctest -L needs-root). Never skipped: as an ordinary user
+# CAP_SYS_ADMIN. They are a separate ctest entry with the label "needs-root",
+# root-only and not run in CI (CI runs ctest -LE needs-root; the property is
+# checked there by STACKPidReuseInterposed*). Never skipped: as an ordinary user
 # they fail with an explanatory message.
 add_test(NAME STACKWorkerReap COMMAND stack_worker_reap_tests "~[pid-reuse]")
 set_tests_properties(STACKWorkerReap PROPERTIES TIMEOUT 300)

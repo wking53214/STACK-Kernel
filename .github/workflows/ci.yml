@@ -221,12 +221,11 @@ jobs:
       - name: Build with the project flags
         run: cmake --build build/cpp -j"$(nproc)"
       - name: Run every registered test as the ordinary runner user, red-team programs included
-        # The runner user is not root. The two pid-reuse cases need
-        # CAP_SYS_ADMIN (they write /proc/sys/kernel/ns_last_pid) and carry the
-        # ctest label needs-root; they run in the next step.
+        # The runner user is not root. The pid-reuse safety property is checked
+        # here without root by libc interposition (STACKPidReuseInterposed*).
+        # The real-pid simulation needs CAP_SYS_ADMIN (ctest label needs-root),
+        # so -LE leaves it out; it is not run in CI.
         run: ctest --test-dir build/cpp --output-on-failure -LE needs-root
-      - name: Run the pid-reuse cases (need CAP_SYS_ADMIN) under sudo
-        run: sudo -E env "PATH=$PATH" ctest --test-dir build/cpp --output-on-failure -L needs-root --no-tests=error
 
   anc:
     # The four ANC crates, every test except ANC_WALL_CLOCK_TESTS. Blocking.
