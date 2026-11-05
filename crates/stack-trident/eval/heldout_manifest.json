@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "note": "SHA-256 manifest of sealed held-out files. A file listed as sealed has not been run against changed rules. See PROCESS.md.",
+  "files": [
+    {
+      "file": "heldout_2026-11-05.jsonl",
+      "path": "heldout_sealed/heldout_2026-11-05.jsonl",
+      "sha256": "b2869df2e62456d23fd4e597e6762abaf03531f6fb9393f5375abfd4baa7b321",
+      "authored": "2026-11-05",
+      "authored_before_rule_change": true,
+      "hostile_rows": 76,
+      "benign_rows": 69,
+      "status": "sealed"
+    }
+  ]
+}

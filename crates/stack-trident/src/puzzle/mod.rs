@@ -17,6 +17,7 @@
 
 mod breaker;
 pub mod config;
+pub mod eval;
 pub mod gate;
 pub mod inspect;
 pub mod piece;
