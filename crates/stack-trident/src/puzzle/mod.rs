@@ -11,6 +11,15 @@
 //! lifetime; if it is not complete in time it is destroyed and the sender
 //! takes a breach.
 //!
+//! **Supplemental, never authorization.** The gate and its inspectors are an
+//! extra inspection layer. `Outcome::Released` means the pieces are complete
+//! and the inspector found no known pattern. It is not a permit, nothing may
+//! treat it as one, and suspicious content cannot override an independent
+//! authorization decision. The four things stay apart: suspicious structure,
+//! known hostile patterns, untrusted content, and an actual authorization
+//! failure. `tests/puzzle_supplemental_guard.rs` checks that the
+//! authorization crates do not use this module.
+//!
 //! Every piece is a [`crate::HandoffEnvelope`] verified by the owning
 //! [`crate::Trident`] first, so authenticity, binding and freshness are not
 //! the gate's concern and cannot be skipped by a caller.
