@@ -52,6 +52,8 @@ enum : uint32_t {
     kMalformedFrame = 37, kOversizedFrame = 38, kTrailingBytes = 39, kDelayedResult = 40, kReadAddress = 41,
     kSocket = 43, kExecve = 44, kFork = 45, kPtrace = 46, kX32Syscall = 49, kCpuBound = 50, kEnvCount = 51,
     kListFds = 52,
+    kFrameThenExitNonZero = 53, kProbeFds = 54, kClobberResultFd = 55, kCloseResultThenSpin = 56,
+    kCloseUnfilteredThenSpin = 57, kPartialFrameThenBlock = 58, kForgeThenCrash = 59,
 };
 
 Limits DefaultLimits() {
@@ -599,4 +601,279 @@ TEST_CASE("Worker: bytes of a run that did not complete are not left in the call
         }
         REQUIRE(r.out[c.written] == 0xAB);  // only what the parser had written is cleared
     }
+}
+
+// D1-C: two facts the supervisor observes itself are reported beside the outcome.
+// exit_observed is how the process ended as the supervisor saw it; frame_status is what the
+// supervisor made of the pipe (well-formedness only). Neither is read from payload content.
+TEST_CASE("Worker: exit_observed and frame_status are reported beside the outcome (D1-C)", "[worker][d1c]") {
+    SECTION("a clean worker: Exited(0), one valid frame") {
+        const Run r = Shipped(kReturnBytes);
+        REQUIRE(r.report.outcome == Outcome::Completed);
+        REQUIRE(r.report.exit_observed == ExitKind::Exited);
+        REQUIRE(r.report.exit_code == 0);
+        REQUIRE(r.report.frame_status == FrameStatus::Valid);
+    }
+    SECTION("a spin killed at the deadline: KilledBySupervisor(9), no frame") {
+        const Run r = Shipped(kSpin);
+        REQUIRE(r.report.outcome == Outcome::TimedOut);
+        REQUIRE(r.report.exit_observed == ExitKind::KilledBySupervisor);
+        REQUIRE(r.report.signal_number == SIGKILL);
+        REQUIRE(r.report.frame_status == FrameStatus::Missing);
+    }
+    SECTION("a crash is Signaled, not killed by the supervisor") {
+        const Run r = Shipped(kCrash);
+        REQUIRE(r.report.outcome == Outcome::Crashed);
+        REQUIRE(r.report.exit_observed == ExitKind::Signaled);
+        REQUIRE(r.report.signal_number == SIGSEGV);
+    }
+    SECTION("a worker that kills itself with SIGKILL is Signaled: the supervisor did not send it") {
+        const Run r = Hostile(kSelfSigkill);
+        REQUIRE(r.report.outcome == Outcome::Crashed);
+        REQUIRE(r.report.exit_observed == ExitKind::Signaled);
+        REQUIRE(r.report.signal_number == SIGKILL);
+    }
+    SECTION("a non-zero exit is Exited(3)") {
+        const Run r = Shipped(kExitNonZero);
+        REQUIRE(r.report.exit_observed == ExitKind::Exited);
+        REQUIRE(r.report.exit_code == 3);
+        REQUIRE(r.report.frame_status == FrameStatus::Missing);
+    }
+    SECTION("each frame defect has its own status") {
+        REQUIRE(Hostile(kExitZeroNoFrame).report.frame_status == FrameStatus::Missing);
+        REQUIRE(Hostile(kMalformedFrame).report.frame_status == FrameStatus::Malformed);
+        REQUIRE(Hostile(kTruncatedFrame).report.frame_status == FrameStatus::Malformed);
+        REQUIRE(Hostile(kOversizedFrame).report.frame_status == FrameStatus::Oversized);
+        REQUIRE(Hostile(kTrailingBytes).report.frame_status == FrameStatus::Conflicting);
+    }
+    SECTION("nothing spawned: nothing observed") {
+        Limits l = DefaultLimits();
+        l.wall_clock_deadline_ns = 0;
+        const Run r = Shipped(kReturnBytes, l);
+        REQUIRE(r.report.outcome == Outcome::InvalidLimits);
+        REQUIRE(r.report.exit_observed == ExitKind::None);
+        REQUIRE(r.report.frame_status == FrameStatus::NotRead);
+    }
+    REQUIRE(NoChildrenLeft());
+}
+
+// ---------------------------------------------------------------------------
+// D1-C adversarial matrix, cases 1 to 10 and 12 through the real worker program
+// (case 11 is in worker_reap_tests.cpp and ffi_supervised_tests.cpp, where the kill
+// seam exists). Each case asserts the outcome, exit_observed and frame_status, and
+// that the run is a success if and only if exactly the Completed conditions hold:
+// the supervisor saw the worker exit 0 before the deadline AND held one valid frame.
+// The mapping of every case to its test is in cpp/CONTAINMENT.md.
+// ---------------------------------------------------------------------------
+namespace {
+
+bool CompletedConditionsHold(const ExecutionReport& r) {
+    return r.exit_observed == ExitKind::Exited && r.exit_code == 0 && !r.deadline_fired &&
+           r.frame_status == FrameStatus::Valid;
+}
+
+// Success iff Completed, Completed iff the conditions, and a run that is not Completed
+// delivers no bytes and no self-reported claim.
+void RequireSuccessOnlyOnTheCompletedConditions(const Run& r) {
+    REQUIRE((r.report.outcome == Outcome::Completed) == CompletedConditionsHold(r.report));
+    if (r.report.outcome != Outcome::Completed) {
+        REQUIRE(r.report.result_length == 0);
+        REQUIRE_FALSE(r.report.result_self_reported);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("Matrix 01: a fabricated success frame, then the worker keeps running to the deadline", "[worker][d1c][matrix]") {
+    const Run r = Hostile(kForgeThenSpin);
+    REQUIRE(r.report.outcome == Outcome::TimedOut);
+    REQUIRE(r.report.exit_observed == ExitKind::KilledBySupervisor);
+    REQUIRE(r.report.signal_number == SIGKILL);
+    REQUIRE(r.report.frame_status == FrameStatus::Valid);  // the frame was well formed; that is all it is
+    REQUIRE(r.report.deadline_fired);
+    RequireSuccessOnlyOnTheCompletedConditions(r);
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 02: a well-formed frame, then a non-zero exit", "[worker][d1c][matrix]") {
+    const Run r = Hostile(kFrameThenExitNonZero);
+    REQUIRE(r.report.outcome == Outcome::ExitedNonZero);
+    REQUIRE(r.report.exit_observed == ExitKind::Exited);
+    REQUIRE(r.report.exit_code == 3);
+    REQUIRE(r.report.frame_status == FrameStatus::Valid);
+    RequireSuccessOnlyOnTheCompletedConditions(r);
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 03: an invalid frame, then exit 0, is RESULT_INVALID and never Completed", "[worker][d1c][matrix]") {
+    SECTION("junk with a bad magic") {
+        const Run r = Hostile(kMalformedFrame);
+        REQUIRE(r.report.outcome == Outcome::ResultMissing);  // campaign name RESULT_INVALID
+        REQUIRE(r.report.exit_observed == ExitKind::Exited);
+        REQUIRE(r.report.exit_code == 0);
+        REQUIRE(r.report.frame_status == FrameStatus::Malformed);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    SECTION("a frame cut short") {
+        const Run r = Hostile(kTruncatedFrame);
+        REQUIRE(r.report.outcome == Outcome::ResultMissing);
+        REQUIRE(r.report.exit_observed == ExitKind::Exited);
+        REQUIRE(r.report.frame_status == FrameStatus::Malformed);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 04: more than one frame, even two valid ones, is Conflicting and never Completed", "[worker][d1c][matrix]") {
+    const Run r = Hostile(kTrailingBytes);  // FIRST then SECOND, each a valid frame
+    REQUIRE(r.report.outcome == Outcome::ResultMissing);
+    REQUIRE(r.report.exit_observed == ExitKind::Exited);
+    REQUIRE(r.report.exit_code == 0);
+    REQUIRE(r.report.frame_status == FrameStatus::Conflicting);
+    RequireSuccessOnlyOnTheCompletedConditions(r);
+    // Neither frame's bytes are left in the caller's buffer.
+    REQUIRE(r.out[0] == 0);
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 05: output beyond the limit", "[worker][d1c][matrix]") {
+    const Run r = Hostile(kOversizedFrame);
+    REQUIRE(r.report.outcome == Outcome::ResultOversized);
+    REQUIRE(r.report.frame_status == FrameStatus::Oversized);
+    // The oversized header is noticed while the worker is still alive or already gone: either way
+    // the supervisor, not the worker, decided how the run ended.
+    REQUIRE((r.report.exit_observed == ExitKind::Exited || r.report.exit_observed == ExitKind::KilledBySupervisor));
+    RequireSuccessOnlyOnTheCompletedConditions(r);
+    SECTION("a frame whose announced length is exactly one byte over the cap") {
+        Limits l = DefaultLimits();
+        l.max_output_bytes = 8;
+        const Run over = Hostile(kForgeThenExit0, l);  // sends 9 bytes under a cap of 8
+        REQUIRE(over.report.outcome == Outcome::ResultOversized);
+        REQUIRE(over.report.frame_status == FrameStatus::Oversized);
+        RequireSuccessOnlyOnTheCompletedConditions(over);
+    }
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 06: the result channel is closed early, then the worker spins", "[worker][d1c][matrix]") {
+    SECTION("a worker under the filter cannot close it: close is denied and ends in SIGSYS") {
+        const Run r = Hostile(kCloseResultThenSpin);
+        REQUIRE(r.report.outcome == Outcome::SeccompViolation);
+        REQUIRE(r.report.exit_observed == ExitKind::Signaled);
+        REQUIRE(r.report.signal_number == SIGSYS);
+        REQUIRE(r.report.frame_status == FrameStatus::Missing);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    SECTION("a worker that never installed the filter closes it and spins: the deadline still decides") {
+        const Run r = Hostile(kCloseUnfilteredThenSpin);
+        REQUIRE(r.report.outcome == Outcome::TimedOut);
+        REQUIRE(r.report.deadline_fired);
+        REQUIRE(r.report.exit_observed == ExitKind::KilledBySupervisor);
+        REQUIRE(r.report.frame_status == FrameStatus::Missing);
+        REQUIRE(r.report.elapsed_ns <= kDeadlineNs + kSlackNs);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 07: exit 0 with no result at all", "[worker][d1c][matrix]") {
+    const Run r = Hostile(kExitZeroNoFrame);
+    REQUIRE(r.report.outcome == Outcome::ResultMissing);
+    REQUIRE(r.report.exit_observed == ExitKind::Exited);
+    REQUIRE(r.report.exit_code == 0);
+    REQUIRE(r.report.frame_status == FrameStatus::Missing);
+    RequireSuccessOnlyOnTheCompletedConditions(r);
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 08: a worker that probes and tampers with descriptors cannot affect the supervisor's observation", "[worker][d1c][matrix][fd]") {
+    SECTION("it holds 0, 1, 2 and the write end of the result pipe, and nothing it tries above 3 exists") {
+        // The supervising process leaks inheritable descriptors on purpose (a file, and a duplicate
+        // placed high). A worker that found any of them could write to or close them.
+        const int leak_a = ::open("/etc/hostname", O_RDONLY);
+        REQUIRE(leak_a >= 0);
+        const int leak_b = ::fcntl(leak_a, F_DUPFD, 100);
+        REQUIRE(leak_b >= 100);
+        const Run r = Hostile(kProbeFds);
+        ::close(leak_a);
+        ::close(leak_b);
+        // The probe ran before any filter. It listed /proc/self/fd, then tried F_GETFD, write,
+        // F_DUPFD and close on every descriptor from 4 to 1023, and a read on the write end.
+        REQUIRE(r.report.outcome == Outcome::Completed);
+        REQUIRE(r.Text() == "fds=0,1,2,3,;above3=0,0,0,0;read3=0");
+        // Its report of what it found is its own claim; what the supervisor saw is separate.
+        REQUIRE(r.report.exit_observed == ExitKind::Exited);
+        REQUIRE(r.report.frame_status == FrameStatus::Valid);
+        REQUIRE(r.report.result_self_reported);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    SECTION("replacing its own result descriptor with /dev/null only loses its own result") {
+        const Run r = Hostile(kClobberResultFd);
+        REQUIRE(r.report.outcome == Outcome::ResultMissing);
+        REQUIRE(r.report.exit_observed == ExitKind::Exited);
+        REQUIRE(r.report.exit_code == 0);
+        REQUIRE(r.report.frame_status == FrameStatus::Missing);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    SECTION("the supervisor's own descriptors are not duplicated into the worker: none leaks in the parent either") {
+        const std::size_t before = OpenDescriptorCount();
+        for (int i = 0; i < 5; ++i) (void)Hostile(kClobberResultFd);
+        REQUIRE(OpenDescriptorCount() == before);
+    }
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 09: a hang during result delivery (a partial frame, then block)", "[worker][d1c][matrix]") {
+    const Run r = Hostile(kPartialFrameThenBlock);
+    REQUIRE(r.report.outcome == Outcome::TimedOut);
+    REQUIRE(r.report.deadline_fired);
+    REQUIRE(r.report.exit_observed == ExitKind::KilledBySupervisor);
+    REQUIRE(r.report.signal_number == SIGKILL);
+    REQUIRE(r.report.frame_status == FrameStatus::Malformed);  // bytes arrived, no complete frame
+    REQUIRE(r.report.elapsed_ns <= kDeadlineNs + kSlackNs);
+    RequireSuccessOnlyOnTheCompletedConditions(r);
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 10: a worker that never finishes is killed at the deadline", "[worker][d1c][matrix]") {
+    for (const uint32_t kind : {kSpin, kBlock}) {
+        const Run r = Shipped(kind);
+        INFO(kind);
+        REQUIRE(r.report.outcome == Outcome::TimedOut);
+        REQUIRE(r.report.deadline_fired);
+        REQUIRE(r.report.exit_observed == ExitKind::KilledBySupervisor);
+        REQUIRE(r.report.signal_number == SIGKILL);
+        REQUIRE(r.report.frame_status == FrameStatus::Missing);
+        REQUIRE(r.report.elapsed_ns >= kDeadlineNs);
+        REQUIRE(r.report.elapsed_ns <= kDeadlineNs + kSlackNs);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Matrix 12: parent and child disagree, the supervisor's facts win", "[worker][d1c][matrix]") {
+    SECTION("the frame says complete, the deadline expired: TimedOut") {
+        const Run r = Hostile(kForgeThenSpin);
+        REQUIRE(r.report.outcome == Outcome::TimedOut);
+        REQUIRE(r.report.exit_observed == ExitKind::KilledBySupervisor);
+        REQUIRE(r.report.frame_status == FrameStatus::Valid);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    SECTION("the frame says complete, the worker dies by a signal: Crashed, Signaled") {
+        const Run r = Hostile(kForgeThenCrash);
+        REQUIRE(r.report.outcome == Outcome::Crashed);
+        REQUIRE(r.report.exit_observed == ExitKind::Signaled);
+        REQUIRE(r.report.signal_number == SIGSEGV);
+        REQUIRE(r.report.frame_status == FrameStatus::Valid);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    SECTION("the frame says complete and arrives only after the deadline: TimedOut, nothing delivered") {
+        Limits l = DefaultLimits();
+        l.wall_clock_deadline_ns = 200 * kMs;
+        const Run r = Hostile(kDelayedResult, l);
+        REQUIRE(r.report.outcome == Outcome::TimedOut);
+        REQUIRE(r.report.exit_observed == ExitKind::KilledBySupervisor);
+        RequireSuccessOnlyOnTheCompletedConditions(r);
+    }
+    REQUIRE(NoChildrenLeft());
 }

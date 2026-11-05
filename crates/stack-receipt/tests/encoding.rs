@@ -267,7 +267,9 @@ fn a_wrong_tag_an_unknown_variant_and_an_over_cap_record_are_refused() {
     assert_eq!(decode_record(&wrong), Err(DecodeError::BadTag));
     let mut v2 = bytes.clone();
     v2[14] = b'2';
-    assert_eq!(decode_record(&v2), Err(DecodeError::BadTag));
+    // D1-C step 2: "stack-receipt/2" is now a real format version, which holds only the
+    // observed terminal event; a Proposed body under it is refused by its event tag.
+    assert_eq!(decode_record(&v2), Err(DecodeError::BadTagByte("event", 1)));
     // The event tag sits right after the fixed header, kernel_id,
     // execution id, recorded_at, key id and provenance.
     let event_tag = FIXED_PREFIX_BYTES + 2 + 8 + 16 + 8 + 32 + (2 + 12) + (2 + 10) + (2 + 9);

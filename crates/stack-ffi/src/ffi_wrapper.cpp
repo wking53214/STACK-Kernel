@@ -384,8 +384,19 @@ struct stack_supervised_report {
     // worker's own claim and nothing more (RACE-02). Was reserved[0]; the
     // struct has the same size and layout, old callers read it as zero.
     uint8_t result_self_reported;
-    uint8_t reserved[2];
+    // D1-C. Were reserved[0] and reserved[1]: the struct has the same size (40)
+    // and layout, and an old caller that never read them sees them as bytes it
+    // already ignored. Both are facts the SUPERVISOR observed, never read from
+    // payload content (cpp/include/stack_supervised_exec.hpp, ExitKind and
+    // FrameStatus):
+    //   exit_observed  0 none, 1 exited, 2 signaled, 3 killed by supervisor, 4 unreaped
+    //   frame_status   0 not read, 1 valid, 2 missing, 3 malformed, 4 oversized,
+    //                  5 trailing, 6 conflicting (more than one frame)
+    // The number that goes with exit_observed is exit_code or signal_number.
+    uint8_t exit_observed;
+    uint8_t frame_status;
 };
+static_assert(sizeof(stack_supervised_report) == 40, "ABI: the report keeps its size (D1-C)");
 
 static void FillReport(stack_supervised_report* report, const supervised::ExecutionReport& r) {
     report->elapsed_ns = r.elapsed_ns;
@@ -397,7 +408,8 @@ static void FillReport(stack_supervised_report* report, const supervised::Execut
     report->child_pid = static_cast<int32_t>(r.child_pid);
     report->deadline_fired = r.deadline_fired ? 1 : 0;
     report->result_self_reported = r.result_self_reported ? 1 : 0;
-    report->reserved[0] = report->reserved[1] = 0;
+    report->exit_observed = static_cast<uint8_t>(r.exit_observed);
+    report->frame_status = static_cast<uint8_t>(r.frame_status);
 }
 
 static const char kFfiPayloadBytes[] = "stack-ffi-payload-v1";

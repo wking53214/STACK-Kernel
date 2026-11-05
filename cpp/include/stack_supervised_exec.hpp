@@ -69,6 +69,12 @@
  *     into Completed, and (worker path) cannot expose the caller's memory. On
  *     every outcome other than Completed the bytes the frame parser had
  *     written into the caller's buffer are zeroed.
+ *   - Two further facts are reported beside the outcome and never derived from payload
+ *     content (D1-C): ExecutionReport::exit_observed (how the supervisor saw the process end:
+ *     exited, signaled, killed by the supervisor, unreaped) and ExecutionReport::frame_status
+ *     (whether the pipe held exactly one well-formed frame, and if not, what it held). The
+ *     frame carries no field the supervisor interprets beyond the result bytes. Completed is
+ *     exactly: exit_observed Exited with code 0, deadline not fired, frame_status Valid.
  *   - The wait for the child after SIGKILL is bounded (Limits::reap_timeout_ns,
  *     2 s by default). If the child is not reaped in time the run is
  *     TerminationUnconfirmed: not a success, the pid and pidfd stay tracked
@@ -174,6 +180,39 @@ enum class Outcome : uint8_t {
     Terminated = 13
 };
 
+/**
+ * How the supervisor saw the child's process end (D1-C). Observed by the
+ * supervisor from wait status and from its own kill; nothing the payload
+ * writes can change it. The number that goes with it is ExecutionReport::exit_code
+ * (Exited) or ExecutionReport::signal_number (Signaled, KilledBySupervisor).
+ * The values are part of the FFI report (stack_supervised_report::exit_observed).
+ */
+enum class ExitKind : uint8_t {
+    None = 0,               // no child was forked, or its end was not observed (wait failed)
+    Exited = 1,             // the child called exit with exit_code
+    Signaled = 2,           // the child was ended by signal_number and the supervisor did not send it
+    KilledBySupervisor = 3, // the supervisor sent SIGKILL and the child ended by it
+    Unreaped = 4            // SIGKILL was sent and the child was NOT reaped in time; it may still run
+};
+
+/**
+ * What the supervisor made of the bytes on the result pipe (D1-C). Only the
+ * frame's well-formedness is judged (magic, length within the cap, FNV-1a
+ * checksum, nothing after it); the supervisor never interprets the result
+ * bytes. Valid says "a well-formed frame arrived", not that the run succeeded
+ * and not that the result is true: a Valid frame can accompany TimedOut,
+ * Crashed or ExitedNonZero. The values are part of the FFI report.
+ */
+enum class FrameStatus : uint8_t {
+    NotRead = 0,     // the pipe was not evaluated (nothing spawned, wait failed, termination unconfirmed)
+    Valid = 1,       // exactly one complete, well-formed frame and nothing after it
+    Missing = 2,     // no byte arrived on the pipe
+    Malformed = 3,   // bytes arrived but no complete frame with a good magic and checksum (junk, cut short)
+    Oversized = 4,   // the header announced more than max_output_bytes or the caller's buffer
+    Trailing = 5,    // one good frame, then bytes that are not a second complete frame
+    Conflicting = 6  // two or more complete well-formed frames
+};
+
 /** Upper bound on a deadline: one hour. Larger values are InvalidLimits. */
 inline constexpr uint64_t kMaxWallClockDeadlineNs = 3'600'000'000'000ULL;
 /** Upper bound on a result: 1 MiB. Larger max_output_bytes is InvalidLimits. */
@@ -250,6 +289,10 @@ struct ExecutionReport {
      * work was done or done correctly.
      */
     bool result_self_reported = false;
+    /** D1-C: how the process ended, as the supervisor saw it. Never set from payload bytes. */
+    ExitKind exit_observed = ExitKind::None;
+    /** D1-C: what the supervisor made of the result pipe. Well-formedness only. */
+    FrameStatus frame_status = FrameStatus::NotRead;
 };
 
 /**
@@ -561,6 +604,7 @@ private:
         int status = 0;
         bool exited = false;
         bool reaped = false;
+        bool sent_kill = false;  // the supervisor itself sent SIGKILL (D1-C: exit_observed)
         bool pipe_eof = false;
         bool poll_failed = false;
         int poll_errno = 0;
@@ -607,6 +651,7 @@ private:
                     if (parser.state == FrameParser::State::Oversized) {
                         // Nothing more is accepted; stop the child now.
                         KillChild(pid, pidfd.fd);
+                        sent_kill = true;
                     }
                 } else if (pidfd.fd >= 0 && fds[i].fd == pidfd.fd) {
                     exited = true;
@@ -616,6 +661,7 @@ private:
             if (!exited && pidfd.fd < 0 && cancel != nullptr && cancel->Requested()) {
                 // No pidfd (kernel older than 5.3): the polling loop honors the request by number.
                 KillChild(pid, -1);
+                sent_kill = true;
             }
             if (!exited && pidfd.fd < 0) {
                 const pid_t w = ::waitpid(pid, &status, WNOHANG);
@@ -640,6 +686,7 @@ private:
         if ((report.deadline_fired || poll_failed) && !reaped) {
             KillChild(pid, pidfd.fd);
             killed = true;
+            sent_kill = true;
         }
         // Always reap, but never wait without a bound (R2-K-12). With the waitpid
         // fallback the child may be reaped already.
@@ -651,6 +698,8 @@ private:
                 KillChild(pid, pidfd.fd);
                 TrackUnconfirmed(slot, pid, pidfd);
                 report.outcome = Outcome::TerminationUnconfirmed;
+                report.exit_observed = ExitKind::Unreaped;
+                report.frame_status = FrameStatus::NotRead;  // the child may still be writing
                 report.error_number = ETIMEDOUT;
                 report.elapsed_ns = MonotonicNs() - t0;
                 ScrubResult(result, parser);
@@ -668,7 +717,7 @@ private:
         if (!pipe_eof) DrainPipeAfterExit(pipe_r.fd, parser, pipe_eof);
 
         report.elapsed_ns = MonotonicNs() - t0;
-        Classify(report, status, parser, poll_failed, poll_errno, cancel != nullptr && cancel->Requested());
+        Classify(report, status, parser, poll_failed, poll_errno, cancel != nullptr && cancel->Requested(), sent_kill);
         // Bytes the caller's buffer received from a run that did not complete are
         // not a result; do not leave them there to be mistaken for one.
         if (report.outcome != Outcome::Completed) ScrubResult(result, parser);
@@ -850,6 +899,59 @@ private:
     static constexpr uint64_t kFnvOffset = 0xcbf29ce484222325ULL;
     static constexpr uint64_t kFnvPrime = 0x100000001b3ULL;
 
+    // Looks at what follows a complete first frame without storing any of it, so the
+    // caller's buffer holds the first frame's bytes only and a run with more than one
+    // frame can be told apart from a run with trailing junk (D1-C: Conflicting vs Trailing).
+    struct TailScan {
+        uint8_t head[8]{};
+        std::size_t head_n = 0;
+        uint32_t body_len = 0;
+        std::size_t body_n = 0;
+        uint8_t trailer[8]{};
+        std::size_t trailer_n = 0;
+        uint64_t hash = kFnvOffset;
+        uint32_t frames = 0;  // complete, well-formed frames after the first
+        bool dead = false;    // stopped following: not a frame
+
+        void Reset() noexcept {
+            head_n = 0; body_len = 0; body_n = 0; trailer_n = 0; hash = kFnvOffset;
+        }
+        void Feed(const uint8_t* p, std::size_t n, std::size_t max_len) noexcept {
+            while (n > 0 && !dead) {
+                if (head_n < 8) {
+                    head[head_n++] = *p++;
+                    --n;
+                    if (head_n == 8) {
+                        uint32_t magic = 0;
+                        std::memcpy(&magic, head, 4);
+                        std::memcpy(&body_len, head + 4, 4);
+                        if (magic != kFrameMagic || body_len > max_len) { dead = true; return; }
+                    }
+                } else if (body_n < body_len) {
+                    std::size_t take = body_len - body_n;
+                    if (take > n) take = n;
+                    for (std::size_t i = 0; i < take; ++i) {
+                        hash ^= p[i];
+                        hash *= kFnvPrime;
+                    }
+                    body_n += take;
+                    p += take;
+                    n -= take;
+                } else {
+                    trailer[trailer_n++] = *p++;
+                    --n;
+                    if (trailer_n == 8) {
+                        uint64_t claimed = 0;
+                        std::memcpy(&claimed, trailer, 8);
+                        if (claimed != hash) { dead = true; return; }
+                        ++frames;
+                        Reset();
+                    }
+                }
+            }
+        }
+    };
+
     struct FrameParser {
         enum class State : uint8_t { Header, Body, Trailer, Done, Invalid, Oversized };
         uint8_t* out;
@@ -863,8 +965,22 @@ private:
         uint8_t trailer[8]{};
         std::size_t trailer_n = 0;
         uint64_t hash = kFnvOffset;
+        bool after_done = false;  // bytes arrived after one complete frame
+        TailScan tail{};
+        std::size_t bytes_seen = 0;
+
+        // What the bytes seen so far amount to (D1-C). Well-formedness only.
+        [[nodiscard]] FrameStatus Status() const noexcept {
+            if (state == State::Oversized) return FrameStatus::Oversized;
+            if (after_done) return tail.frames > 0 ? FrameStatus::Conflicting : FrameStatus::Trailing;
+            if (state == State::Done) return FrameStatus::Valid;
+            if (bytes_seen == 0) return FrameStatus::Missing;
+            return FrameStatus::Malformed;  // junk, a bad checksum, or a frame cut short
+        }
 
         void Feed(const uint8_t* p, std::size_t n) noexcept {
+            bytes_seen += n;
+            if (after_done) { tail.Feed(p, n, max_len); return; }
             while (n > 0) {
                 switch (state) {
                 case State::Header: {
@@ -906,6 +1022,8 @@ private:
                 }
                 case State::Done:
                     state = State::Invalid;  // trailing bytes: not a clean frame
+                    after_done = true;
+                    tail.Feed(p, n, max_len);
                     return;
                 case State::Invalid:
                 case State::Oversized:
@@ -1058,9 +1176,18 @@ private:
     }
 
     static void Classify(ExecutionReport& report, int status, const FrameParser& parser,
-                         bool poll_failed, int poll_errno, bool cancel_requested) noexcept {
+                         bool poll_failed, int poll_errno, bool cancel_requested, bool sent_kill) noexcept {
         if (WIFSIGNALED(status)) report.signal_number = WTERMSIG(status);
         if (WIFEXITED(status)) report.exit_code = WEXITSTATUS(status);
+        // D1-C: the two facts the supervisor observed itself. Neither reads a payload byte beyond
+        // the frame's well-formedness.
+        if (WIFSIGNALED(status)) {
+            const bool ours = WTERMSIG(status) == SIGKILL && (sent_kill || cancel_requested);
+            report.exit_observed = ours ? ExitKind::KilledBySupervisor : ExitKind::Signaled;
+        } else if (WIFEXITED(status)) {
+            report.exit_observed = ExitKind::Exited;
+        }
+        report.frame_status = poll_failed ? FrameStatus::NotRead : parser.Status();
 
         if (report.deadline_fired) { report.outcome = Outcome::TimedOut; return; }
         // Killed while a cancel was requested: the supervisor's own SIGKILL (R2-K-24).

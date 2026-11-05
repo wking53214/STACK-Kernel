@@ -72,6 +72,8 @@ fn an_honest_completed_execution_with_every_expectation_is_verified_with_limitat
         Limitation::TimestampsAreWriterClaims,
         Limitation::LogRollbackNotDetectableWithoutAnchor,
         Limitation::ResultIsSelfReported,
+        // D1-C step 2: a version 1 terminal cannot show the supervisor-observed facts.
+        Limitation::SupervisorObservedFactsNotRecorded,
     ];
     want.sort();
     assert_eq!(limits, want);

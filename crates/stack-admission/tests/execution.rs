@@ -66,6 +66,9 @@ fn a_valid_authorized_request_runs_and_verifies_with_stated_limitations() {
             "capability_signature_not_rechecked",
             "decision_proof_not_checkable_hmac_is_process_local",
             "handoff_provenance_not_rechecked",
+            // D1-C step 2: the pipeline still records a version 1 terminal (admission.rs is
+            // not yet on finish_observed), which cannot show the supervisor-observed facts.
+            "supervisor_observed_facts_not_recorded",
             "result_is_self_reported",
             "timestamps_are_writer_claims",
             "log_rollback_not_detectable_without_anchor",
@@ -172,6 +175,9 @@ fn the_verifier_lists_every_item_it_did_not_check() {
             "capability_signature_not_rechecked",
             "decision_proof_not_checkable_hmac_is_process_local",
             "handoff_provenance_not_rechecked",
+            // D1-C step 2: the pipeline still records a version 1 terminal (admission.rs is
+            // not yet on finish_observed), which cannot show the supervisor-observed facts.
+            "supervisor_observed_facts_not_recorded",
             "result_is_self_reported",
             "timestamps_are_writer_claims",
             "log_rollback_not_detectable_without_anchor",

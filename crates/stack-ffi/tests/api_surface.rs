@@ -66,3 +66,47 @@ fn the_governed_entry_is_the_one_safe_supervised_run() {
     // Exactly one place calls the governed C symbol from a safe function.
     assert_eq!(src.matches("stack_supervised_run_governed(").count(), 2, "declaration plus one call");
 }
+
+/// R-1, lifetime: the host is constructed once and lives for the process. There is no
+/// teardown, so there is no exported symbol and no public Rust function whose name says
+/// shutdown, teardown, destroy, finalize, deinit, uninit, reset, free, release or close.
+/// If one is ever added, this test fails and ABI.md section 3 ("Lifetime") must change with it.
+/// Behaviour that goes with the statement (a repeated init is idempotent and keeps the state)
+/// is tested by cpp/tests/ffi_c_caller.c (ctest STACKFfiCCaller) and
+/// cpp/tests/ffi_init_redteam.cpp (ctest STACKRedteam_ffi_init).
+#[test]
+fn the_host_has_no_teardown_entry_point() {
+    const WRAPPER: &str = include_str!("../src/ffi_wrapper.cpp");
+    const TEARDOWN_WORDS: [&str; 10] = [
+        "shutdown", "teardown", "destroy", "finalize", "deinit", "uninit", "reset", "free", "release", "close",
+    ];
+    // Exported C symbols: definitions at column 0 inside the extern "C" block.
+    let mut exported = Vec::new();
+    for line in WRAPPER.lines() {
+        for prefix in ["int ", "uint64_t ", "void "] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                if let Some(name) = rest.split('(').next() {
+                    if name.starts_with("stack_") && rest.contains('(') {
+                        exported.push(name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    assert!(exported.iter().any(|n| n == "stack_host_initialize"), "parsed the wrong thing: {exported:?}");
+    assert!(exported.len() >= 15, "parsed too few symbols: {exported:?}");
+    let src = non_test_source();
+    let mut rust_names = Vec::new();
+    for line in src.lines() {
+        if let Some(rest) = line.strip_prefix("pub fn ") {
+            if let Some(name) = rest.split(['(', '<']).next() {
+                rust_names.push(name.to_owned());
+            }
+        }
+    }
+    for name in exported.iter().chain(rust_names.iter()) {
+        for word in TEARDOWN_WORDS {
+            assert!(!name.contains(word), "`{name}` looks like a teardown entry point (`{word}`): the host has none");
+        }
+    }
+}

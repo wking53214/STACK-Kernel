@@ -44,6 +44,7 @@ that existed before are unchanged. Additions and changes of meaning:
 | R2-K-24 | host audit ring, `AuditEventType` | NEW value 9 `SupervisedTerminated`, appended. |
 | A3 | `uint64_t stack_supervised_unconfirmed_count(void)`, `uint64_t stack_supervised_reap_unconfirmed(void)` | NEW. Workers sent SIGKILL and not confirmed reaped; re-kill and reap them. |
 | A2 | `stack_supervised_report` | Same size and layout. `reserved[3]` became `result_self_reported` (u8) and `reserved[2]`. Old callers read it as before; it is 1 on `Completed`. |
+| D1-C | `stack_supervised_report` | Same size (40) and layout, asserted at compile time on both sides. `reserved[0]` became `exit_observed` (u8: 0 none, 1 exited, 2 signaled, 3 killed by the supervisor, 4 unreaped) and `reserved[1]` became `frame_status` (u8: 0 not read, 1 valid, 2 missing, 3 malformed, 4 oversized, 5 trailing, 6 conflicting). Both are facts the supervisor observed; neither is read from payload bytes. The number that goes with `exit_observed` is `exit_code` (exited) or `signal_number` (signaled, killed). An old caller never read the two bytes (they were written as 0). No outcome value is renamed or added; `Completed` still means exit 0 inside the deadline and a well-formed frame, and now additionally implies `exit_observed` 1 with `exit_code` 0 and `frame_status` 1. Rust: `SupervisedReport::{exit_observed, frame_status}`, `ExitObserved`, `FrameStatus`, `SupervisedOutcome::campaign_name`. Status: implemented, tested (`worker_exec_tests.cpp` "exit_observed and frame_status", `lib.rs` `test_d1c_*`). |
 | A2 | `stack_supervised_report.outcome` | NEW value 12 `TerminationUnconfirmed`. A caller that switched over the outcome and had a default arm now sees it there. |
 | A3 | `stack_supervised_run` | Unchanged signature and behaviour. Now documented LEGACY: its child is a fork of the caller, it makes no capability or rate-limit check and writes no audit event. Not for untrusted payloads. Nothing in this repository calls it except its own tests. R2-K-22: the C symbol is kept unchanged for ABI compatibility; the Rust wrapper `supervised_run` is now `pub unsafe fn` (with a `# Safety` section), so safe Rust can no longer reach it. Tested: `tests/api_surface.rs` (source guard: no safe public function reaches the symbol; `supervised_run` is `unsafe`) and a `compile_fail,E0133` doc test on `supervised_run`. |
 | A3 | host audit ring, `AuditEventType` | NEW values 5 `SupervisedCompleted`, 6 `SupervisedTimedOut`, 7 `SupervisedFailed`, 8 `SupervisedTerminationUnconfirmed`, appended so 0 to 4 keep their numbers. `stack_host_audit_read_slot` returns them. |
@@ -168,6 +169,31 @@ concurrent `host_initialize` calls agree.
 
 Not tested: failure of the signal handler registration (only `timer_create`
 failure is injected); initialization racing `fork`.
+
+### Lifetime (R-1)
+
+Status: implemented, tested. A limitation, stated plainly.
+
+- There is no teardown. The host is constructed once, on the first successful
+  `stack_host_initialize` (or `host_initialize`), and lives until the process
+  exits. No exported symbol and no public Rust function destroys, resets,
+  re-creates or re-calibrates it, and none revokes the process-wide signal
+  handler or the thread deadline timer that initialization registered.
+- A repeated initialization is idempotent. It returns the latched result of the
+  first one (0, or -1 if that failed) and does not construct a second host
+  (tested with 64 concurrent initializations). The tests show that the
+  capability mask and the payload counter survive a repeated init; the
+  rate-limit buckets and the audit ring are not asserted by a repeated-init test.
+- A caller that wants a clean host starts a new process. A host whose
+  initialization failed stays failed for the life of the process (above).
+- A thread seal is separate and per thread; it ends with the thread.
+
+Pinned by: `tests/api_surface.rs::the_host_has_no_teardown_entry_point` (no
+exported symbol or public function with a teardown-like name; adding one fails
+the test and requires this section to change), `cpp/tests/ffi_c_caller.c` (ctest
+`STACKFfiCCaller`: a repeated init after use returns 0, rewinds nothing, and the
+granted capability still admits a run) and `cpp/tests/ffi_init_redteam.cpp`
+(64 concurrent initializations construct one host).
 
 ## 4. Accounting rules
 

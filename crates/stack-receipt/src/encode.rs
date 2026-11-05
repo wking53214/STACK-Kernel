@@ -38,13 +38,18 @@ use stack_authority::Digest32;
 
 use crate::record::{
     check_text, Action, ActualAction, Assurance, Attempted, Authorized, CapabilityBinding, DecisionEvidence, Event,
-    ExecutionId, FieldName, GateOutcome, GatePosition, Handoff, NativeDigest, Outcome, Proposed, Provenance,
-    ReceiptKeyId, Record, Rejected, Subject, Terminal, ValidationError, Verdict, MAX_ID_BYTES, MAX_OPERATION_BYTES,
-    MAX_SEATS, MAX_TEXT_BYTES,
+    ExecutionId, ExitObserved, FieldName, FrameStatus, GateOutcome, GatePosition, Handoff, NativeDigest, Observed,
+    Outcome, Proposed, Provenance, ReceiptKeyId, Record, Rejected, Subject, Terminal, TerminalObserved,
+    ValidationError, Verdict, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES,
 };
 
-/// The domain and version tag every canonical record starts with.
+/// The domain and version tag every canonical record starts with (format
+/// version 1). Every event except [`Event::TerminalObserved`] is written with it.
 pub const DOMAIN_TAG: &[u8; 16] = b"stack-receipt/1\n";
+/// The tag of format version 2: a terminal event that carries the
+/// supervisor-observed facts. Only that event is written or accepted under it,
+/// so a record still has exactly one encoding.
+pub const DOMAIN_TAG_V2: &[u8; 16] = b"stack-receipt/2\n";
 /// Domain separator for record hashes.
 pub const RECORD_HASH_DOMAIN: &[u8] = b"stack-receipt/record-hash/1\n";
 /// Domain separator for the genesis hash.
@@ -59,6 +64,21 @@ const TAG_AUTHORIZED: u8 = 2;
 const TAG_REJECTED: u8 = 3;
 const TAG_ATTEMPTED: u8 = 4;
 const TAG_TERMINAL: u8 = 5;
+const TAG_TERMINAL_OBSERVED: u8 = 6;
+
+const EXIT_NOT_OBSERVED: u8 = 0;
+const EXIT_EXITED: u8 = 1;
+const EXIT_SIGNALED: u8 = 2;
+const EXIT_KILLED_BY_SUPERVISOR: u8 = 3;
+const EXIT_UNREAPED: u8 = 4;
+
+const FRAME_NOT_READ: u8 = 0;
+const FRAME_VALID: u8 = 1;
+const FRAME_MISSING: u8 = 2;
+const FRAME_MALFORMED: u8 = 3;
+const FRAME_OVERSIZED: u8 = 4;
+const FRAME_TRAILING: u8 = 5;
+const FRAME_CONFLICTING: u8 = 6;
 
 const OUT_COMPLETED: u8 = 1;
 const OUT_TIMED_OUT: u8 = 2;
@@ -167,7 +187,11 @@ pub fn canonical_bytes(record: &Record) -> Result<Vec<u8>, ValidationError> {
     let mut e = Encoder {
         buf: Vec::with_capacity(512),
     };
-    e.raw(DOMAIN_TAG);
+    e.raw(if matches!(record.event, Event::TerminalObserved(_)) {
+        DOMAIN_TAG_V2
+    } else {
+        DOMAIN_TAG
+    });
     e.u64(record.sequence);
     e.raw(&record.prev_hash);
     e.id("kernel_id", &record.kernel_id)?;
@@ -265,8 +289,11 @@ fn encode_event(e: &mut Encoder, event: &Event) -> Result<(), ValidationError> {
             e.digest(&a.action.argument_digest);
             e.u64(a.started_at_ms);
         }
-        Event::Terminal(t) => {
-            e.u8(TAG_TERMINAL);
+        Event::Terminal(_) | Event::TerminalObserved(_) => {
+            let Some((t, observed)) = event.terminal_parts() else {
+                return Ok(());
+            };
+            e.u8(if observed.is_some() { TAG_TERMINAL_OBSERVED } else { TAG_TERMINAL });
             match &t.outcome {
                 Outcome::Completed {
                     exit_code,
@@ -317,6 +344,33 @@ fn encode_event(e: &mut Encoder, event: &Event) -> Result<(), ValidationError> {
             }
             e.u64(t.completed_at_ms);
             e.u64(t.elapsed_ns);
+            if let Some(o) = observed {
+                match o.exit {
+                    ExitObserved::NotObserved => e.u8(EXIT_NOT_OBSERVED),
+                    ExitObserved::Exited { code } => {
+                        e.u8(EXIT_EXITED);
+                        e.i32(code);
+                    }
+                    ExitObserved::Signaled { signal } => {
+                        e.u8(EXIT_SIGNALED);
+                        e.i32(signal);
+                    }
+                    ExitObserved::KilledBySupervisor { signal } => {
+                        e.u8(EXIT_KILLED_BY_SUPERVISOR);
+                        e.i32(signal);
+                    }
+                    ExitObserved::Unreaped => e.u8(EXIT_UNREAPED),
+                }
+                e.u8(match o.frame {
+                    FrameStatus::NotRead => FRAME_NOT_READ,
+                    FrameStatus::Valid => FRAME_VALID,
+                    FrameStatus::Missing => FRAME_MISSING,
+                    FrameStatus::Malformed => FRAME_MALFORMED,
+                    FrameStatus::Oversized => FRAME_OVERSIZED,
+                    FrameStatus::Trailing => FRAME_TRAILING,
+                    FrameStatus::Conflicting => FRAME_CONFLICTING,
+                });
+            }
         }
     }
     Ok(())
@@ -403,9 +457,14 @@ pub fn decode_record(bytes: &[u8]) -> Result<Record, DecodeError> {
         return Err(DecodeError::TooLarge);
     }
     let mut d = Decoder { b: bytes, pos: 0 };
-    if d.take(DOMAIN_TAG.len())? != DOMAIN_TAG {
+    let tag = d.take(DOMAIN_TAG.len())?;
+    let v2 = if tag == DOMAIN_TAG {
+        false
+    } else if tag == DOMAIN_TAG_V2 {
+        true
+    } else {
         return Err(DecodeError::BadTag);
-    }
+    };
     let sequence = d.u64()?;
     let prev_hash = d.arr32()?;
     let kernel_id = d.id("kernel_id")?;
@@ -417,7 +476,7 @@ pub fn decode_record(bytes: &[u8]) -> Result<Record, DecodeError> {
         version: d.id("provenance.version")?,
         host_id: d.id("provenance.host_id")?,
     };
-    let event = decode_event(&mut d)?;
+    let event = decode_event(&mut d, v2)?;
     if d.pos != bytes.len() {
         return Err(DecodeError::TrailingBytes(d.pos));
     }
@@ -475,8 +534,14 @@ fn decode_decision(d: &mut Decoder<'_>) -> Result<DecisionEvidence, DecodeError>
     Ok(DecisionEvidence { root, seats, verdicts })
 }
 
-fn decode_event(d: &mut Decoder<'_>) -> Result<Event, DecodeError> {
-    match d.u8()? {
+fn decode_event(d: &mut Decoder<'_>, v2: bool) -> Result<Event, DecodeError> {
+    let tag = d.u8()?;
+    // A record has exactly one encoding: format version 2 holds only the
+    // observed terminal event, and version 1 never holds it.
+    if v2 != (tag == TAG_TERMINAL_OBSERVED) {
+        return Err(DecodeError::BadTagByte("event", tag));
+    }
+    match tag {
         TAG_PROPOSED => {
             let subject = Subject {
                 identity: d.text("subject.identity", 1, MAX_TEXT_BYTES)?,
@@ -545,7 +610,7 @@ fn decode_event(d: &mut Decoder<'_>) -> Result<Event, DecodeError> {
                 started_at_ms: d.u64()?,
             }))
         }
-        TAG_TERMINAL => {
+        TAG_TERMINAL | TAG_TERMINAL_OBSERVED => {
             let outcome = match d.u8()? {
                 OUT_COMPLETED => Outcome::Completed {
                     exit_code: d.i32()?,
@@ -570,10 +635,35 @@ fn decode_event(d: &mut Decoder<'_>) -> Result<Event, DecodeError> {
                 },
                 other => return Err(DecodeError::BadTagByte("terminal.outcome", other)),
             };
-            Ok(Event::Terminal(Terminal {
+            let terminal = Terminal {
                 outcome,
                 completed_at_ms: d.u64()?,
                 elapsed_ns: d.u64()?,
+            };
+            if !v2 {
+                return Ok(Event::Terminal(terminal));
+            }
+            let exit = match d.u8()? {
+                EXIT_NOT_OBSERVED => ExitObserved::NotObserved,
+                EXIT_EXITED => ExitObserved::Exited { code: d.i32()? },
+                EXIT_SIGNALED => ExitObserved::Signaled { signal: d.i32()? },
+                EXIT_KILLED_BY_SUPERVISOR => ExitObserved::KilledBySupervisor { signal: d.i32()? },
+                EXIT_UNREAPED => ExitObserved::Unreaped,
+                other => return Err(DecodeError::BadTagByte("terminal.exit_observed", other)),
+            };
+            let frame = match d.u8()? {
+                FRAME_NOT_READ => FrameStatus::NotRead,
+                FRAME_VALID => FrameStatus::Valid,
+                FRAME_MISSING => FrameStatus::Missing,
+                FRAME_MALFORMED => FrameStatus::Malformed,
+                FRAME_OVERSIZED => FrameStatus::Oversized,
+                FRAME_TRAILING => FrameStatus::Trailing,
+                FRAME_CONFLICTING => FrameStatus::Conflicting,
+                other => return Err(DecodeError::BadTagByte("terminal.frame_status", other)),
+            };
+            Ok(Event::TerminalObserved(TerminalObserved {
+                terminal,
+                observed: Observed { exit, frame },
             }))
         }
         other => Err(DecodeError::BadTagByte("event", other)),
@@ -585,10 +675,13 @@ fn decode_event(d: &mut Decoder<'_>) -> Result<Event, DecodeError> {
 /// present disagree with what a writer at `sequence` after `prev` would
 /// have written, and `Some(bytes present)` otherwise.
 pub fn prefix_consistent(bytes: &[u8], sequence: u64, prev: &[u8; 32]) -> bool {
-    let mut expected = Vec::with_capacity(FIXED_PREFIX_BYTES);
-    expected.extend_from_slice(DOMAIN_TAG);
-    expected.extend_from_slice(&sequence.to_be_bytes());
-    expected.extend_from_slice(prev);
-    let n = bytes.len().min(FIXED_PREFIX_BYTES);
-    bytes.get(..n) == expected.get(..n)
+    // Either format version's tag may start the record being written.
+    [DOMAIN_TAG, DOMAIN_TAG_V2].into_iter().any(|tag| {
+        let mut expected = Vec::with_capacity(FIXED_PREFIX_BYTES);
+        expected.extend_from_slice(tag);
+        expected.extend_from_slice(&sequence.to_be_bytes());
+        expected.extend_from_slice(prev);
+        let n = bytes.len().min(FIXED_PREFIX_BYTES);
+        bytes.get(..n) == expected.get(..n)
+    })
 }

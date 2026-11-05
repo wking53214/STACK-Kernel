@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(stack_containment VERSION 1.0.0 LANGUAGES CXX)
+project(stack_containment VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -52,9 +52,10 @@ add_dependencies(stack_worker_exec_tests stack_worker stack_worker_test)
 add_executable(stack_worker_reap_tests tests/worker_reap_tests.cpp)
 target_compile_definitions(stack_worker_reap_tests PRIVATE
     STACK_SUPERVISED_TESTING=1
-    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>")
+    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>"
+    STACK_WORKER_TEST_PATH="$<TARGET_FILE:stack_worker_test>")
 target_link_libraries(stack_worker_reap_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
-add_dependencies(stack_worker_reap_tests stack_worker)
+add_dependencies(stack_worker_reap_tests stack_worker stack_worker_test)
 
 # The waitpid fallback path (no pidfd) with a late-observed deadline: libc
 # kill, waitpid and syscall are interposed by the program itself, so no test
@@ -69,6 +70,17 @@ set_tests_properties(STACKSupervisedFallback PROPERTIES TIMEOUT 120)
 set(STACK_FFI_WRAPPER ${CMAKE_CURRENT_SOURCE_DIR}/../crates/stack-ffi/src/ffi_wrapper.cpp)
 add_executable(stack_ffi_tests tests/ffi_host_tests.cpp ${STACK_FFI_WRAPPER})
 target_link_libraries(stack_ffi_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic pthread)
+
+# The shipped wrapper as a static library, for a caller that is not C++ (R-1): the C caller
+# below is compiled as C and links only this archive and the worker's path.
+add_library(stack_ffi_static STATIC ${STACK_FFI_WRAPPER})
+target_link_libraries(stack_ffi_static PRIVATE stack_containment PUBLIC atomic pthread)
+add_executable(ffi_c_caller tests/ffi_c_caller.c)
+set_target_properties(ffi_c_caller PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON LINKER_LANGUAGE CXX)
+target_compile_options(ffi_c_caller PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(ffi_c_caller PRIVATE STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>")
+target_link_libraries(ffi_c_caller PRIVATE stack_ffi_static)
+add_dependencies(ffi_c_caller stack_worker)
 
 # Governed supervised runs through the shipped wrapper (R2-K-13): governance
 # before spawn, one audit event per outcome, refunds, revocation. Built with
@@ -108,6 +120,8 @@ add_test(NAME STACKWorkerReap COMMAND stack_worker_reap_tests)
 set_tests_properties(STACKWorkerReap PROPERTIES TIMEOUT 300)
 add_test(NAME STACKFfiSupervised COMMAND ffi_supervised_tests)
 set_tests_properties(STACKFfiSupervised PROPERTIES TIMEOUT 300)
+add_test(NAME STACKFfiCCaller COMMAND ffi_c_caller)
+set_tests_properties(STACKFfiCCaller PROPERTIES TIMEOUT 120)
 add_test(NAME STACKFfiHost COMMAND stack_ffi_tests)
 set_tests_properties(STACKFfiHost PROPERTIES TIMEOUT 300)
 
