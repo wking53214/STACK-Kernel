@@ -339,3 +339,33 @@ TEST_CASE("Reap: a run that completes gives its reserved slot back", "[reap][slo
     }
     REQUIRE(SupervisedExecutor::UnconfirmedCount() == 0);
 }
+
+// D1-C adversarial matrix, case 11: the supervisor cannot confirm termination. The worker has
+// already sent a well-formed "success" frame (test kind 33: frame, then spin), the kill is
+// suppressed through the seam, and the supervisor must report what it knows: the worker is
+// unreaped, the pipe was not evaluated, nothing is delivered and nothing is a success.
+#ifdef STACK_WORKER_TEST_PATH
+TEST_CASE("Matrix 11: termination cannot be confirmed, so nothing is a success", "[reap][d1c][matrix]") {
+    REQUIRE(SupervisedExecutor::UnconfirmedCount() == 0);
+    SupervisedExecutor::SetKillHookForTesting(&IneffectiveKill);
+    uint8_t out[64];
+    std::memset(out, 0xAB, sizeof out);
+    WorkerSpec spec;
+    spec.executable = STACK_WORKER_TEST_PATH;
+    spec.kind = 33;  // kForgeThenSpin: a well-formed frame, then spins
+    const ExecutionReport r = SupervisedExecutor::RunWorker(QuickLimits(100, 300), spec, out, sizeof out);
+    CleanUp();
+
+    REQUIRE(r.outcome == Outcome::TerminationUnconfirmed);
+    REQUIRE(r.exit_observed == ExitKind::Unreaped);
+    REQUIRE(r.frame_status == FrameStatus::NotRead);  // the worker may still be writing: not evaluated
+    REQUIRE(r.deadline_fired);
+    REQUIRE(r.result_length == 0);
+    REQUIRE_FALSE(r.result_self_reported);
+    REQUIRE(r.exit_code == -1);
+    REQUIRE(r.signal_number == 0);
+    // The forged frame's bytes were scrubbed from the caller's buffer.
+    REQUIRE(out[0] == 0);
+    REQUIRE(SupervisedExecutor::UnconfirmedCount() == 0);
+}
+#endif

@@ -52,9 +52,10 @@ add_dependencies(stack_worker_exec_tests stack_worker stack_worker_test)
 add_executable(stack_worker_reap_tests tests/worker_reap_tests.cpp)
 target_compile_definitions(stack_worker_reap_tests PRIVATE
     STACK_SUPERVISED_TESTING=1
-    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>")
+    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>"
+    STACK_WORKER_TEST_PATH="$<TARGET_FILE:stack_worker_test>")
 target_link_libraries(stack_worker_reap_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
-add_dependencies(stack_worker_reap_tests stack_worker)
+add_dependencies(stack_worker_reap_tests stack_worker stack_worker_test)
 
 # The waitpid fallback path (no pidfd) with a late-observed deadline: libc
 # kill, waitpid and syscall are interposed by the program itself, so no test

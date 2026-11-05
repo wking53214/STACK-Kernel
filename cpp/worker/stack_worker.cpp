@@ -110,6 +110,15 @@ enum Kind : uint32_t {
     kCpuBound = 50,
     kEnvCount = 51,
     kListFds = 52,
+    // D1-C adversarial matrix. 53 to 55 and 57 act BEFORE the filter exists: they model a
+    // worker that does not follow the protocol, which the supervisor must not trust.
+    kFrameThenExitNonZero = 53,   // case 2: a well-formed frame, then exit 3
+    kProbeFds = 54,               // case 8: probes every descriptor it might reach, reports what it found
+    kClobberResultFd = 55,        // case 8: replaces its own result descriptor, then "reports" and exits 0
+    kCloseResultThenSpin = 56,    // case 6 (filtered): close(3) is not allowed and ends in SIGSYS
+    kCloseUnfilteredThenSpin = 57,// case 6 (unfiltered): closes the result pipe early, then spins
+    kPartialFrameThenBlock = 58,  // case 9: a header and part of the body, then blocks
+    kForgeThenCrash = 59,         // case 12: a well-formed frame claiming success, then SIGSEGV
 #endif
 };
 
@@ -123,6 +132,48 @@ int main(int argc, char** argv, char** envp) {
     // leave open. Never in the shipped worker.
     if (argc >= 2) {
         uint32_t early = 0;
+        if (ParseU32(argv[1], early) && early == kProbeFds) {
+            // Which descriptors does a hostile worker hold, and what can it do to them? The
+            // supervisor's own descriptors (read end of the pipe, pidfd, image) must not be here.
+            char text[256];
+            std::size_t n = 0;
+            DIR* d = ::opendir("/proc/self/fd");
+            if (d == nullptr) ExitGroup(120);
+            const int self_dir = ::dirfd(d);
+            n += static_cast<std::size_t>(::snprintf(text + n, sizeof text - n, "fds="));
+            while (dirent* e = ::readdir(d)) {
+                if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+                const int fd = std::atoi(e->d_name);
+                if (fd == self_dir) continue;
+                n += static_cast<std::size_t>(::snprintf(text + n, sizeof text - n, "%d,", fd));
+            }
+            ::closedir(d);
+            unsigned open_above = 0, wrote_above = 0, closed_above = 0, dup_above = 0;
+            for (int fd = 4; fd < 1024; ++fd) {
+                if (::fcntl(fd, F_GETFD) != -1) ++open_above;
+                if (::write(fd, "x", 1) >= 0) ++wrote_above;
+                if (::fcntl(fd, F_DUPFD, 4) >= 0) ++dup_above;
+                if (::close(fd) == 0) ++closed_above;
+            }
+            char scratch;
+            const bool read_result_end = ::read(kWorkerResultFd, &scratch, 1) >= 0;  // it holds the WRITE end only
+            n += static_cast<std::size_t>(::snprintf(text + n, sizeof text - n, ";above3=%u,%u,%u,%u;read3=%d", open_above,
+                                                     wrote_above, dup_above, closed_above, read_result_end ? 1 : 0));
+            if (!SupervisedExecutor::InstallWorkerFilter(kWorkerResultFd)) ExitGroup(124);
+            SendFrame(text, n);
+            ExitGroup(0);
+        }
+        if (ParseU32(argv[1], early) && early == kClobberResultFd) {
+            // Replace the result descriptor with /dev/null, then behave as if all were well.
+            const int devnull = ::open("/dev/null", O_RDWR);
+            if (devnull < 0 || ::dup2(devnull, kWorkerResultFd) != kWorkerResultFd) ExitGroup(120);
+            SendFrame("I-REPORT-SUCCESS", 16);
+            ExitGroup(0);
+        }
+        if (ParseU32(argv[1], early) && early == kCloseUnfilteredThenSpin) {
+            (void)::close(kWorkerResultFd);
+            SpinForever();
+        }
         if (ParseU32(argv[1], early) && early == kListFds) {
             char text[512];
             std::size_t n = 0;
@@ -257,6 +308,22 @@ int main(int argc, char** argv, char** envp) {
         volatile uint64_t x = 1;
         for (;;) x = x * 6364136223846793005ULL + 1442695040888963407ULL;
     }
+    case kFrameThenExitNonZero:
+        SendFrame("FORGED-OK", 9);
+        ExitGroup(3);
+    case kCloseResultThenSpin:
+        (void)::close(kWorkerResultFd);
+        SpinForever();
+    case kPartialFrameThenBlock: {
+        // Header announcing 16 bytes, 4 of them, then no more: a hang during result delivery.
+        const uint8_t head[12] = {'S', 'T', 'K', 'R', 16, 0, 0, 0, 'a', 'b', 'c', 'd'};
+        RawWrite(head, sizeof head);
+        SpinForever();
+    }
+    case kForgeThenCrash:
+        SendFrame("FORGED-OK", 9);
+        *static_cast<volatile int*>(nullptr) = 1;
+        ExitGroup(0);
     case kEnvCount: {
         std::size_t n = 0;
         while (envp != nullptr && envp[n] != nullptr) ++n;

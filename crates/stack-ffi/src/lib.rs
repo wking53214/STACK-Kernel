@@ -2050,4 +2050,71 @@ mod tests {
             assert_eq!(SupervisedOutcome::from_code(code).campaign_name(), name, "code {code}");
         }
     }
+
+    /// D1-C adversarial matrix case 10 through the Rust FFI wrapper: a worker that never
+    /// finishes is killed at the deadline, and the supervisor, not the worker, says so.
+    /// (Cases 1 to 9 and 12 need worker kinds the governed entry does not carry; they run
+    /// through the real worker in cpp/tests/worker_exec_tests.cpp. Case 11 needs the
+    /// C++ kill seam, which exists only in C++ test binaries.)
+    #[test]
+    fn test_d1c_matrix_10_a_worker_that_never_finishes_is_killed_at_the_deadline() {
+        const CHILD_ENV: &str = "STACK_FFI_D1C_M10_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let mut out = [0u8; 64];
+            for (i, kind) in [PayloadKind::SpinForever, PayloadKind::BlockForever].into_iter().enumerate() {
+                let mut req = governed_request(&path, 9 + i as u64, 0x01, kind);
+                req.required_tokens = 1;
+                let r = supervised_run_governed(&req, &governed_limits(150_000_000), &mut out).expect("report");
+                assert_eq!(r.outcome, SupervisedOutcome::TimedOut, "{kind:?}");
+                assert_eq!(r.outcome.campaign_name(), "TIMED_OUT");
+                assert!(r.deadline_fired);
+                assert_eq!(r.exit_observed, ExitObserved::KilledBySupervisor(9), "{kind:?}");
+                assert_eq!(r.frame_status, FrameStatus::Missing, "{kind:?}");
+                assert!(!r.result_self_reported);
+                assert_eq!(r.result_length, 0);
+            }
+            return;
+        }
+        run_in_child("tests::test_d1c_matrix_10_a_worker_that_never_finishes_is_killed_at_the_deadline", CHILD_ENV);
+    }
+
+    /// Success is Completed with an observed exit 0 and one valid frame, and nothing else, for every
+    /// shipped kind the Rust wrapper can run.
+    #[test]
+    fn test_d1c_success_only_on_the_completed_conditions_for_every_shipped_kind() {
+        const CHILD_ENV: &str = "STACK_FFI_D1C_ALLKINDS_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let mut out = [0u8; 64];
+            let kinds = [
+                PayloadKind::ReturnBytes,
+                PayloadKind::SpinForever,
+                PayloadKind::BlockForever,
+                PayloadKind::Crash,
+                PayloadKind::Abort,
+                PayloadKind::ExitNonZero,
+                PayloadKind::ForbiddenSyscall,
+            ];
+            for (i, kind) in kinds.into_iter().enumerate() {
+                let mut req = governed_request(&path, 10 + (i as u64 % 4), 0x01, kind);
+                req.required_tokens = 1;
+                let r = supervised_run_governed(&req, &governed_limits(150_000_000), &mut out).expect("report");
+                let conditions = r.exit_observed == ExitObserved::Exited(0)
+                    && !r.deadline_fired
+                    && r.frame_status == FrameStatus::Valid;
+                assert_eq!(r.outcome == SupervisedOutcome::Completed, conditions, "{kind:?}: {r:?}");
+                assert_eq!(r.outcome.campaign_name() == "COMPLETED", conditions, "{kind:?}");
+                if !conditions {
+                    assert!(!r.result_self_reported, "{kind:?}");
+                }
+            }
+            return;
+        }
+        run_in_child("tests::test_d1c_success_only_on_the_completed_conditions_for_every_shipped_kind", CHILD_ENV);
+    }
 }
