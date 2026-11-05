@@ -141,8 +141,8 @@ numbers, not a guarantee.
   fixed set of built-in workers and carries no argument bytes. The
   pipeline validates `args`, canonicalizes them and records their SHA-256
   as the attempted argument digest, but the worker never sees them; the
-  receipt field says "bytes actually passed", which is untrue today
-  (R2-X-02). Neither the subject digest nor the capability covers `args`.
+  receipt field now documents itself as the digest the producer intended
+  to pass, not proof of delivery (R2-X-02, wording corrected). Neither the subject digest nor the capability covers `args`.
   Until a worker reads them and a binding exists, `args` must not carry
   meaning.
 * **A roster with the `CNS:same_subject` seat is refused.** A real

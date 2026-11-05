@@ -369,7 +369,11 @@ pub struct ActualAction {
     pub operation: String,
     /// The resource acted on.
     pub resource: String,
-    /// SHA-256 of the argument bytes actually passed.
+    /// SHA-256 of the argument bytes the producer says it intended to pass.
+    /// Whether the executor delivered them to the worker is NOT established
+    /// by this field: the supervised executor in this repository does not
+    /// deliver arguments today (defect R2-X-02), so a consumer must not read
+    /// this as proof of what the worker received.
     pub argument_digest: Digest32,
 }
 
