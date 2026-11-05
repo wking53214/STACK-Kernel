@@ -22,10 +22,14 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <thread>
+#include <vector>
 
+#include <dirent.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -389,4 +393,49 @@ TEST_CASE("Governed supervised: an ineffective kill is TerminationUnconfirmed an
     for (int i = 0; i < 400 && stack_supervised_reap_unconfirmed() != 0; ++i) ::usleep(10'000);
     REQUIRE(stack_supervised_unconfirmed_count() == 0);
     REQUIRE_FALSE(Alive(r.report.child_pid));
+}
+
+TEST_CASE("Governed supervised: 50 timeouts leave no zombie, no unconfirmed child and no leaked descriptor", "[governed][leak]") {
+    Setup();
+    auto open_fds = [] {
+        std::size_t n = 0;
+        if (DIR* d = ::opendir("/proc/self/fd")) {
+            while (::readdir(d) != nullptr) ++n;
+            ::closedir(d);
+        }
+        return n;
+    };
+    const std::size_t before = open_fds();
+    uint64_t worst = 0;
+    for (int i = 0; i < 50; ++i) {
+        // 1 token each, spread over two domains so the bucket is never the limit.
+        const Result r = Governed(i % 2, kCap, 1, i % 2 == 0 ? 1 : 2, 40 * kMs);
+        REQUIRE(r.rc == kRan);
+        REQUIRE(r.report.outcome == kTimedOut);
+        if (r.report.elapsed_ns > worst) worst = r.report.elapsed_ns;
+    }
+    std::fprintf(stderr, "[measured] 50 governed timeouts at 40 ms: worst elapsed %.1f ms\n", static_cast<double>(worst) / 1e6);
+    REQUIRE(worst <= (40 + 1'000) * kMs);
+    int status = 0;
+    REQUIRE(::waitpid(-1, &status, WNOHANG) == -1);
+    REQUIRE(errno == ECHILD);  // no zombie and no child left
+    REQUIRE(stack_supervised_unconfirmed_count() == 0);
+    REQUIRE(open_fds() == before);
+}
+
+TEST_CASE("Governed supervised: concurrent runs from several threads are accounted exactly", "[governed][concurrent]") {
+    Setup();
+    const uint64_t d = 15;
+    std::atomic<int> served{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t) {
+        threads.emplace_back([&] {
+            const Result r = Governed(d, kCap, kRequest, 0);
+            if (r.rc == kRan && r.report.outcome == kCompleted) served.fetch_add(1);
+        });
+    }
+    for (auto& t : threads) t.join();
+    REQUIRE(served.load() == 8);  // 8 x 100 fits in the 900 above the floor
+    REQUIRE(Audit(d, kAuditSupervisedCompleted).count == 8);
+    ServedRequests(d, /*already_spent*/ 8);
 }

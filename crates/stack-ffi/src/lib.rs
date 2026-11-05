@@ -1638,4 +1638,46 @@ mod tests {
         }
         run_in_child("tests::test_governed_supervised_timeouts_are_killed_audited_and_leave_nothing_behind", CHILD_ENV);
     }
+
+    #[test]
+    fn test_governed_supervised_repeated_timeouts_leave_no_zombie_and_no_descriptor() {
+        const CHILD_ENV: &str = "STACK_FFI_GOVERNED_LEAK_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let fd_count = || std::fs::read_dir("/proc/self/fd").expect("fd dir").count();
+            // Children of every thread of this process; a zombie still counts.
+            let children = || {
+                let mut n = 0;
+                for task in std::fs::read_dir("/proc/self/task").expect("task dir").flatten() {
+                    let text = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+                    n += text.split_whitespace().count();
+                }
+                n
+            };
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let mut out = [0u8; 64];
+            // Warm up so lazily opened descriptors are not counted as leaks.
+            let mut warm = governed_request(&path, 0, 0x01, PayloadKind::ReturnBytes);
+            warm.required_tokens = 1;
+            supervised_run_governed(&warm, &governed_limits(2_000_000_000), &mut out).expect("warm-up");
+            let before = fd_count();
+            let mut worst = 0u64;
+            for i in 0..50u64 {
+                let kind = if i % 2 == 0 { PayloadKind::SpinForever } else { PayloadKind::BlockForever };
+                let mut req = governed_request(&path, i % 2, 0x01, kind);
+                req.required_tokens = 1;
+                let r = supervised_run_governed(&req, &governed_limits(40_000_000), &mut out).expect("report");
+                assert_eq!(r.outcome, SupervisedOutcome::TimedOut);
+                worst = worst.max(r.elapsed_ns);
+            }
+            std::eprintln!("[measured] rust 50 governed timeouts at 40 ms: worst {} ms", worst / 1_000_000);
+            assert!(worst <= 40_000_000 + 1_000_000_000);
+            assert_eq!(children(), 0, "no zombie and no child left");
+            assert_eq!(supervised_unconfirmed_count(), 0);
+            assert_eq!(fd_count(), before, "no descriptor leaked");
+            return;
+        }
+        run_in_child("tests::test_governed_supervised_repeated_timeouts_leave_no_zombie_and_no_descriptor", CHILD_ENV);
+    }
 }
