@@ -16,7 +16,7 @@ use stack_receipt::{
     Digest32, Expectations, FindingCode, Outcome, OutcomeKind, SignedRecord, Stage as ReceiptStage, State,
 };
 
-const RESULT: &[u8] = stack_ffi::SUPERVISED_PAYLOAD_BYTES;
+const RESULT: &[u8] = stack_admission::RETURN_BYTES_RESULT;
 
 fn success(r: AdmissionResult) -> stack_admission::Success {
     match r {

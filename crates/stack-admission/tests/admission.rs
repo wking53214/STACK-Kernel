@@ -65,7 +65,8 @@ fn the_kernel_recomputes_what_cns_bound_exactly() {
         let recomputed = stack_admission::binding::subject_digest(&case["subject"], &limits).unwrap();
         assert_eq!(recomputed, case_subject_digest(&case), "{name}: subject digest");
         for v in case["verdicts"].as_array().unwrap() {
-            if !v["digest"].as_str().unwrap().is_empty() {
+            // CNS:same_subject binds its own object, not the content (R2-X-05).
+            if !v["digest"].as_str().unwrap().is_empty() && v["gate"] != "same_subject" {
                 assert_eq!(v["digest"].as_str().unwrap(), recomputed.to_hex(), "{name}: verdict binds the subject");
             }
         }
@@ -73,7 +74,7 @@ fn the_kernel_recomputes_what_cns_bound_exactly() {
         reroot(&mut rerooted);
         assert_eq!(rerooted["root"], case["root"], "{name}: the root recomputes");
     }
-    assert_eq!(load_cases().len(), 7);
+    assert_eq!(load_cases().len(), 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -602,4 +603,38 @@ fn every_rejection_is_in_the_receipt_log_with_its_stage() {
     assert!(reasons[0].starts_with("binding: cns binding:"), "{}", reasons[0]);
     assert!(reasons[1].starts_with("authorization: authorization:"), "{}", reasons[1]);
     assert_eq!(h.runs(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// A recorded gap, as an assertion
+// ---------------------------------------------------------------------------
+
+/// R2-X-05. A real SuperGate roster that asks CNS to check "every seat
+/// judged one document" carries a pseudo seat, `CNS:same_subject`, whose
+/// verdict binds to its own object (`{"identity", "digest", "seats"}`) and
+/// names itself as its subject. The kernel requires every verdict to bind
+/// to the recomputed subject digest and to name one identity, so it refuses
+/// such a decision, with or without the pseudo seat in its required seats.
+/// Refusal is the safe direction; this test pins it so that a change which
+/// starts admitting these decisions has to change this test on purpose.
+#[test]
+fn a_real_decision_that_carries_the_same_subject_seat_is_refused_today() {
+    let case = common::case("same_subject_all_pass");
+    assert_eq!(case["allowed"], json!(true), "CNS passed it");
+    for required in [
+        vec!["Governance_Gateway:door", "DIT:judge"],
+        vec!["CNS:same_subject", "Governance_Gateway:door", "DIT:judge"],
+    ] {
+        let mut p = policy();
+        p.required_seats = required.iter().map(|s| (*s).to_owned()).collect();
+        let dir = TempDir::new("same-subject");
+        let h = Builder::new(dir.path()).policy(p).start();
+        let r = h.refusal(honest_payload(&case, "echo"));
+        let f = binding(&r);
+        assert!(f.contains(&BindingFinding::VerdictNotBoundToSubject { gate: "same_subject".into() }), "{f:?}");
+        assert!(f.contains(&BindingFinding::IdentityDisagreement), "{f:?}");
+        h.assert_rejected_recorded(&r);
+        assert_eq!(h.runs(), 0);
+        drop(h);
+    }
 }

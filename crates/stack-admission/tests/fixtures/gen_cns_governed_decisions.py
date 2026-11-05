@@ -3,7 +3,7 @@
 Run read-only against a CNS checkout, in isolated mode so no site or
 PYTHONPATH module can be planted:
 
-    python3 -I gen_cns_governed_decisions.py /home/user/CNS <cns commit> > cns-governed-decisions.json
+    python3 -I -B gen_cns_governed_decisions.py /home/user/CNS <cns commit> > cns-governed-decisions.json
 
 The committed file was produced at CNS commit 4acd8f958a091900d43f553eba7fe83f7d33c4d6.
 Every root below is what cns_composition.super_gate.SuperGate.decide
@@ -21,7 +21,7 @@ import sys
 sys.path.insert(0, sys.argv[1])
 
 from cns.gate import GateOutcome, GatePosition, GateResult, subject_digest  # noqa: E402
-from cns_composition.super_gate import SuperGate  # noqa: E402
+from cns_composition.super_gate import Judged, SuperGate  # noqa: E402
 
 A, OM = GatePosition.ALPHA, GatePosition.OMEGA
 PASS, RETRY, BREACH = GateOutcome.PASS, GateOutcome.RETRY, GateOutcome.TERMINAL_BREACH
@@ -57,8 +57,9 @@ class GovernedGate:
                           subject_digest=digest)
 
 
-def case(name, seats, subject, required=None):
-    gate = SuperGate(seats, required=required or tuple(f"{r}:{g.name}" for r, g in seats))
+def case(name, seats, subject, required=None, same_subject=None):
+    gate = SuperGate(seats, required=required or tuple(f"{r}:{g.name}" for r, g in seats),
+                     same_subject=same_subject)
     decision = gate.decide({f"{r}:{g.name}": subject for r, g in seats})
     return {
         "name": name,
@@ -90,6 +91,13 @@ cases = [
     case("missing_required_seat",
          [("Governance_Gateway", GovernedGate("door", A)), ("HERALD", GovernedGate("confidence", OM))],
          SUBJECT),
+    # A roster that asks CNS to check that every seat judged one document. SuperGate adds the pseudo seat
+    # CNS:same_subject, whose verdict binds to its own object ({"identity", "digest", "seats"}), not to the
+    # subject content: the kernel refuses such a decision today (tests/admission.rs, R2-X-05).
+    case("same_subject_all_pass", door_judge(), SUBJECT,
+         required=("CNS:same_subject", "Governance_Gateway:door", "DIT:judge"),
+         same_subject={f"{r}:{g.name}": (lambda c: Judged(c["identity"], subject_digest(c["content"])))
+                       for r, g in door_judge()}),
 ]
 
 json.dump({

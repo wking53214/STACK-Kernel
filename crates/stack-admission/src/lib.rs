@@ -60,5 +60,5 @@ pub use config::{ConfigError, KernelPolicy};
 pub use payload::{DecisionClaim, PayloadError, Request};
 pub use executor::{
     ExecutionLimits, Executor, ExecutorError, LimitsError, RunOutcome, RunReport, SupervisedExecutor, WorkerKind,
-    MAX_DEADLINE_NS, MAX_OUTPUT_BYTES,
+    MAX_DEADLINE_NS, MAX_OUTPUT_BYTES, RETURN_BYTES_RESULT,
 };

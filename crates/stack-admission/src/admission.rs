@@ -584,6 +584,10 @@ impl Admission {
         } = admitted;
 
         // ---- 5. Write-ahead: the attempt is durable before anything runs.
+        // `argument_digest` is the digest of the canonical argument bytes
+        // the kernel hands the executor. Today's executor cannot deliver
+        // them to its built-in workers, so the field records what was
+        // offered, not what a worker read (R2-X-02).
         // If it is not, nothing runs. The one-time capability was consumed
         // by stage 4 and stays consumed; the log holds `authorized` with no
         // attempt, which an auditor reads as INCOMPLETE and not attempted.

@@ -18,7 +18,7 @@ fn a_legitimate_worker_runs_to_completion_with_its_bytes() {
     match &report.outcome {
         RunOutcome::Completed { exit_code, result } => {
             assert_eq!(*exit_code, 0);
-            assert_eq!(result.as_slice(), stack_ffi::SUPERVISED_PAYLOAD_BYTES);
+            assert_eq!(result.as_slice(), stack_admission::RETURN_BYTES_RESULT);
         }
         other => panic!("expected Completed, got {other:?}"),
     }

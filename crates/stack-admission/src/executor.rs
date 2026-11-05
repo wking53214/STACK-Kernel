@@ -21,6 +21,10 @@ pub const MAX_DEADLINE_NS: u64 = 3_600_000_000_000;
 /// Largest result the supervisor accepts: 1 MiB.
 pub const MAX_OUTPUT_BYTES: u64 = 1 << 20;
 
+/// What [`WorkerKind::ReturnBytes`] sends back, so no caller names the FFI
+/// crate to know it.
+pub const RETURN_BYTES_RESULT: &[u8] = stack_ffi::SUPERVISED_PAYLOAD_BYTES;
+
 /// The workers a kernel can run. The supervised executor's payloads are a
 /// fixed, built-in set chosen by number (the C ABI carries no closure),
 /// so the kernel's operation map points at one of these. `ReturnBytes`
