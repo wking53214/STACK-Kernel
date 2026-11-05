@@ -171,7 +171,10 @@ impl Trident {
     /// Every acceptance is committed to `store` before it is committed in
     /// memory and before the verdict is returned; a commit the store
     /// refuses makes the envelope `StateUnavailable` (RETRY, reject) and
-    /// changes nothing.
+    /// changes nothing. A commit the store refuses as a check-and-commit
+    /// conflict ([`StoreError::Conflict`]) refuses the envelope with the
+    /// matching freshness reason (`IssuedBeforeEpoch`, `Replay`,
+    /// `SequenceNotIncreasing`) and also changes nothing in memory.
     pub fn new_with_store(
         config: TridentConfig,
         keyring: KeyRing,
@@ -214,7 +217,9 @@ impl Trident {
             }
         }
         let high_water_ms = restored.high_water_ms.max(config.restored_high_water_ms);
-        let epoch_floor_ms = Self::epoch_floor(&config, clock.as_ref(), 0, high_water_ms);
+        // A floor an operator reset stored (possibly on another verifier
+        // sharing the store) is honoured from the start.
+        let epoch_floor_ms = Self::epoch_floor(&config, clock.as_ref(), restored.epoch_floor_ms, high_water_ms);
         let mut replay = ReplayCache::new(config.replay_cache_capacity);
         // Restored in expiry order so that in-order expiry keeps working.
         // Every nonce still inside its window is kept, even beyond the
@@ -257,6 +262,7 @@ impl Trident {
             epoch_floor_ms,
             high_water_ms,
             store,
+            unpersisted_quarantines: Vec::new(),
         };
         Ok(Self {
             limits: config.limits(),
@@ -657,6 +663,41 @@ impl Trident {
                     nonce_expires_at_unix_ms: expires_at,
                 };
                 match st.store.commit(&record) {
+                    Err(StoreError::Conflict {
+                        nonce_consumed,
+                        stored_sequence,
+                        epoch_floor_ms,
+                    }) => {
+                        // The store's view (another writer, or state this
+                        // process no longer holds in memory) already
+                        // consumed this envelope. Refuse with the reason
+                        // the in-memory check would have given; memory is
+                        // left as it was, so the refusal changes nothing.
+                        counter!(t::STORE_CONFLICTS_TOTAL).increment(1);
+                        tracing::warn!(
+                            sender = %f,
+                            nonce_consumed,
+                            ?stored_sequence,
+                            ?epoch_floor_ms,
+                            "stack.trident replay store refused the commit: already consumed"
+                        );
+                        if fresh_entry {
+                            st.senders.remove(&f);
+                        }
+                        if epoch_floor_ms.is_some() {
+                            reasons.push(ReasonCode::IssuedBeforeEpoch);
+                        }
+                        if nonce_consumed {
+                            reasons.push(ReasonCode::Replay);
+                        }
+                        if stored_sequence.is_some() {
+                            reasons.push(ReasonCode::SequenceNotIncreasing);
+                        }
+                        if reasons.is_empty() {
+                            // A conflict that names no cause: fail closed.
+                            reasons.push(ReasonCode::StateUnavailable);
+                        }
+                    }
                     Err(e) => {
                         Self::store_failed("accept", &e);
                         if fresh_entry {
@@ -702,6 +743,7 @@ impl Trident {
             }
             BreakerAttribution::ClaimedSender => still_trusted && outcome == GateOutcome::TerminalBreach,
         };
+        let mut halt_for_store = false;
         if let (true, Some(f)) = (counts, fp) {
             let window = self.config.breaker_window_ms;
             let threshold = self.config.breaker_threshold;
@@ -721,10 +763,17 @@ impl Trident {
                             window_ms = window,
                             "stack.trident sender quarantined by breaker"
                         );
-                        // Best effort: the quarantine stands in memory
-                        // either way; only its survival of a restart is lost.
+                        // The quarantine stands in memory either way. Under
+                        // Development a lost mark only loses its survival
+                        // of a restart. Under Production that is not
+                        // acceptable: the verifier halts (fail closed)
+                        // until an operator reset persists the mark.
                         if let Err(e) = st.store.record_quarantine(&f, now) {
                             Self::store_failed("quarantine", &e);
+                            if self.config.profile == DeploymentProfile::Production {
+                                st.unpersisted_quarantines.push((f, now));
+                                halt_for_store = true;
+                            }
                         }
                     }
                 }
@@ -732,6 +781,11 @@ impl Trident {
             }
         }
         gauge!(t::REPLAY_CACHE_ENTRIES).set(gauge_value(st.replay.len()));
+        if halt_for_store {
+            // Still under the state lock, so no later verification can
+            // commit before the halt is visible.
+            self.enter_halt(HaltCause::StoreFailure);
+        }
         drop(st);
         Verdict::refuse(reasons, resolution)
     }
@@ -770,6 +824,9 @@ impl Trident {
         let _span = tracing::info_span!(t::SPAN_RELEASE, sender = %fp).entered();
         let mut st = self.lock_state().ok_or(HaltedError)?;
         let released = st.senders.release(fp);
+        // A released sender's unpersisted quarantine no longer needs
+        // persisting.
+        st.unpersisted_quarantines.retain(|(q, _)| q != fp);
         if released {
             counter!(t::QUARANTINE_RELEASES_TOTAL).increment(1);
             gauge!(t::QUARANTINED_SENDERS).set(gauge_value(st.senders.quarantined_count()));
@@ -823,7 +880,12 @@ impl Trident {
     /// of its old value, `now + max_future_skew_ms` and one past the
     /// highest `issued_at_unix_ms` ever accepted. So nothing accepted
     /// before the reset can be replayed after it, even if the clock has
-    /// gone backwards in between. The floor never goes down.
+    /// gone backwards in between. The floor never goes down. The floor is
+    /// also offered to the store ([`ReplayStore::raise_epoch_floor`]).
+    ///
+    /// Under the Production profile, a quarantine mark the store failed to
+    /// persist is retried first; if any still fails, the Trident stays
+    /// halted (see [`Trident::is_halted`]).
     pub fn operator_reset(&self) {
         let _span = tracing::info_span!(t::SPAN_RESET).entered();
         self.state.clear_poison();
@@ -836,11 +898,41 @@ impl Trident {
         st.replay.clear();
         st.senders.reset_keep_quarantine();
         st.epoch_floor_ms = floor;
+        // Publish the floor so that every writer on a shared store refuses
+        // what this reset declared dead. If it is not stored, this
+        // verifier's own floor still stands.
+        if floor > 0 {
+            if let Err(e) = st.store.raise_epoch_floor(floor) {
+                Self::store_failed("epoch floor", &e);
+            }
+        }
         gauge!(t::REPLAY_CACHE_ENTRIES).set(0.0);
         gauge!(t::QUARANTINED_SENDERS).set(gauge_value(st.senders.quarantined_count()));
+        // Production: retry every quarantine mark the store failed to
+        // persist. Any that still fails keeps the Trident halted.
+        let pending = std::mem::take(&mut st.unpersisted_quarantines);
+        let mut still_pending = Vec::new();
+        for (fp, since) in pending {
+            if !st.senders.is_quarantined(&fp) {
+                continue;
+            }
+            if let Err(e) = st.store.record_quarantine(&fp, since) {
+                Self::store_failed("quarantine", &e);
+                still_pending.push((fp, since));
+            }
+        }
+        let stuck = still_pending.len();
+        st.unpersisted_quarantines = still_pending;
         drop(st);
-        self.halted.store(false, Ordering::SeqCst);
         counter!(t::OPERATOR_RESETS_TOTAL).increment(1);
+        if stuck > 0 {
+            tracing::error!(
+                unpersisted_quarantines = stuck,
+                "stack.trident stays halted: quarantine marks still cannot be persisted"
+            );
+            return;
+        }
+        self.halted.store(false, Ordering::SeqCst);
         tracing::warn!(epoch_floor_ms = floor, "stack.trident reset by operator");
     }
 

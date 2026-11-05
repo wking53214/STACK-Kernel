@@ -16,6 +16,8 @@ members = [
     "crates/_warm",
     "crates/stack-ffi",
     "crates/stack-authority",
+    "crates/stack-receipt",
+    "crates/stack-admission",
 ]
 
 [workspace.package]

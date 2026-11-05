@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "note": "SHA-256 manifest of held-out files. A file with status sealed has not been run against changed rules; one with status retired has, and now lives in corpus/ as a development set. No sealed file remains. See PROCESS.md.",
+  "files": [
+    {
+      "file": "heldout_2026-11-05.jsonl",
+      "path": "corpus/heldout_2026-11-05.jsonl",
+      "sha256": "b2869df2e62456d23fd4e597e6762abaf03531f6fb9393f5375abfd4baa7b321",
+      "authored": "2026-11-05",
+      "authored_before_rule_change": true,
+      "hostile_rows": 76,
+      "benign_rows": 69,
+      "status": "retired",
+      "runs": [
+        {"when": "before", "rules_commit": "67bdf31", "result": "results/before_67bdf31.json"},
+        {"when": "after", "rules": "Step 2 commit", "result": "results/after_step2.json"}
+      ],
+      "retired_at": "Step 2"
+    }
+  ]
+}

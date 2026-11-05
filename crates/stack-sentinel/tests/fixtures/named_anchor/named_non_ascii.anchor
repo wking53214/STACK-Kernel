@@ -1,0 +1,9 @@
+{
+  "entries": 16,
+  "head": "b0aff3a212e7bea39682f75fabf25e8cc29a9be0f605519721154765c8b88692",
+  "hmac": "7cb3e5aad728ca99903332bd1abcf6c39118dec87672cfa16875cb741ebb65cf",
+  "key_fingerprint": "acdf8e81f938b3ca",
+  "name": "Kontrollpunkt \u00fcber Nacht \u2713",
+  "sealed_at": "2026-11-04T00:00:00+00:00",
+  "v": 1
+}

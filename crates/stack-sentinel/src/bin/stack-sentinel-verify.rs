@@ -12,6 +12,10 @@
 //! Unlike the Python tool it does not read `ICEBERG_LEDGER_ATTESTATION_KEY*`
 //! from the environment: keys come only from `--key-file`.
 //!
+//! `--json` prints the one-line scope record (schema `sentinel-scope/1`,
+//! see `SCOPE.md`) instead of the verdict lines. The exit codes are the
+//! same; without the flag the output is exactly what it always was.
+//!
 //! Arguments are read as OS strings, so an argument that is not valid
 //! Unicode never panics. File paths may be any bytes the OS allows; a flag
 //! name or a `--trusted-fingerprints` value that is not UTF-8 is bad
@@ -26,13 +30,14 @@ use std::process::ExitCode;
 use stack_sentinel::{parse_key_file, KeySet, Verifier, VerifierConfig, VerifyError};
 
 const USAGE: &str = "usage: stack-sentinel-verify --export EXPORT --anchor ANCHOR \
---trusted-fingerprints TRUSTED_FINGERPRINTS [--key-file KEY_FILE]";
+--trusted-fingerprints TRUSTED_FINGERPRINTS [--key-file KEY_FILE] [--json]";
 
 struct Args {
     export: PathBuf,
     anchor: PathBuf,
     fingerprints: String,
     key_file: Option<PathBuf>,
+    json: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -40,6 +45,7 @@ fn parse_args() -> Result<Args, String> {
     let mut anchor: Option<OsString> = None;
     let mut fingerprints: Option<OsString> = None;
     let mut key_file: Option<OsString> = None;
+    let mut json = false;
     let mut it = std::env::args_os().skip(1);
     while let Some(flag) = it.next() {
         let slot = match flag.to_str() {
@@ -47,6 +53,10 @@ fn parse_args() -> Result<Args, String> {
             Some("--anchor") => &mut anchor,
             Some("--trusted-fingerprints") => &mut fingerprints,
             Some("--key-file") => &mut key_file,
+            Some("--json") => {
+                json = true;
+                continue;
+            }
             Some("-h" | "--help") => return Err(String::new()),
             _ => return Err(format!("unrecognized argument: {} bytes", flag.len())),
         };
@@ -62,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
                 anchor: PathBuf::from(anchor),
                 fingerprints,
                 key_file: key_file.map(PathBuf::from),
+                json,
             })
         }
         _ => Err("--export, --anchor and --trusted-fingerprints are required".to_owned()),
@@ -129,9 +140,14 @@ fn main() -> ExitCode {
     // An anchor that cannot be read is a finding (TRUNCATED), never a pass.
     let anchor = read_capped(&args.anchor, config.max_anchor_bytes).ok();
 
-    match verifier.verify_export(&export, anchor.as_deref()) {
-        Ok(report) => {
-            println!("{}", report.render());
+    match verifier.verify_export_scoped(&export, anchor.as_deref()) {
+        Ok(scoped) => {
+            let report = &scoped.report;
+            if args.json {
+                println!("{}", scoped.to_json());
+            } else {
+                println!("{}", report.render());
+            }
             if report.finding.is_none() {
                 ExitCode::SUCCESS
             } else {

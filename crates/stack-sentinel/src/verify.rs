@@ -5,16 +5,17 @@
 
 use std::time::Instant;
 
-use crate::anchor::{anchor_summary, check_head_anchor_with, parse_head_anchor, HeadAnchor};
+use crate::anchor::{anchor_summary, check_anchor_file_with, read_anchor_file, AnchorFile};
 use crate::attest::{keyed_work_bytes, verify_seed, verify_signature, AttestationStatus, KeySet};
 use crate::canonical::{
-    canonical_form_ref, content_prehash_ref, hashed_columns, ledger_hash_ref, sha256_hex, Sha256Sink,
-    ATTESTATION_POLICY_RECORD_KIND, OPTIONAL_HASHED_FIELDS, SHIPPED_COLUMNS, SIGNATURE_FIELD,
+    canonical_form_ref, content_prehash_ref, ledger_hash_ref, sha256_hex, Sha256Sink, ATTESTATION_POLICY_RECORD_KIND,
+    SIGNATURE_FIELD,
 };
 use crate::cns::subject_digest;
 use crate::config::VerifierConfig;
 use crate::error::VerifyError;
 use crate::pyjson::{parse_object_keeping, write_value, Object, Separators, Value};
+use crate::scope::{column_scope, limitations, ScopedReport};
 use crate::telemetry;
 use crate::verdict::{Finding, GateOutcome, Reason, Report};
 
@@ -248,6 +249,24 @@ enum Checks {
     ExportOnly,
 }
 
+/// Position of the first row that shows the receipts layer had begun: an
+/// `attestation_policy` marker, or a `governance_decision` carrying a
+/// `subject_digest` (see `VerifierConfig::require_subject_digest`).
+pub(crate) fn receipts_boundary(rows: &[LedgerRow]) -> Option<usize> {
+    rows.iter().position(|r| {
+        let kind = r.columns.get("record_kind").and_then(Value::as_str);
+        kind == Some(ATTESTATION_POLICY_RECORD_KIND)
+            || (kind == Some("governance_decision") && get(&r.columns, "subject_digest").is_truthy())
+    })
+}
+
+/// Whether the row is a `governance_decision` with no `subject_digest`.
+pub(crate) fn decision_without_digest(row: &LedgerRow) -> bool {
+    row.columns.get("record_kind").and_then(Value::as_str) == Some("governance_decision")
+        && !get(&row.columns, "subject_digest").is_truthy()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_row(
     row: &LedgerRow,
     prev: &Value,
@@ -255,6 +274,7 @@ fn check_row(
     keys: &KeySet,
     config: &VerifierConfig,
     checks: Checks,
+    digest_required: bool,
 ) -> Option<(Reason, String)> {
     let cols = &row.columns;
     let link = get(cols, "previous_hash");
@@ -268,9 +288,19 @@ fn check_row(
             ),
         ));
     }
-    let verified = verify_row_content(row).and_then(|canonical| match checks {
-        Checks::All => verify_row_keyed(row, &canonical, keys, config),
-        Checks::ExportOnly => Ok(()),
+    let verified = verify_row_content(row).and_then(|canonical| {
+        if digest_required && decision_without_digest(row) {
+            return Err((
+                Reason::SubjectDigestMissing,
+                "governance_decision row carries no subject_digest, although the receipts layer had begun \
+                 earlier in the chain"
+                    .to_owned(),
+            ));
+        }
+        match checks {
+            Checks::All => verify_row_keyed(row, &canonical, keys, config),
+            Checks::ExportOnly => Ok(()),
+        }
     });
     if let Err((reason, detail)) = verified {
         // A fingerprint is text the row's writer chose. When the auditor
@@ -335,14 +365,20 @@ pub fn verify_rows_with(rows: &[LedgerRow], keys: &KeySet, config: &VerifierConf
     let mut first: Option<Finding> = None;
     let mut escalation: Option<Finding> = None;
     let mut rows_checked = 0;
+    let boundary = if config.require_subject_digest {
+        receipts_boundary(rows)
+    } else {
+        None
+    };
     for (pos, row) in rows.iter().enumerate() {
+        let digest_required = boundary.is_some_and(|b| pos > b);
         rows_checked = pos + 1;
         let checks = match (&first, &policy) {
             (None, _) => Checks::All,
             (Some(_), Some(p)) if p.enforced_key_held(keys) => Checks::All,
             (Some(_), _) => Checks::ExportOnly,
         };
-        if let Some((reason, detail)) = check_row(row, prev, policy.as_ref(), keys, config, checks) {
+        if let Some((reason, detail)) = check_row(row, prev, policy.as_ref(), keys, config, checks, digest_required) {
             let terminal = reason.gate_outcome() == GateOutcome::TerminalBreach;
             let finding = Finding {
                 reason,
@@ -378,37 +414,6 @@ pub fn verify_rows_with(rows: &[LedgerRow], keys: &KeySet, config: &VerifierConf
         escalation,
         rows_checked,
     }
-}
-
-/// Which [`SHIPPED_COLUMNS`] some row carried outside its hashed form, and
-/// whether some row carried a column outside that list altogether.
-fn unhashed_columns(rows: &[LedgerRow]) -> (Vec<&'static str>, bool) {
-    let mut seen = [false; SHIPPED_COLUMNS.len()];
-    let mut other = false;
-    for row in rows {
-        let (read, optional) = hashed_columns(&row.columns);
-        for (col, v) in &row.columns {
-            let col = col.as_str();
-            if col == "current_hash" || read.contains(&col) {
-                continue;
-            }
-            // A falsy optional field is hashed exactly like an absent one.
-            if OPTIONAL_HASHED_FIELDS.contains(&col) && (optional || !v.is_truthy()) {
-                continue;
-            }
-            match SHIPPED_COLUMNS.iter().position(|c| *c == col) {
-                Some(i) => seen[i] = true,
-                None => other = true,
-            }
-        }
-    }
-    let names = SHIPPED_COLUMNS
-        .iter()
-        .zip(seen)
-        .filter(|(_, s)| *s)
-        .map(|(c, _)| *c)
-        .collect();
-    (names, other)
 }
 
 /// `verify_receipts.load_export`: parse, check the format, and return the
@@ -495,6 +500,14 @@ impl Verifier {
     /// by its length alone: it is not hashed, and its span and log record
     /// only its length.
     pub fn verify_export(&self, export: &[u8], anchor: Option<&[u8]>) -> Result<Report, VerifyError> {
+        self.verify_export_scoped(export, anchor).map(|s| s.report)
+    }
+
+    /// [`Verifier::verify_export`], with the [`Scope`](crate::scope::Scope) of its verdict: which
+    /// columns the hash covered, which it did not, and the limitation codes
+    /// (see [`crate::scope`]). The report is the one `verify_export` returns;
+    /// the telemetry is the same.
+    pub fn verify_export_scoped(&self, export: &[u8], anchor: Option<&[u8]>) -> Result<ScopedReport, VerifyError> {
         let started = Instant::now();
         let span = tracing::info_span!(
             "stack.sentinel.verify_export",
@@ -519,7 +532,7 @@ impl Verifier {
             self.verify_inner(export, anchor, export_sha256)
         };
         match &result {
-            Ok(report) => {
+            Ok(ScopedReport { report, .. }) => {
                 span.record("verdict", report.verdict().as_str());
                 span.record("outcome", report.gate_outcome().as_str());
                 if let Some(a) = &report.anchor {
@@ -557,20 +570,38 @@ impl Verifier {
         result
     }
 
-    fn verify_inner(&self, export: &[u8], anchor: Option<&[u8]>, export_sha256: String) -> Result<Report, VerifyError> {
+    fn verify_inner(
+        &self,
+        export: &[u8],
+        anchor: Option<&[u8]>,
+        export_sha256: String,
+    ) -> Result<ScopedReport, VerifyError> {
         let rows = parse_export(export, &self.config)?;
         let rows_total = rows.len();
-        let (unhashed, other_unhashed) = unhashed_columns(&rows);
-        let report = |finding, also, escalation, rows_checked, anchor| Report {
-            finding,
-            also,
-            escalation,
-            rows_checked,
-            rows_total,
-            export_sha256: export_sha256.clone(),
-            anchor,
-            unhashed_columns: unhashed.clone(),
-            other_unhashed_columns: other_unhashed,
+        let columns = column_scope(&rows);
+        let unhashed = columns.unhashed_columns.clone();
+        let other_unhashed = columns.other_unhashed_columns;
+        // A decision row with no subject_digest that the walk does not judge.
+        let boundary = receipts_boundary(&rows);
+        let unjudged_digest = rows.iter().enumerate().any(|(pos, r)| {
+            decision_without_digest(r) && !(self.config.require_subject_digest && boundary.is_some_and(|b| pos > b))
+        });
+        let report = |finding, also, escalation, rows_checked, anchor| {
+            let report = Report {
+                finding,
+                also,
+                escalation,
+                rows_checked,
+                rows_total,
+                export_sha256: export_sha256.clone(),
+                anchor,
+                unhashed_columns: unhashed.clone(),
+                other_unhashed_columns: other_unhashed,
+            };
+            let mut scope = columns.clone();
+            scope.subject_digest_required = self.config.require_subject_digest;
+            scope.limitations = limitations(&report, !unhashed.is_empty() || other_unhashed, unjudged_digest);
+            ScopedReport { report, scope }
         };
         let early = |reason, detail: String| {
             let f = Finding {
@@ -581,7 +612,7 @@ impl Verifier {
             };
             report(Some(f), None, None, 0, None)
         };
-        let parsed: HeadAnchor = match anchor {
+        let parsed: AnchorFile = match anchor {
             None => return Ok(early(Reason::AnchorMissing, "no head anchor was supplied".to_owned())),
             Some(bytes) => {
                 let s = tracing::info_span!(
@@ -595,7 +626,7 @@ impl Verifier {
                 if bytes.len() <= self.config.max_anchor_bytes {
                     s.record("anchor_sha256", sha256_hex(bytes).as_str());
                 }
-                match parse_head_anchor(bytes, self.config.max_anchor_bytes, self.config.json) {
+                match read_anchor_file(bytes, self.config.max_anchor_bytes, self.config.json) {
                     Ok(a) => a,
                     Err(e) => return Ok(early(Reason::AnchorUnreadable, format!("anchor cannot be read: {e}"))),
                 }
@@ -613,7 +644,7 @@ impl Verifier {
         let walk = verify_rows_with(&rows, &self.keys, &self.config);
         let anchored = {
             let _s = tracing::info_span!("stack.sentinel.check_anchor").entered();
-            check_head_anchor_with(&rows, &parsed, &self.keys, &self.config)
+            check_anchor_file_with(&rows, &parsed, &self.keys, &self.config)
         };
         let vouched = !anchored.as_ref().is_some_and(|f| {
             matches!(
@@ -621,7 +652,7 @@ impl Verifier {
                 Reason::AnchorInvalid | Reason::AnchorUnknownKey | Reason::AnchorUnverifiable | Reason::AnchorRetiredKey
             )
         });
-        let summary = Some(anchor_summary(&parsed, vouched));
+        let summary = Some(anchor_summary(&parsed.anchor, vouched));
         let (finding, also) = match (walk.finding, anchored) {
             (Some(row), anchor_finding) => (Some(row), anchor_finding),
             (None, anchor_finding) => (anchor_finding, None),

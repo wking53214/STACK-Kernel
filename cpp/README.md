@@ -13,7 +13,7 @@ what is and is not guaranteed; this file lists what exists.
 | `stack_kinetic_governor.hpp` | `GovernorError`, `BackpressureController`, `ExecutionDeadlineScope` (cooperative software deadline), `ComputeDebtTracker`, `PackedBucket64`, `VolumeCounter`, `KineticGovernor` (per-domain token buckets), `TransactionRollbackGuard` |
 | `posix_deadline_timer_hardened.hpp` | `HardenedPosixPreemptionGuard`: a per-thread `CLOCK_THREAD_CPUTIME_ID` timer whose signal handler sets a flag read after the payload returns. It does not stop a payload. |
 | `stack_host_binding.hpp` | `CapabilityMask256`, `SIMDCapabilityToken` (a caller-supplied request descriptor, not a credential; nothing authenticates `context_id`), `SeccompFilterEngine` (per-thread allowlist), `GovernedMinotaurHost` (`ExecuteGovernedTransaction`: capability check, tokens, cooperative deadline, debt, rollback). Cooperative deadline only; not isolation. |
-| `stack_supervised_exec.hpp` | `stack::supervised::SupervisedExecutor`: runs a payload in a forked child under rlimits and a strict seccomp filter, with a wall-clock deadline enforced by SIGKILL from the parent and a strict outcome classification. |
+| `stack_supervised_exec.hpp` | `stack::supervised::SupervisedExecutor`: runs a payload in a supervised child under rlimits and a strict seccomp filter, with a wall-clock deadline enforced by SIGKILL from the parent, a bounded reap (`TerminationUnconfirmed`) and a strict outcome classification. `Run` forks the caller (not for untrusted payloads); `RunWorker` fork+execs the separate program `worker/stack_worker.cpp` (decision A, RACE-02). |
 | `stack_arena.hpp` | `StaticArenaBuffer` (fixed-size arena with a 64-bit generation counter) |
 | `stack_audit.hpp` | `SeccompAuditRing` (seqlock ring), `AuditEventRecord`, `AuditEventType`, `HmacSha256`. The "HMAC" is an XOR placeholder, stated as such in the source; the ring is telemetry, not a receipt. |
 
@@ -44,8 +44,11 @@ All of these are registered in `CMakeLists.txt` and run under `ctest`
   child, capability race cases, per-thread sealing, the D-01 hard-timeout
   expiry on a sealed thread, zero-timeout refusal and fail-closed arming.
   One pre-existing case is scheduling dependent; see `CONTAINMENT.md`.
+- `tests/worker_exec_tests.cpp`, `tests/worker_reap_tests.cpp`, `tests/ffi_supervised_tests.cpp`
+  (Catch2; ctest `STACKWorkerExec`, `STACKWorkerReap`, `STACKFfiSupervised`): the clean worker path,
+  bounded reap and governance before spawn; see `CONTAINMENT.md`, "The clean worker path".
 - `tests/supervised_exec_tests.cpp` (Catch2, `stack_supervised_exec_tests`):
-  the supervised executor, 12 cases; every hostile payload runs in a child.
+  the supervised executor, 15 cases (plus the waitpid-fallback program); every hostile payload runs in a child.
 - `tests/tests_production_hardened.cpp` (Catch2): five checks in one case;
   its banner covers that case only.
 - Red-team programs (plain `main`, exit non-zero on failure):

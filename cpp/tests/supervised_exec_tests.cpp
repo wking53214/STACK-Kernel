@@ -18,6 +18,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -236,6 +237,95 @@ TEST_CASE("Supervised: allocating beyond RLIMIT_AS is ResourceLimit or Crashed",
     REQUIRE(report.outcome != Outcome::Completed);
     REQUIRE((report.outcome == Outcome::ResourceLimit || report.outcome == Outcome::Crashed));
     REQUIRE_FALSE(report.deadline_fired);
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Supervised: allocating beyond the default address-space limit is Crashed or ResourceLimit", "[supervised]") {
+    // P2 finding 8: a default-constructed Limits used to leave RLIMIT_AS
+    // inherited, so a runaway allocation was bounded only by the host.
+    Limits limits;
+    limits.wall_clock_deadline_ns = 5'000 * kMs;
+    limits.max_output_bytes = 64;
+    REQUIRE(limits.address_space_bytes > 0);
+    REQUIRE(limits.address_space_bytes == kDefaultAddressSpaceBytes);
+    uint8_t out[64];
+    const auto report = SupervisedExecutor::Run(
+        limits,
+        [](uint8_t* o, std::size_t) {
+            // 8 GiB of address space in 1 GiB steps, never touched, so no
+            // memory is used if the limit is missing; the payload then
+            // completes, which is what the assertion below refuses.
+            for (int i = 0; i < 8; ++i) {
+                void* p = ::mmap(nullptr, 1ULL << 30, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                if (p == MAP_FAILED) __builtin_trap();
+            }
+            o[0] = 'x';
+            return std::size_t{1};
+        },
+        out, sizeof out);
+    INFO("outcome " << static_cast<int>(report.outcome) << " exit " << report.exit_code << " signal " << report.signal_number);
+    REQUIRE(report.outcome != Outcome::Completed);
+    REQUIRE((report.outcome == Outcome::ResourceLimit || report.outcome == Outcome::Crashed));
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Supervised: a payload that ignores SIGXCPU is Crashed with signal 9", "[supervised]") {
+    // cpp/CONTAINMENT.md: SIGXCPU is not the end of such a payload; the hard
+    // RLIMIT_CPU one second later is SIGKILL, so the run is Crashed.
+    Limits limits = DefaultLimits();
+    limits.wall_clock_deadline_ns = 10'000 * kMs;
+    limits.cpu_seconds = 1;
+    uint8_t out[64];
+    const auto report = SupervisedExecutor::Run(
+        limits,
+        [](uint8_t*, std::size_t) {
+            (void)::signal(SIGXCPU, SIG_IGN);
+            SpinForever();
+        },
+        out, sizeof out);
+    INFO("outcome " << static_cast<int>(report.outcome) << " signal " << report.signal_number);
+    REQUIRE(report.outcome == Outcome::Crashed);
+    REQUIRE(report.signal_number == SIGKILL);
+    REQUIRE_FALSE(report.deadline_fired);
+    REQUIRE(NoChildrenLeft());
+}
+
+TEST_CASE("Supervised: a run is refused while SIGCHLD is ignored", "[supervised]") {
+    // P2 finding 9: with SIGCHLD set to SIG_IGN the kernel reaps the child
+    // itself, waitpid fails with ECHILD and even a real timeout used to come
+    // back as SupervisorError.
+    uint8_t out[64];
+    auto run = [&] {
+        return SupervisedExecutor::Run(DefaultLimits(), [](uint8_t*, std::size_t) { SpinForever(); }, out, sizeof out);
+    };
+    SECTION("SIG_IGN") {
+        struct sigaction ign{};
+        ign.sa_handler = SIG_IGN;
+        ::sigemptyset(&ign.sa_mask);
+        struct sigaction old{};
+        REQUIRE(::sigaction(SIGCHLD, &ign, &old) == 0);
+        const auto report = run();
+        REQUIRE(::sigaction(SIGCHLD, &old, nullptr) == 0);
+        REQUIRE(report.outcome == Outcome::SigchldIgnored);
+        REQUIRE(report.child_pid == 0);
+        REQUIRE(report.elapsed_ns == 0);
+    }
+    SECTION("SA_NOCLDWAIT") {
+        struct sigaction nocld{};
+        nocld.sa_handler = SIG_DFL;
+        nocld.sa_flags = SA_NOCLDWAIT;
+        ::sigemptyset(&nocld.sa_mask);
+        struct sigaction old{};
+        REQUIRE(::sigaction(SIGCHLD, &nocld, &old) == 0);
+        const auto report = run();
+        REQUIRE(::sigaction(SIGCHLD, &old, nullptr) == 0);
+        REQUIRE(report.outcome == Outcome::SigchldIgnored);
+        REQUIRE(report.child_pid == 0);
+    }
+    SECTION("the default disposition still runs") {
+        const auto report = run();
+        REQUIRE(report.outcome == Outcome::TimedOut);
+    }
     REQUIRE(NoChildrenLeft());
 }
 

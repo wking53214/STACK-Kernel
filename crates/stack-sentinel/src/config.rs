@@ -64,6 +64,24 @@ pub struct VerifierConfig {
     /// refuses an anchor older than that many rows, which limits how far
     /// back an attacker can cut a chain by replaying an old, genuine anchor.
     pub min_anchor_entries: u64,
+    /// Require `subject_digest` on every `governance_decision` row written
+    /// after the receipts layer began. Default `false`, which is the Python
+    /// behaviour: a decision row with no `subject_digest` is not judged for
+    /// its subject binding at all, so stripping the digest from an unsigned
+    /// decision and recomputing the chain is not caught by the walk.
+    ///
+    /// When `true`, the receipts layer is taken to have begun at the first
+    /// row that is an `attestation_policy` marker or a `governance_decision`
+    /// carrying a `subject_digest`, whichever comes first: both are hashed,
+    /// in-chain evidence of the writer that populates `subject_digest` on
+    /// every decision (`APPLY_verdict_receipts.md`, section 3). A
+    /// `governance_decision` row after that row with no `subject_digest` is
+    /// `TRANSPLANTED` (`subject_digest_missing`, TERMINAL_BREACH). Rows at or
+    /// before it are not judged, so an export taken entirely before the
+    /// receipts layer still verifies. A chain stripped of every digest and
+    /// carrying no marker shows no boundary and is not judged; the scope
+    /// record reports such rows (`decision_rows_without_subject_digest`).
+    pub require_subject_digest: bool,
     /// JSON nesting, integer-length and allocation caps. Defaults: depth
     /// 256, 4300 digits, 12 bytes of tree per byte of input plus 1 MiB.
     pub json: ParseLimits,
@@ -81,6 +99,7 @@ impl Default for VerifierConfig {
             accept_retired_key_signatures: false,
             accept_retired_key_anchor: false,
             min_anchor_entries: 1,
+            require_subject_digest: false,
             json: ParseLimits::default(),
         }
     }

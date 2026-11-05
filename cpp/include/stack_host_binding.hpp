@@ -20,9 +20,13 @@
  *
  * Execution flow through ExecuteGovernedTransaction():
  *   Check capabilities → consume tokens → arm timer → run payload →
- *   check preemption → check deadline → accrue debt → commit
+ *   commit tokens and accrue debt → check preemption → check deadline →
+ *   check the debt ceiling
  *
  * If any gate rejects, execution halts and error returns to caller.
+ * Accounting (I-03): a transaction rejected before its payload ran costs
+ * nothing (its tokens are refunded, no debt); once the payload has run its
+ * tokens are spent and its ticks charged whatever the outcome.
  *
  * ───────────────────────────────────────────────────────────────────────────
  * ARCHITECTURAL NOTE: Single-Responsibility Violation
@@ -43,15 +47,19 @@
 #include "stack_kinetic_governor.hpp"
 #include "posix_deadline_timer_hardened.hpp"
 #include "stack_audit.hpp"
+#include "stack_run_cancel.hpp"
 
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <csignal>
 #include <expected>
 #include <mutex>
+#include <type_traits>
 #include <utility>
 
 #include <sys/prctl.h>
@@ -344,7 +352,12 @@ enum class HostExecutionError : uint8_t {
     InvalidHardTimeout,
     // timer_settime failed on an already created timer. Distinct from
     // TimerInitializationFailed (timer_create). The payload does not run.
-    TimerArmFailed
+    TimerArmFailed,
+    // A capability change (a revocation, typically) is waiting for the
+    // transactions in flight to drain and new transactions are held out
+    // until it has applied or given up (I-04, R2-K-07). Fail closed: nothing
+    // ran, no token was consumed, nothing was charged. Retry.
+    CapabilityChangePending
 };
 
 template <
@@ -360,6 +373,14 @@ private:
     ComputeDebtTracker<MaxDomains> debt_tracker_{};
     CapabilityMask256 active_host_capabilities_{};
     std::atomic<uint32_t> transactions_in_flight_{0};  // Lifecycle guard
+    // Capability changes waiting for the in-flight transactions to drain
+    // (I-04). Written under capability_lock_; read lock free by the
+    // transaction guard, which notifies only when it is not zero.
+    std::atomic<uint32_t> pending_capability_changes_{0};
+    std::condition_variable capability_drained_{};
+    // Governed supervised runs in flight (R2-K-24), newest first. Edited only under
+    // capability_lock_. A pending capability change terminates every run on it.
+    supervised::CancelHandle* supervised_in_flight_ = nullptr;
     mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
     mutable std::mutex capability_lock_{};  // Protects active_host_capabilities_
     SeccompAuditRing<8192> audit_ring_{};  // Layer 5: Governance audit trail (DEFECT #1 FIX)
@@ -368,8 +389,38 @@ public:
     GovernedMinotaurHost() noexcept = default;
 
     /**
+     * Construct with a run-time refill rate for the governor, in HardwareClock
+     * ticks per token (I-01). The tick counter's frequency is a run-time
+     * property of the machine, so a host that wants "N tokens per second"
+     * measures the counter against a wall clock and passes frequency / N here.
+     */
+    explicit GovernedMinotaurHost(uint64_t governor_ticks_per_token) noexcept
+        : governor_(governor_ticks_per_token) {}
+
+    /**
+     * Read access to the governance audit trail, so a caller or a test can
+     * check which events a transaction recorded (I-01: a failed transaction
+     * must leave no TransactionCompleted record).
+     */
+    [[nodiscard]] const SeccompAuditRing<8192>& AuditRing() const noexcept { return audit_ring_; }
+
+    /**
+     * The per-domain compute debt (I-03). The non-const accessor is for an
+     * administrator that forgives or preloads debt; transactions charge it
+     * themselves through ExecuteGovernedTransaction.
+     */
+    [[nodiscard]] ComputeDebtTracker<MaxDomains>& DebtTracker() noexcept { return debt_tracker_; }
+    [[nodiscard]] const ComputeDebtTracker<MaxDomains>& DebtTracker() const noexcept { return debt_tracker_; }
+
+    /**
      * Set active capability mask. Guarded against mid-transaction changes.
      * Returns false if transaction is in flight, preventing capability mutation.
+     *
+     * Try once: this is the original behaviour and it is unchanged. Under a
+     * steady stream of transactions some transaction is always in flight, so
+     * a caller that retries this can wait forever (R2-K-07). A caller that
+     * must make a change, a revocation above all, uses
+     * SetActiveCapabilitiesWithin().
      *
      * Thread safety: Acquires capability_lock_ to ensure atomicity with
      * concurrent reads in ExecuteGovernedTransaction(). The in-flight check
@@ -384,6 +435,72 @@ public:
         }
         active_host_capabilities_ = mask;
         return true;
+    }
+
+    /**
+     * Set the active capability mask, waiting up to `max_wait` for the
+     * transactions in flight to drain (I-04, R2-K-07).
+     *
+     * While this call waits, the change is pending and NEW transactions are
+     * refused with CapabilityChangePending (fail closed: they do not wait,
+     * nothing runs, nothing is charged). Only transactions that were already
+     * in flight can still be running, so the set can only shrink and the
+     * change applies as soon as the last of them returns. It applies only
+     * with none in flight, so no transaction is ever running across it.
+     *
+     * Returns true when the mask was applied. After a true return, no
+     * transaction runs with the old mask. Returns false when the in-flight
+     * transactions did not drain within `max_wait` (a payload that does not
+     * return holds them; the deadline is cooperative): the mask is NOT
+     * applied, no change is left pending, and the host serves under the old
+     * mask again. The caller owns the decision to retry or to escalate.
+     * A `max_wait` of zero or less is try-once, the same as
+     * SetActiveCapabilities(), and never holds new transactions out.
+     *
+     * Several waiting changes are allowed. New transactions stay refused
+     * while any of them is waiting, and each applies when it sees the host
+     * drained, in the order the lock is won, so the last to apply is the mask
+     * that stays. A change that times out leaves the others waiting.
+     *
+     * Do not call this from inside a payload: the calling transaction is
+     * itself in flight, so the wait cannot succeed and runs to its bound.
+     *
+     * Governed supervised runs (ExecuteGovernedSupervised) in flight are TERMINATED, not
+     * waited for (R2-K-24): while this call waits, each is sent SIGKILL through its
+     * pidfd and ends as Terminated, so the change applies within the time it takes to kill and
+     * reap them, not the time they would have run. A worker that cannot be killed or reaped
+     * in time (it holds the host in flight until its run returns) makes this return false at
+     * `max_wait`, as for any transaction that does not drain.
+     */
+    [[nodiscard]] bool SetActiveCapabilitiesWithin(const CapabilityMask256& mask,
+                                                   std::chrono::nanoseconds max_wait) noexcept {
+        std::unique_lock<std::mutex> lock(capability_lock_);
+        if (transactions_in_flight_.load(std::memory_order_seq_cst) == 0) {
+            active_host_capabilities_ = mask;
+            return true;
+        }
+        if (max_wait <= std::chrono::nanoseconds::zero()) {
+            return false;
+        }
+        pending_capability_changes_.fetch_add(1, std::memory_order_seq_cst);
+        // R2-K-24: a change that is waiting TERMINATES the governed supervised workers in
+        // flight instead of waiting for them. New ones cannot register while it is pending (they
+        // are refused under this same lock), so the list can only shrink from here. In-process
+        // transactions cannot be stopped and are still waited for.
+        for (supervised::CancelHandle* h = supervised_in_flight_; h != nullptr; h = h->next) h->Request();
+        const bool drained = capability_drained_.wait_for(lock, max_wait, [this] {
+            return transactions_in_flight_.load(std::memory_order_seq_cst) == 0;
+        });
+        pending_capability_changes_.fetch_sub(1, std::memory_order_seq_cst);
+        if (drained) {
+            active_host_capabilities_ = mask;
+        }
+        return drained;
+    }
+
+    /** Number of capability changes currently waiting for in-flight transactions to drain. */
+    [[nodiscard]] uint32_t PendingCapabilityChanges() const noexcept {
+        return pending_capability_changes_.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] std::expected<void, HostExecutionError> InitializeAndSeal() noexcept {
@@ -443,20 +560,38 @@ public:
         // Lifecycle guard: mark the transaction in flight under the same lock, so
         // SetActiveCapabilities() (which checks the counter under capability_lock_)
         // sees either the old counter and no snapshot yet, or the raised counter.
+        //
+        // A pending capability change (I-04) holds new transactions out here,
+        // before anything is consumed: the in-flight set can then only shrink,
+        // so the change is guaranteed to apply once it drains.
         CapabilityMask256 snapshot_capabilities{};
         {
             std::lock_guard<std::mutex> lock(capability_lock_);
+            if (pending_capability_changes_.load(std::memory_order_seq_cst) > 0) [[unlikely]] {
+                return std::unexpected(HostExecutionError::CapabilityChangePending);
+            }
             snapshot_capabilities = active_host_capabilities_;
             transactions_in_flight_.fetch_add(1, std::memory_order_release);
         }
 
         // RAII cleanup: decrement on exit (pairs with the fetch_add above on every path)
+        // When a capability change is waiting (I-04), wake it. The decrement
+        // comes first and the waiter tests the counter under capability_lock_,
+        // so taking that lock before notifying cannot lose the wake-up.
         struct TransactionGuard {
             std::atomic<uint32_t>& counter;
+            const std::atomic<uint32_t>& pending;
+            std::mutex& lock;
+            std::condition_variable& drained;
             ~TransactionGuard() noexcept {
-                counter.fetch_sub(1, std::memory_order_release);
+                counter.fetch_sub(1, std::memory_order_seq_cst);
+                if (pending.load(std::memory_order_seq_cst) != 0) [[unlikely]] {
+                    std::lock_guard<std::mutex> lk(lock);
+                    drained.notify_all();
+                }
             }
-        } lifecycle_guard{transactions_in_flight_};
+        } lifecycle_guard{transactions_in_flight_, pending_capability_changes_, capability_lock_,
+                          capability_drained_};
 
         // Extract domain ID early for audit logging
         const uint64_t domain_id = token.GetContextId();
@@ -472,6 +607,13 @@ public:
         // Component 2-5 Check: Kinetic Governor
         // LAYER 7 FIX: Consume now reads clock internally (removed caller-supplied time parameter)
         // P3.1 FIX: Consume now accepts domain_id for per-domain rate limiting
+        // R2-K-20: a request must consume at least one token. A zero-token
+        // request passes the governor's floor check for free ("available >=
+        // Reserved + 0" is always true), so it would run without limit.
+        if (required_tokens == 0) [[unlikely]] {
+            audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, 0);
+            return std::unexpected(HostExecutionError::RateLimitExceeded);
+        }
         auto consume_res = governor_.Consume(domain_id, required_tokens, PriorityClass::Standard);
         if (!consume_res.has_value()) [[unlikely]] {
             // LAYER 5 FIX: Record rate limit event
@@ -514,6 +656,19 @@ public:
 
         const uint64_t elapsed_ticks = HardwareClock::ReadTicks() - start_tick;
 
+        // ACCOUNTING RULE (I-03, R2-K-05/06). Everything above this line
+        // that returned did so before the payload ran, and the rollback
+        // guard refunded its tokens: a rejected transaction costs nothing.
+        // From here on the payload has run, so its tokens are spent whatever
+        // the outcome, and its CPU ticks are charged as debt, an overrun
+        // included. The charge is best effort against the ceiling: when it
+        // does not fit, the debt stays where it is and nothing is refunded.
+        // Before this, an overrun or preempted payload was refunded in full,
+        // and a payload that hit the ceiling had the ticks AccrueDebt had
+        // just refused refunded through the guard, so the debt went down.
+        guard.Commit();
+        const bool debt_charged = debt_tracker_.AccrueDebt(domain_id, elapsed_ticks).has_value();
+
         if (timer_guard.WasPreempted()) [[unlikely]] {
             // LAYER 5 FIX: Record hardware timer preemption event
             audit_ring_.Push(AuditEventType::HardwareTimerPreempted, domain_id, required_tokens);
@@ -527,18 +682,166 @@ public:
         }
 
         // Component 8-9 Check: Compute Debt
-        guard.accrued_ticks = elapsed_ticks;
-        auto debt_res = debt_tracker_.AccrueDebt(domain_id, elapsed_ticks);
-        if (!debt_res.has_value()) [[unlikely]] {
+        if (!debt_charged) [[unlikely]] {
             // LAYER 5 FIX: Record debt ceiling exceeded event
             audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, required_tokens);
             return std::unexpected(HostExecutionError::DebtCeilingExceeded);
         }
 
-        guard.Commit();
-
         // LAYER 5 FIX: Record successful transaction completion
         audit_ring_.Push(AuditEventType::TransactionCompleted, domain_id, required_tokens);
+        return {};
+    }
+
+    /**
+     * How a supervised run (see ExecuteGovernedSupervised) ended, as far as the
+     * host's audit trail and accounting are concerned.
+     */
+    enum class SupervisedRunResult : uint8_t {
+        Completed,               // worker exited 0 in time with a well-formed frame
+        TimedOut,                // wall-clock deadline passed; worker killed
+        Failed,                  // spawned, ended any other way
+        TerminationUnconfirmed,  // killed, not reaped in time; may still be running
+        NotSpawned,              // refused or failed before any process existed
+        Terminated               // killed because a pending capability change asked for it (R2-K-24)
+    };
+
+    /**
+     * Governance before spawn for a supervised worker run (RACE-02, R2-K-13).
+     *
+     * The same checks as ExecuteGovernedTransaction, in the same order, and
+     * BEFORE `run` is called, so a refused request spawns nothing:
+     *   1. wall_clock_deadline_ns == 0: InvalidHardTimeout (nothing consumed);
+     *   2. a pending capability change: CapabilityChangePending (nothing consumed);
+     *   3. the token's capabilities against the active mask: CapabilityValidationFailed
+     *      (CapabilityViolation audit event, nothing consumed);
+     *   4. the domain's token bucket: RateLimitExceeded (RateLimitTriggered audit event);
+     *   5. the capabilities again under the lock, after the tokens were taken
+     *      (a revocation in between refunds them).
+     * While `run` executes the transaction counts as in flight, so a capability
+     * change waits for it exactly as for a governed transaction.
+     *
+     * `run` spawns and supervises the worker and says how it ended. Tokens
+     * are spent when something was spawned and refunded when it was not
+     * (SupervisedRunResult::NotSpawned). One audit event records the outcome,
+     * timeouts included. Compute debt is not charged on this path.
+     *
+     * `run` may take a `supervised::CancelHandle&` (R2-K-24). It passes the handle to
+     * SupervisedExecutor::RunWorker; a capability change that starts waiting while the run is
+     * in flight requests it, the worker is killed and `run` reports
+     * SupervisedRunResult::Terminated: audited as SupervisedTerminated, tokens spent, never a
+     * success. A run that was not spawned because the handle was already requested is refused
+     * with CapabilityChangePending (tokens refunded).
+     *
+     * No seal is needed and none may be present: a sealed thread's filter
+     * forbids fork and exec, so `run` would fail to spawn (NotSpawned).
+     */
+    template <typename SupervisedRun>
+    [[nodiscard]] std::expected<void, HostExecutionError> ExecuteGovernedSupervised(
+        const SIMDCapabilityToken& token,
+        uint32_t required_tokens,
+        uint64_t wall_clock_deadline_ns,
+        SupervisedRun&& run) noexcept
+    {
+        if (wall_clock_deadline_ns == 0) [[unlikely]] {
+            return std::unexpected(HostExecutionError::InvalidHardTimeout);
+        }
+
+        CapabilityMask256 snapshot_capabilities{};
+        supervised::CancelHandle cancel;  // outlives lifecycle_guard, which unlinks it
+        {
+            std::lock_guard<std::mutex> lock(capability_lock_);
+            if (pending_capability_changes_.load(std::memory_order_seq_cst) > 0) [[unlikely]] {
+                return std::unexpected(HostExecutionError::CapabilityChangePending);
+            }
+            snapshot_capabilities = active_host_capabilities_;
+            transactions_in_flight_.fetch_add(1, std::memory_order_release);
+            // Registered under the same lock as the pending check: a change that starts waiting
+            // afterwards sees this run and requests it (R2-K-24).
+            cancel.next = supervised_in_flight_;
+            if (supervised_in_flight_ != nullptr) supervised_in_flight_->prev = &cancel;
+            supervised_in_flight_ = &cancel;
+        }
+        struct TransactionGuard {
+            std::atomic<uint32_t>& counter;
+            const std::atomic<uint32_t>& pending;
+            std::mutex& lock;
+            std::condition_variable& drained;
+            supervised::CancelHandle*& head;
+            supervised::CancelHandle& self;
+            ~TransactionGuard() noexcept {
+                std::lock_guard<std::mutex> lk(lock);
+                if (self.prev != nullptr) self.prev->next = self.next;
+                else head = self.next;
+                if (self.next != nullptr) self.next->prev = self.prev;
+                counter.fetch_sub(1, std::memory_order_seq_cst);
+                if (pending.load(std::memory_order_seq_cst) != 0) [[unlikely]] {
+                    drained.notify_all();
+                }
+            }
+        } lifecycle_guard{transactions_in_flight_, pending_capability_changes_, capability_lock_,
+                          capability_drained_, supervised_in_flight_, cancel};
+
+        const uint64_t domain_id = token.GetContextId();
+        if (!token.Validate(snapshot_capabilities)) [[unlikely]] {
+            audit_ring_.Push(AuditEventType::CapabilityViolation, domain_id, 0);
+            return std::unexpected(HostExecutionError::CapabilityValidationFailed);
+        }
+        // R2-K-20: a request must consume at least one token. A zero-token
+        // request passes the governor's floor check for free ("available >=
+        // Reserved + 0" is always true), so it would run without limit.
+        if (required_tokens == 0) [[unlikely]] {
+            audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, 0);
+            return std::unexpected(HostExecutionError::RateLimitExceeded);
+        }
+        auto consume_res = governor_.Consume(domain_id, required_tokens, PriorityClass::Standard);
+        if (!consume_res.has_value()) [[unlikely]] {
+            audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, required_tokens);
+            return std::unexpected(HostExecutionError::RateLimitExceeded);
+        }
+        TransactionRollbackGuard guard(governor_, debt_tracker_, domain_id, 0, 0, required_tokens);
+        {
+            std::lock_guard<std::mutex> lock(capability_lock_);
+            if (!token.Validate(active_host_capabilities_)) [[unlikely]] {
+                audit_ring_.Push(AuditEventType::CapabilityViolation, domain_id, 0);
+                return std::unexpected(HostExecutionError::CapabilityValidationFailed);
+            }
+        }
+
+        SupervisedRunResult result;
+        if constexpr (std::is_invocable_v<SupervisedRun&, supervised::CancelHandle&>) {
+            result = run(cancel);
+        } else {
+            result = run();
+        }
+        switch (result) {
+        case SupervisedRunResult::NotSpawned:
+            // Nothing existed to spend the tokens on: the guard refunds them.
+            audit_ring_.Push(AuditEventType::SupervisedFailed, domain_id, 0);
+            // Not spawned because a change is waiting: that is the refusal a new run gets.
+            if (cancel.Requested()) return std::unexpected(HostExecutionError::CapabilityChangePending);
+            return {};
+        case SupervisedRunResult::Terminated:
+            guard.Commit();
+            audit_ring_.Push(AuditEventType::SupervisedTerminated, domain_id, required_tokens);
+            return {};
+        case SupervisedRunResult::Completed:
+            guard.Commit();
+            audit_ring_.Push(AuditEventType::SupervisedCompleted, domain_id, required_tokens);
+            return {};
+        case SupervisedRunResult::TimedOut:
+            guard.Commit();
+            audit_ring_.Push(AuditEventType::SupervisedTimedOut, domain_id, required_tokens);
+            return {};
+        case SupervisedRunResult::TerminationUnconfirmed:
+            guard.Commit();
+            audit_ring_.Push(AuditEventType::SupervisedTerminationUnconfirmed, domain_id, required_tokens);
+            return {};
+        case SupervisedRunResult::Failed:
+            break;
+        }
+        guard.Commit();
+        audit_ring_.Push(AuditEventType::SupervisedFailed, domain_id, required_tokens);
         return {};
     }
 };

@@ -46,8 +46,10 @@ TEST_CASE("PRODUCTION FIRE-TEST: ≡TACK Kernel Components") {
     std::cout << "✅ [4/5] SeccompAuditRing<1024> seqlock protection\n"
               << "         Pushed 100 audit events (lock-free, seqlock guarded)\n";
     
-    // Component 5: Host initialization and sealing
-    host::GovernedMinotaurHost<64, 100, 1000, 100, 16> host;
+    // Component 5: Host initialization and sealing. The FFI host's parameters
+    // (I-01): the old <64, 100, 1000, 100, 16> no longer compiles, because the
+    // governor refuses Reserved 100 in a bucket of 64 at compile time.
+    host::GovernedMinotaurHost<1000, 100, 100, 2'100'000, 16> host;
     auto seal = host.InitializeAndSeal();
     REQUIRE(seal.has_value());
     std::cout << "✅ [5/5] GovernedMinotaurHost::InitializeAndSeal()\n"

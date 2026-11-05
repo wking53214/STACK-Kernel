@@ -75,6 +75,9 @@
 //! nothing about it. This is the `sentinel_os` ledger design, reproduced as
 //! it is. [`Report::unhashed_columns`] lists, from a closed set of names,
 //! the unhashed columns an export carried.
+//! [`Verifier::verify_export_scoped`] (and the CLI's `--json`) states that
+//! scope as a stable record, `sentinel-scope/1`, with limitation codes a
+//! consumer must handle; `SCOPE.md` beside this crate defines it.
 //!
 //! Every verdict the Python tool can print, this crate can print. What it
 //! cannot see is outside both tools: which human stands behind a key, and
@@ -176,18 +179,21 @@ pub mod cns;
 pub mod config;
 pub mod error;
 pub mod pyjson;
+pub mod scope;
 pub mod telemetry;
 pub mod verdict;
 pub mod verify;
 
 pub use anchor::{
-    check_head_anchor, check_head_anchor_with, parse_head_anchor, verify_head_anchor, AnchorError, HeadAnchor,
+    check_anchor_file_with, check_head_anchor, check_head_anchor_with, parse_head_anchor, read_anchor_file,
+    verify_anchor_file, verify_head_anchor, AnchorError, AnchorFile, HeadAnchor,
 };
 pub use attest::{key_fingerprint, parse_key_file, AttestationStatus, KeyError, KeySet, SecretKey};
 pub use canonical::{canonical_form, hashed_columns, recompute_current_hash, RecomputeError};
 pub use cns::subject_digest;
 pub use config::VerifierConfig;
 pub use error::VerifyError;
+pub use scope::{KindScope, Limitation, Scope, ScopedReport};
 pub use verdict::{AnchorSummary, Finding, GateOutcome, Reason, Report, Resolution, Verdict};
 pub use verify::{
     deep_verify_row, deep_verify_row_with, parse_export, verify_rows, verify_rows_with, ChainWalk, LedgerRow, Verifier,
