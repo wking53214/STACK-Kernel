@@ -135,6 +135,7 @@ std::atomic<bool> g_fired{false};
 // starts and the supervisor's real kill proceeds against a dead, reaped child.
 bool ReapElsewhere(pid_t pid, int) {
     if (g_fired.exchange(true)) return false;
+    if (pid <= 1) return false;  // never signal "everything" or init
     ::kill(pid, SIGKILL);
     int status = 0;
     CHECK(::waitpid(pid, &status, 0) == pid);
@@ -216,7 +217,17 @@ void Tracked() {
     SupervisedExecutor::SetKillHookForTesting(nullptr);
     CHECK(stuck.outcome == Outcome::TerminationUnconfirmed);
     CHECK(SupervisedExecutor::UnconfirmedCount() == 1);
-    CHECK(stuck.child_pid > 0);
+    // Hard guard, not a CHECK: a failed spawn leaves child_pid at -1, and
+    // kill(-1, SIGKILL) signals every process this user may signal, while
+    // waitpid(-1) waits for any child. Never act on a pid that is not a real worker.
+    if (stuck.child_pid <= 1) {
+        std::fprintf(stderr, "no worker was spawned (child_pid %d, outcome %d, errno %d): "
+                             "refusing to signal or wait on it\n",
+                     static_cast<int>(stuck.child_pid), static_cast<int>(stuck.outcome),
+                     static_cast<int>(stuck.error_number));
+        CHECK(stuck.child_pid > 1);
+        return;
+    }
 
     ::kill(stuck.child_pid, SIGKILL);
     CHECK(::waitpid(stuck.child_pid, nullptr, 0) == stuck.child_pid);
