@@ -6,12 +6,24 @@
 #![no_std]
 #![allow(non_camel_case_types)]
 
+use stack_authority::AuthorizedAction;
+
 extern "C" {
     pub fn stack_host_initialize() -> i32;
     pub fn stack_host_seal_current_thread() -> i32;
     pub fn stack_host_initialize_and_seal() -> i32;
     pub fn stack_host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> i32;
     pub fn stack_execute_governed_transaction(
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        deadline_budget_ticks: u64,
+        hard_timeout_nanoseconds: u64,
+    ) -> i32;
+    /// D2-A. As `stack_execute_governed_transaction`, plus the 32-byte capability
+    /// digest. -18 for a null or all-zero digest.
+    pub fn stack_execute_governed_transaction_authorized(
+        capability_digest: *const u8,
         context_id: u64,
         required_capability_m0: u64,
         required_tokens: u32,
@@ -55,6 +67,23 @@ extern "C" {
         out_capacity: usize,
         report: *mut SupervisedReportFfi,
     ) -> i32;
+    /// D2-A. As `stack_supervised_run_governed`, plus the 32-byte capability
+    /// digest. -18 for a null or all-zero digest.
+    pub fn stack_supervised_run_authorized(
+        capability_digest: *const u8,
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        payload_kind: u32,
+        worker_path: *const core::ffi::c_char,
+        worker_sha256: *const u8,
+        limits: *const SupervisedLimitsFfi,
+        reap_timeout_ns: u64,
+        out: *mut u8,
+        out_capacity: usize,
+        report: *mut SupervisedReportFfi,
+    ) -> i32;
+    pub fn stack_host_worker_spawn_count() -> u64;
     pub fn stack_supervised_image_sha256(path: *const core::ffi::c_char, out: *mut u8) -> i32;
     pub fn stack_supervised_unconfirmed_count() -> u64;
     pub fn stack_supervised_reap_unconfirmed() -> u64;
@@ -174,40 +203,103 @@ pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> Result<(), C
     }
 }
 
-/// Safe wrapper for executing a governed transaction on the in-process path.
+/// Executes a governed transaction on the in-process path, on behalf of an
+/// [`AuthorizedAction`] (D2-A).
+///
+/// The capability digest of `authorization` is handed to the C++ host, which
+/// refuses an all-zero digest ([`TransactionError::AuthorizationRequired`])
+/// and leaves a label derived from the digest in its audit trail. Safe code
+/// can only obtain an `AuthorizedAction` from `stack_authority::Authority::authorize`.
+///
+/// NON-GUARANTEE: this is an anti-misuse boundary, not protection from code in
+/// the same process. Such code can call the raw C symbol with any 32 non-zero
+/// bytes, and the host cannot tell them from a real digest.
 ///
 /// This path has a cooperative CPU-time deadline and is not isolation; see
-/// `supervised_run` for a payload that must be stopped. The C codes -1 and
-/// -3 keep their original meaning and still map to `ExecutionFailed`; the
-/// codes added for D-18 map to the distinct variants below.
+/// [`supervised_run_governed`] for a payload that must be stopped. The C codes
+/// -1 and -3 keep their original meaning and still map to `ExecutionFailed`.
+///
+/// ```compile_fail,E0061
+/// // The authorization is a required argument.
+/// let _ = stack_ffi::execute_governed_transaction(0, 1, 1, u64::MAX, 1_000_000_000);
+/// ```
+///
+/// ```compile_fail,E0451
+/// // An AuthorizedAction cannot be built by hand: its fields are private.
+/// let _ = stack_authority::AuthorizedAction { cap_id: String::new() };
+/// ```
 pub fn execute_governed_transaction(
+    authorization: &AuthorizedAction,
     context_id: u64,
     required_capability_m0: u64,
     required_tokens: u32,
     deadline_budget_ticks: u64,
     hard_timeout_nanoseconds: u64,
 ) -> Result<(), TransactionError> {
-    unsafe {
-        match stack_execute_governed_transaction(
+    let digest = authorization.cap_digest().as_bytes();
+    // SAFETY: `digest` points to 32 readable bytes for the call.
+    let rc = unsafe {
+        stack_execute_governed_transaction_authorized(
+            digest.as_ptr(),
             context_id,
             required_capability_m0,
             required_tokens,
             deadline_budget_ticks,
             hard_timeout_nanoseconds,
-        ) {
-            0 => Ok(()),
-            -4 => Err(TransactionError::CapabilityDenied),
-            -5 => Err(TransactionError::RateLimited),
-            -6 => Err(TransactionError::HardTimeout),
-            -7 => Err(TransactionError::SoftwareDeadline),
-            -8 => Err(TransactionError::DebtCeiling),
-            -9 => Err(TransactionError::InvalidHardTimeout),
-            -10 => Err(TransactionError::TimerArmFailed),
-            -11 => Err(TransactionError::ThreadNotSealed),
-            -12 => Err(TransactionError::InitializationFailed),
-            -13 => Err(TransactionError::CapabilityChangePending),
-            _ => Err(TransactionError::ExecutionFailed),
-        }
+        )
+    };
+    transaction_result(rc)
+}
+
+/// The in-process governed transaction WITHOUT any authorization. It checks the
+/// capability mask and the rate limit and nothing else; the host cannot tell
+/// who asked.
+///
+/// # Safety
+///
+/// The caller takes responsibility for the authorization the safe
+/// [`execute_governed_transaction`] requires: nothing here shows that anything
+/// authorized the call. Use it only where the caller has authorized the action
+/// by other means (host tests, tools).
+///
+/// ```compile_fail,E0133
+/// // D2-A: the unauthorized transaction is not callable from safe code.
+/// let _ = stack_ffi::execute_governed_transaction_unauthorized(0, 1, 1, u64::MAX, 1_000_000_000);
+/// ```
+pub unsafe fn execute_governed_transaction_unauthorized(
+    context_id: u64,
+    required_capability_m0: u64,
+    required_tokens: u32,
+    deadline_budget_ticks: u64,
+    hard_timeout_nanoseconds: u64,
+) -> Result<(), TransactionError> {
+    let rc = unsafe {
+        stack_execute_governed_transaction(
+            context_id,
+            required_capability_m0,
+            required_tokens,
+            deadline_budget_ticks,
+            hard_timeout_nanoseconds,
+        )
+    };
+    transaction_result(rc)
+}
+
+fn transaction_result(rc: i32) -> Result<(), TransactionError> {
+    match rc {
+        0 => Ok(()),
+        -4 => Err(TransactionError::CapabilityDenied),
+        -5 => Err(TransactionError::RateLimited),
+        -6 => Err(TransactionError::HardTimeout),
+        -7 => Err(TransactionError::SoftwareDeadline),
+        -8 => Err(TransactionError::DebtCeiling),
+        -9 => Err(TransactionError::InvalidHardTimeout),
+        -10 => Err(TransactionError::TimerArmFailed),
+        -11 => Err(TransactionError::ThreadNotSealed),
+        -12 => Err(TransactionError::InitializationFailed),
+        -13 => Err(TransactionError::CapabilityChangePending),
+        -18 => Err(TransactionError::AuthorizationRequired),
+        _ => Err(TransactionError::ExecutionFailed),
     }
 }
 
@@ -610,6 +702,10 @@ pub enum GovernedSupervisedError {
     WorkerDigestRequired,
     /// The image at the worker path does not hash to the pinned digest.
     WorkerDigestMismatch,
+    /// The capability digest was null or all zero: no authorization was named
+    /// (D2-A). Nothing was checked, spawned or consumed. The safe API cannot
+    /// produce this; a raw C caller can.
+    AuthorizationRequired,
     /// A code this crate does not know.
     Unrecognized(i32),
 }
@@ -628,30 +724,95 @@ pub fn worker_image_sha256(path: &core::ffi::CStr) -> Option<[u8; 32]> {
 
 /// Runs a built-in worker kind in a separate worker PROGRAM (fork then exec;
 /// the worker has none of this process's memory, an empty environment, and
-/// only descriptors 0 to 2 and its result pipe) after the capability and
-/// rate-limit checks of the initialized host, with a wall-clock deadline that
-/// ends in SIGKILL. `Err` means the request was refused before anything was
-/// spawned. `Ok` carries the outcome, which may be any [`SupervisedOutcome`],
-/// timeouts and `TerminationUnconfirmed` included; one audit event records it
-/// (see [`host_audit_read_slot`]).
+/// only descriptors 0 to 2 and its result pipe) on behalf of an
+/// [`AuthorizedAction`] (D2-A), after the capability and rate-limit checks of
+/// the initialized host, with a wall-clock deadline that ends in SIGKILL. `Err`
+/// means the request was refused before anything was spawned. `Ok` carries the
+/// outcome, which may be any [`SupervisedOutcome`], timeouts and
+/// `TerminationUnconfirmed` included; one audit event records the outcome (see
+/// [`host_audit_read_slot`]).
+///
+/// The capability digest of `authorization` is handed to the C++ host, which
+/// refuses an all-zero digest ([`GovernedSupervisedError::AuthorizationRequired`])
+/// and records an `AuthorizationBound` audit event before governance runs. That
+/// event carries only a LABEL derived from the digest (see
+/// [`capability_label`]); it is not an integrity value. The full digest is
+/// recorded in the receipt.
+///
+/// NON-GUARANTEE: this is an anti-misuse boundary, not protection from code in
+/// the same process. Such code can call the raw C symbols with any 32 non-zero
+/// bytes, and the host cannot tell them from a real digest.
 ///
 /// `Completed` means the worker exited 0 within the deadline and sent a
 /// well-formed frame. The bytes are self-reported (`result_self_reported`).
 /// Do not call this from a sealed thread (it fails with `WorkerUnavailable`).
+///
+/// ```compile_fail,E0061
+/// // The authorization is a required argument.
+/// fn misuse(
+///     request: &stack_ffi::GovernedSupervisedRequest<'_>,
+///     limits: &stack_ffi::SupervisedLimits,
+///     out: &mut [u8],
+/// ) {
+///     let _ = stack_ffi::supervised_run_governed(request, limits, out);
+/// }
+/// ```
 pub fn supervised_run_governed(
+    authorization: &AuthorizedAction,
     request: &GovernedSupervisedRequest<'_>,
     limits: &SupervisedLimits,
     out: &mut [u8],
 ) -> Result<SupervisedReport, GovernedSupervisedError> {
-    let ffi_limits = SupervisedLimitsFfi {
-        wall_clock_deadline_ns: limits.wall_clock_deadline_ns,
-        cpu_seconds: limits.cpu_seconds,
-        address_space_bytes: limits.address_space_bytes,
-        max_output_bytes: limits.max_output_bytes,
-        file_size_bytes: limits.file_size_bytes,
-        nofile: limits.nofile,
-        reserved: 0,
+    let ffi_limits = SupervisedLimitsFfi::from(limits);
+    let mut ffi_report = SupervisedReportFfi::default();
+    let digest = authorization.cap_digest().as_bytes();
+    // SAFETY: every pointer is valid for the call: `digest` is 32 bytes, the
+    // worker path is a NUL-terminated CStr, and `out` and the report are
+    // writable for the lengths given.
+    let rc = unsafe {
+        stack_supervised_run_authorized(
+            digest.as_ptr(),
+            request.context_id,
+            request.required_capability_m0,
+            request.required_tokens,
+            request.kind.code(),
+            request.worker_path.as_ptr(),
+            request.worker_sha256.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()),
+            &ffi_limits,
+            request.reap_timeout_ns,
+            out.as_mut_ptr(),
+            out.len(),
+            &mut ffi_report,
+        )
     };
+    governed_result(rc, &ffi_report)
+}
+
+/// The governed supervised run WITHOUT any authorization. It checks the
+/// capability mask and the rate limit, and nothing shows who asked.
+///
+/// # Safety
+///
+/// The caller takes responsibility for the authorization the safe
+/// [`supervised_run_governed`] requires. Use it only where the caller has
+/// authorized the action by other means (host tests, tools).
+///
+/// ```compile_fail,E0133
+/// // D2-A: the unauthorized run is not callable from safe code.
+/// fn misuse(
+///     request: &stack_ffi::GovernedSupervisedRequest<'_>,
+///     limits: &stack_ffi::SupervisedLimits,
+///     out: &mut [u8],
+/// ) {
+///     let _ = stack_ffi::supervised_run_governed_unauthorized(request, limits, out);
+/// }
+/// ```
+pub unsafe fn supervised_run_governed_unauthorized(
+    request: &GovernedSupervisedRequest<'_>,
+    limits: &SupervisedLimits,
+    out: &mut [u8],
+) -> Result<SupervisedReport, GovernedSupervisedError> {
+    let ffi_limits = SupervisedLimitsFfi::from(limits);
     let mut ffi_report = SupervisedReportFfi::default();
     let rc = unsafe {
         stack_supervised_run_governed(
@@ -668,8 +829,26 @@ pub fn supervised_run_governed(
             &mut ffi_report,
         )
     };
+    governed_result(rc, &ffi_report)
+}
+
+impl From<&SupervisedLimits> for SupervisedLimitsFfi {
+    fn from(limits: &SupervisedLimits) -> Self {
+        Self {
+            wall_clock_deadline_ns: limits.wall_clock_deadline_ns,
+            cpu_seconds: limits.cpu_seconds,
+            address_space_bytes: limits.address_space_bytes,
+            max_output_bytes: limits.max_output_bytes,
+            file_size_bytes: limits.file_size_bytes,
+            nofile: limits.nofile,
+            reserved: 0,
+        }
+    }
+}
+
+fn governed_result(rc: i32, report: &SupervisedReportFfi) -> Result<SupervisedReport, GovernedSupervisedError> {
     match rc {
-        0 => Ok(SupervisedReport::from_ffi(&ffi_report)),
+        0 => Ok(SupervisedReport::from_ffi(report)),
         -1 => Err(GovernedSupervisedError::NotInitialized),
         -2 => Err(GovernedSupervisedError::UnknownPayloadKind),
         -3 => Err(GovernedSupervisedError::NullArgument),
@@ -682,8 +861,26 @@ pub fn supervised_run_governed(
         -15 => Err(GovernedSupervisedError::InvalidLimits),
         -16 => Err(GovernedSupervisedError::WorkerDigestRequired),
         -17 => Err(GovernedSupervisedError::WorkerDigestMismatch),
+        -18 => Err(GovernedSupervisedError::AuthorizationRequired),
         other => Err(GovernedSupervisedError::Unrecognized(other)),
     }
+}
+
+/// The audit LABEL of a capability digest: its first 8 bytes, big endian. This
+/// is what the host's `AuthorizationBound` audit event carries in
+/// [`HostAuditRecord::context_id`]. A label identifies an entry in a trail; it
+/// is NOT a MAC, an integrity value or a secret, and 64 bits of a digest prove
+/// nothing. The full 32-byte digest is in the receipt.
+pub fn capability_label(digest: &[u8; 32]) -> u64 {
+    let mut label = [0u8; 8];
+    label.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(label)
+}
+
+/// Supervised worker processes this host has spawned, by any entry point. A
+/// refusal that spawns nothing leaves it unchanged.
+pub fn host_worker_spawn_count() -> u64 {
+    unsafe { stack_host_worker_spawn_count() }
 }
 
 /// Supervised workers that were sent SIGKILL and not yet confirmed reaped
@@ -756,6 +953,10 @@ pub enum HostAuditEvent {
     /// A supervised worker was killed because a pending capability revocation
     /// asked for it (R2-K-24); its tokens were spent.
     SupervisedTerminated,
+    /// D2-A: an authorized entry point reached governance. `context_id` of the
+    /// record carries the capability LABEL ([`capability_label`]) and `tokens`
+    /// carries the rate-limit domain. A label is not an integrity value.
+    AuthorizationBound,
     /// A value this crate does not know; carried rather than collapsed.
     Unrecognized(u8),
 }
@@ -773,6 +974,7 @@ impl HostAuditEvent {
             7 => HostAuditEvent::SupervisedFailed,
             8 => HostAuditEvent::SupervisedTerminationUnconfirmed,
             9 => HostAuditEvent::SupervisedTerminated,
+            10 => HostAuditEvent::AuthorizationBound,
             other => HostAuditEvent::Unrecognized(other),
         }
     }
@@ -870,6 +1072,10 @@ pub enum TransactionError {
     /// flight to drain and holds new ones out (I-04). Nothing ran and nothing
     /// was consumed. Retry.
     CapabilityChangePending,
+    /// The capability digest was null or all zero: no authorization was named
+    /// (D2-A). Nothing ran, nothing was consumed. The safe API cannot produce
+    /// this; a raw C caller can.
+    AuthorizationRequired,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -883,6 +1089,37 @@ pub struct AuditRecord {
 mod tests {
     extern crate std;
     use super::*;
+
+    // D2-A: the tests below exercise the host's own governance (mask, tokens,
+    // deadlines, revocation) and name no authorization. They call the
+    // unauthorized entry points through these two local wrappers, which shadow
+    // the glob import of the safe functions. The authorized path has its own
+    // tests in `tests/authorized_run.rs`.
+    fn execute_governed_transaction(
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        deadline_budget_ticks: u64,
+        hard_timeout_nanoseconds: u64,
+    ) -> Result<(), TransactionError> {
+        unsafe {
+            execute_governed_transaction_unauthorized(
+                context_id,
+                required_capability_m0,
+                required_tokens,
+                deadline_budget_ticks,
+                hard_timeout_nanoseconds,
+            )
+        }
+    }
+
+    fn supervised_run_governed(
+        request: &GovernedSupervisedRequest<'_>,
+        limits: &SupervisedLimits,
+        out: &mut [u8],
+    ) -> Result<SupervisedReport, GovernedSupervisedError> {
+        unsafe { supervised_run_governed_unauthorized(request, limits, out) }
+    }
 
     /// Sealing installs a seccomp filter that cannot be removed, so it runs in
     /// a child copy of this test binary. The parent only checks that the child

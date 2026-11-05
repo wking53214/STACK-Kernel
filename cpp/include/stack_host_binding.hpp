@@ -405,6 +405,16 @@ public:
     [[nodiscard]] const SeccompAuditRing<8192>& AuditRing() const noexcept { return audit_ring_; }
 
     /**
+     * D2-A: records that an authorized entry point was reached for `domain_id`
+     * with a capability digest whose derived 64-bit `label` is given. The label
+     * identifies an entry in this trail and nothing more; it is not a MAC and
+     * is not compared with anything.
+     */
+    void RecordAuthorizationLabel(uint64_t label, uint64_t domain_id) noexcept {
+        audit_ring_.Push(AuditEventType::AuthorizationBound, label, static_cast<uint32_t>(domain_id));
+    }
+
+    /**
      * The per-domain compute debt (I-03). The non-const accessor is for an
      * administrator that forgives or preloads debt; transactions charge it
      * themselves through ExecuteGovernedTransaction.

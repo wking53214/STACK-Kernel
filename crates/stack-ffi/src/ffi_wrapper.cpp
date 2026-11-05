@@ -161,6 +161,33 @@ static telemetry::SeccompAuditRing<1024> g_audit_ring;
 // Number of times the built-in governed payload has run (I-01: a completed
 // transaction must have run it; a refused one must not have).
 static std::atomic<uint64_t> g_payload_runs{0};
+// Number of supervised worker processes this host has spawned (a run whose
+// report has a child pid), by any entry point. A refusal that spawns nothing
+// leaves it unchanged; tests use it as the "worker never invoked" counter.
+static std::atomic<uint64_t> g_worker_spawns{0};
+
+// D2-A. The authorized entry points require a capability digest. An all-zero
+// digest (or a null pointer) names no authorization and is refused with
+// kAuthorizationRequired before anything else is looked at. ANY other 32 bytes
+// pass: the host cannot tell a real digest from a made-up one, because it holds
+// no trust set. This is an anti-misuse boundary for callers that go through the
+// Rust API (which can only obtain a digest from an AuthorizedAction), not a
+// defence against code in this process that calls these symbols directly.
+static constexpr int kAuthorizationRequired = -18;
+
+static bool DigestIsPresent(const uint8_t* digest) noexcept {
+    if (digest == nullptr) return false;
+    uint8_t any = 0;
+    for (std::size_t i = 0; i < 32; ++i) any |= digest[i];
+    return any != 0;
+}
+
+// The audit LABEL of a capability digest: its first 8 bytes, big endian.
+static uint64_t DigestLabel(const uint8_t* digest) noexcept {
+    uint64_t label = 0;
+    for (std::size_t i = 0; i < 8; ++i) label = (label << 8) | digest[i];
+    return label;
+}
 
 // The one-time process work. Runs on exactly one thread, the one that moved
 // the state to InProgress. The order matters: the two steps that can fail
@@ -296,7 +323,8 @@ int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t 
 //       nothing was consumed. Retry.
 // This is the in-process path: cooperative deadline, not isolation. A
 // payload that must be stopped goes through stack_supervised_run.
-int stack_execute_governed_transaction(
+static int ExecuteGovernedTransactionImpl(
+    const uint8_t* capability_digest,
     uint64_t context_id,
     uint64_t required_capability_bits,
     uint32_t required_tokens,
@@ -309,6 +337,10 @@ int stack_execute_governed_transaction(
     // Decision B: no implicit seal. The host's own ExecuteGovernedTransaction
     // would seal an unsealed caller; it is never reached from here unsealed.
     if (!host::SeccompFilterEngine::IsInstalledOnThisThread()) return -11;
+
+    // D2-A: an authorized call leaves its label in the audit trail before
+    // governance runs, so a refusal by governance is attributable too.
+    if (capability_digest != nullptr) g_host->RecordAuthorizationLabel(DigestLabel(capability_digest), context_id);
 
     // Build capability token with context
     host::CapabilityMask256 required_mask(required_capability_bits, 0, 0, 0);
@@ -344,6 +376,37 @@ int stack_execute_governed_transaction(
             return -3;
     }
     return -3;
+}
+
+int stack_execute_governed_transaction(
+    uint64_t context_id,
+    uint64_t required_capability_bits,
+    uint32_t required_tokens,
+    uint64_t deadline_budget_ticks,
+    uint64_t hard_timeout_nanoseconds)
+{
+    return ExecuteGovernedTransactionImpl(nullptr, context_id, required_capability_bits, required_tokens,
+                                          deadline_budget_ticks, hard_timeout_nanoseconds);
+}
+
+// D2-A. As stack_execute_governed_transaction, plus the digest (32 bytes) of the
+// capability that authorized the call. Return codes are those above, and:
+//  -18  capability_digest is null or all zero: no authorization is named.
+//       Nothing ran, nothing was consumed, nothing was audited.
+// Any other 32 bytes are accepted (see kAuthorizationRequired). On a call that
+// reaches governance the audit trail gains one AuthorizationBound event whose
+// label is derived from the digest.
+int stack_execute_governed_transaction_authorized(
+    const uint8_t* capability_digest,
+    uint64_t context_id,
+    uint64_t required_capability_bits,
+    uint32_t required_tokens,
+    uint64_t deadline_budget_ticks,
+    uint64_t hard_timeout_nanoseconds)
+{
+    if (!DigestIsPresent(capability_digest)) return kAuthorizationRequired;
+    return ExecuteGovernedTransactionImpl(capability_digest, context_id, required_capability_bits,
+                                          required_tokens, deadline_budget_ticks, hard_timeout_nanoseconds);
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +594,8 @@ int stack_supervised_run(
 // exec, so the worker image cannot be opened and the call is -14 with nothing
 // spawned and nothing consumed.
 // ---------------------------------------------------------------------------
-int stack_supervised_run_governed(
+static int SupervisedRunGovernedImpl(
+    const uint8_t* capability_digest,
     uint64_t context_id,
     uint64_t required_capability_m0,
     uint32_t required_tokens,
@@ -580,11 +644,16 @@ int stack_supervised_run_governed(
     host::CapabilityMask256 required_mask(required_capability_m0, 0, 0, 0);
     host::SIMDCapabilityToken token(context_id, required_mask);
 
+    // D2-A: an authorized call leaves its label in the audit trail before
+    // governance runs, so a refusal by governance is attributable too.
+    if (capability_digest != nullptr) g_host->RecordAuthorizationLabel(DigestLabel(capability_digest), context_id);
+
     supervised::ExecutionReport r{};
     auto governed = g_host->ExecuteGovernedSupervised(
         token, required_tokens, limits->wall_clock_deadline_ns,
         [&](supervised::CancelHandle& cancel) -> FfiHost::SupervisedRunResult {
             r = supervised::SupervisedExecutor::RunWorker(l, spec, out, out_capacity, &cancel);
+            if (r.child_pid != 0) g_worker_spawns.fetch_add(1, std::memory_order_relaxed);
             if (r.child_pid == 0) return FfiHost::SupervisedRunResult::NotSpawned;
             switch (r.outcome) {
                 case supervised::Outcome::Completed: return FfiHost::SupervisedRunResult::Completed;
@@ -612,6 +681,59 @@ int stack_supervised_run_governed(
     }
     FillReport(report, r);
     return 0;
+}
+
+int stack_supervised_run_governed(
+    uint64_t context_id,
+    uint64_t required_capability_m0,
+    uint32_t required_tokens,
+    uint32_t payload_kind,
+    const char* worker_path,
+    const uint8_t* worker_sha256,
+    const stack_supervised_limits* limits,
+    uint64_t reap_timeout_ns,
+    uint8_t* out,
+    size_t out_capacity,
+    stack_supervised_report* report)
+{
+    return SupervisedRunGovernedImpl(nullptr, context_id, required_capability_m0, required_tokens, payload_kind,
+                                     worker_path, worker_sha256, limits, reap_timeout_ns, out, out_capacity, report);
+}
+
+// D2-A. As stack_supervised_run_governed, plus the digest (32 bytes) of the
+// capability that authorized the run. Every return code above keeps its meaning, and:
+//  -18  capability_digest is null or all zero: no authorization is named. Nothing
+//       was checked, spawned, consumed or audited; the report is zeroed.
+// Any other 32 bytes are accepted: the host holds no trust set and cannot tell a
+// real digest from a made-up one (see kAuthorizationRequired). A call that reaches
+// governance adds one AuthorizationBound audit event (label = first 8 bytes of the
+// digest, big endian, context_id; the rate-limit domain in tokens) BEFORE the
+// governance checks, so refusals by governance are attributable too. The label is
+// not an integrity value; the full digest is recorded in the receipt.
+int stack_supervised_run_authorized(
+    const uint8_t* capability_digest,
+    uint64_t context_id,
+    uint64_t required_capability_m0,
+    uint32_t required_tokens,
+    uint32_t payload_kind,
+    const char* worker_path,
+    const uint8_t* worker_sha256,
+    const stack_supervised_limits* limits,
+    uint64_t reap_timeout_ns,
+    uint8_t* out,
+    size_t out_capacity,
+    stack_supervised_report* report)
+{
+    if (report) std::memset(report, 0, sizeof *report);
+    if (!DigestIsPresent(capability_digest)) return kAuthorizationRequired;
+    return SupervisedRunGovernedImpl(capability_digest, context_id, required_capability_m0, required_tokens,
+                                     payload_kind, worker_path, worker_sha256, limits, reap_timeout_ns, out,
+                                     out_capacity, report);
+}
+
+// Number of supervised worker processes this host has spawned, by any entry point.
+uint64_t stack_host_worker_spawn_count() {
+    return g_worker_spawns.load(std::memory_order_acquire);
 }
 
 // Computes the SHA-256 of the file at `path` into out[32], for provisioning

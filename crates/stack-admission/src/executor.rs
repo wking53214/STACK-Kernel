@@ -25,6 +25,8 @@ use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use stack_authority::AuthorizedAction;
+
 /// Longest wall-clock deadline the supervisor accepts: one hour.
 pub const MAX_DEADLINE_NS: u64 = 3_600_000_000_000;
 /// Largest result the supervisor accepts: 1 MiB.
@@ -296,6 +298,36 @@ pub trait Executor: Send + Sync + fmt::Debug {
         let _ = (kind, limits);
         None
     }
+
+    /// [`Self::run`] on behalf of the authorization `stack-authority` granted
+    /// (D2-A). The pipeline calls this and never `run`. The default ignores the
+    /// authorization and calls `run`, which is right for a test double and
+    /// wrong for an executor that reaches the host: [`SupervisedExecutor`]
+    /// refuses `run` and passes the authorization's capability digest to the
+    /// host here.
+    fn run_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<RunReport, ExecutorError> {
+        let _ = authorization;
+        self.run(kind, limits, args)
+    }
+
+    /// [`Self::run_authorized`] plus the facts the supervisor observed (D1-C).
+    /// The default is [`Self::run_observed`].
+    fn run_observed_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<ObservedRun, ExecutorError> {
+        let _ = authorization;
+        self.run_observed(kind, limits, args)
+    }
 }
 
 /// Everything the real executor needs from kernel configuration. None of it
@@ -465,21 +497,49 @@ impl Executor for SupervisedExecutor {
         })
     }
 
-    fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError> {
-        self.run_with_facts(kind, limits, args).map(|(report, _)| report)
+    /// Refused: the real executor runs only on behalf of an
+    /// [`AuthorizedAction`] (D2-A). Use [`Executor::run_authorized`].
+    fn run(&self, _kind: WorkerKind, _limits: &ExecutionLimits, _args: &[u8]) -> Result<RunReport, ExecutorError> {
+        Err(ExecutorError::Refused(NO_AUTHORIZATION.to_owned()))
     }
 
-    fn run_observed(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<ObservedRun, ExecutorError> {
-        self.run_with_facts(kind, limits, args).map(|(report, observed)| ObservedRun {
-            report,
-            observed: Some(observed),
-        })
+    /// Refused, as [`Self::run`].
+    fn run_observed(&self, _kind: WorkerKind, _limits: &ExecutionLimits, _args: &[u8]) -> Result<ObservedRun, ExecutorError> {
+        Err(ExecutorError::Refused(NO_AUTHORIZATION.to_owned()))
+    }
+
+    fn run_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<RunReport, ExecutorError> {
+        self.run_with_facts(authorization, kind, limits, args).map(|(report, _)| report)
+    }
+
+    fn run_observed_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<ObservedRun, ExecutorError> {
+        self.run_with_facts(authorization, kind, limits, args)
+            .map(|(report, observed)| ObservedRun {
+                report,
+                observed: Some(observed),
+            })
     }
 }
+
+/// Why [`SupervisedExecutor`] refuses the methods that name no authorization.
+const NO_AUTHORIZATION: &str = "the supervised executor runs only on behalf of an AuthorizedAction (run_authorized)";
 
 impl SupervisedExecutor {
     fn run_with_facts(
         &self,
+        authorization: &AuthorizedAction,
         kind: WorkerKind,
         limits: &ExecutionLimits,
         _args: &[u8],
@@ -504,7 +564,7 @@ impl SupervisedExecutor {
             worker_sha256: Some(self.worker_sha256),
             reap_timeout_ns: self.reap_timeout_ns,
         };
-        let report = stack_ffi::supervised_run_governed(&request, &ffi_limits, &mut out)
+        let report = stack_ffi::supervised_run_governed(authorization, &request, &ffi_limits, &mut out)
             .map_err(|e| ExecutorError::Refused(format!("{e:?}")))?;
         use stack_ffi::SupervisedOutcome as O;
         let outcome = match report.outcome {

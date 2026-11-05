@@ -82,6 +82,16 @@ target_compile_definitions(ffi_c_caller PRIVATE STACK_WORKER_PATH="$<TARGET_FILE
 target_link_libraries(ffi_c_caller PRIVATE stack_ffi_static)
 add_dependencies(ffi_c_caller stack_worker)
 
+# The authorized entry points (D2-A) called directly from C: zero digest refused,
+# a legitimate digest runs, a made-up non-zero digest is accepted (the pinned
+# non-guarantee), governance still enforced.
+add_executable(ffi_authorized_caller tests/ffi_authorized_caller.c)
+set_target_properties(ffi_authorized_caller PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON LINKER_LANGUAGE CXX)
+target_compile_options(ffi_authorized_caller PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(ffi_authorized_caller PRIVATE STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>")
+target_link_libraries(ffi_authorized_caller PRIVATE stack_ffi_static)
+add_dependencies(ffi_authorized_caller stack_worker)
+
 # Governed supervised runs through the shipped wrapper (R2-K-13): governance
 # before spawn, one audit event per outcome, refunds, revocation. Built with
 # STACK_SUPERVISED_TESTING for the ineffective-kill seam (inert until used).
@@ -122,6 +132,8 @@ add_test(NAME STACKFfiSupervised COMMAND ffi_supervised_tests)
 set_tests_properties(STACKFfiSupervised PROPERTIES TIMEOUT 300)
 add_test(NAME STACKFfiCCaller COMMAND ffi_c_caller)
 set_tests_properties(STACKFfiCCaller PROPERTIES TIMEOUT 120)
+add_test(NAME STACKFfiAuthorizedCaller COMMAND ffi_authorized_caller)
+set_tests_properties(STACKFfiAuthorizedCaller PROPERTIES TIMEOUT 120)
 add_test(NAME STACKFfiHost COMMAND stack_ffi_tests)
 set_tests_properties(STACKFfiHost PROPERTIES TIMEOUT 300)
 

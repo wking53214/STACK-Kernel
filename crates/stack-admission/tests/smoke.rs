@@ -4,6 +4,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::PathBuf;
 
 use stack_admission::{ExecutionLimits, Executor, RunOutcome, SupervisedExecutor, WorkerConfig, WorkerKind};
@@ -35,7 +37,7 @@ const SLACK_NS: u64 = 2_000_000_000;
 #[test]
 fn a_legitimate_worker_runs_to_completion_with_its_bytes() {
     let report = executor()
-        .run(WorkerKind::ReturnBytes, &ExecutionLimits::with_deadline_ns(DEADLINE_NS), b"")
+        .run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &ExecutionLimits::with_deadline_ns(DEADLINE_NS), b"")
         .expect("report");
     match &report.outcome {
         RunOutcome::Completed { exit_code, result } => {
@@ -51,7 +53,7 @@ fn a_legitimate_worker_runs_to_completion_with_its_bytes() {
 #[test]
 fn a_non_returning_worker_is_timed_out_not_completed() {
     let report = executor()
-        .run(WorkerKind::SpinForever, &ExecutionLimits::with_deadline_ns(DEADLINE_NS), b"")
+        .run_authorized(&common::authorization(), WorkerKind::SpinForever, &ExecutionLimits::with_deadline_ns(DEADLINE_NS), b"")
         .expect("report");
     assert_eq!(report.outcome, RunOutcome::TimedOut);
     assert!(report.deadline_fired);
@@ -62,7 +64,7 @@ fn a_non_returning_worker_is_timed_out_not_completed() {
 #[test]
 fn every_other_ending_is_reported_as_itself() {
     let limits = ExecutionLimits::with_deadline_ns(DEADLINE_NS);
-    let run = |k| executor().run(k, &limits, b"").expect("report").outcome;
+    let run = |k| executor().run_authorized(&common::authorization(), k, &limits, b"").expect("report").outcome;
     assert_eq!(run(WorkerKind::Crash), RunOutcome::Crashed { signal: 11 });
     assert_eq!(run(WorkerKind::Abort), RunOutcome::Crashed { signal: 6 });
     assert_eq!(run(WorkerKind::ExitNonZero), RunOutcome::ExitedNonZero { exit_code: 3 });
@@ -74,7 +76,7 @@ fn every_other_ending_is_reported_as_itself() {
     // spawned, so it is an Err from the executor, which the pipeline records
     // as Unknown, rather than an Ok report with an Unknown outcome.)
     assert!(matches!(
-        executor().run(WorkerKind::ReturnBytes, &zero, b""),
+        executor().run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &zero, b""),
         Err(stack_admission::ExecutorError::Refused(_))
     ));
 }

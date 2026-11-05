@@ -48,6 +48,12 @@ that existed before are unchanged. Additions and changes of meaning:
 | A2 | `stack_supervised_report.outcome` | NEW value 12 `TerminationUnconfirmed`. A caller that switched over the outcome and had a default arm now sees it there. |
 | A3 | `stack_supervised_run` | Unchanged signature and behaviour. Now documented LEGACY: its child is a fork of the caller, it makes no capability or rate-limit check and writes no audit event. Not for untrusted payloads. Nothing in this repository calls it except its own tests. R2-K-22: the C symbol is kept unchanged for ABI compatibility; the Rust wrapper `supervised_run` is now `pub unsafe fn` (with a `# Safety` section), so safe Rust can no longer reach it. Tested: `tests/api_surface.rs` (source guard: no safe public function reaches the symbol; `supervised_run` is `unsafe`) and a `compile_fail,E0133` doc test on `supervised_run`. |
 | A3 | host audit ring, `AuditEventType` | NEW values 5 `SupervisedCompleted`, 6 `SupervisedTimedOut`, 7 `SupervisedFailed`, 8 `SupervisedTerminationUnconfirmed`, appended so 0 to 4 keep their numbers. `stack_host_audit_read_slot` returns them. |
+| D2-A | `int stack_supervised_run_authorized(const uint8_t* capability_digest, <the arguments of stack_supervised_run_governed>)` | NEW. The digest (32 bytes) of the capability that authorized the run comes first. NULL or all zero is -18, checked before anything else: nothing is checked, spawned, consumed or audited and the report is zeroed. Every other code keeps its meaning. A call that reaches governance adds one `AuthorizationBound` audit event (below). Status: implemented, tested (`cpp/tests/ffi_authorized_caller.c`, ctest `STACKFfiAuthorizedCaller`; `tests/authorized_run.rs`). |
+| D2-A | `int stack_execute_governed_transaction_authorized(const uint8_t* capability_digest, <the arguments of stack_execute_governed_transaction>)` | NEW. As above for the in-process path; -18 for a NULL or all-zero digest. Status: implemented, tested (`ffi_authorized_caller.c`, on a sealed thread). |
+| D2-A | `uint64_t stack_host_worker_spawn_count(void)` | NEW. Supervised worker processes this host has spawned, by any entry point; the "worker never invoked" counter of the refusal tests. |
+| D2-A | host audit ring, `AuditEventType` | NEW value 10 `AuthorizationBound`, appended. `context_id` carries the capability LABEL (first 8 bytes of the digest, big endian), `tokens` the rate-limit domain. Recorded before the governance checks. The label is NOT an integrity value; the full digest lives in the receipt. |
+| D2-A | `stack_execute_governed_transaction`, `stack_supervised_run_governed` | Unchanged signatures and behaviour. They name no authorization: they are the RAW entry points, and the host cannot tell who asked. |
+| D2-A | Rust `execute_governed_transaction`, `supervised_run_governed` | BREAKING for Rust callers: the safe functions now take `authorization: &AuthorizedAction` (`stack-authority`) first and call the `_authorized` symbols. The old behaviour is `unsafe fn execute_governed_transaction_unauthorized` and `unsafe fn supervised_run_governed_unauthorized`. New: `capability_label`, `host_worker_spawn_count`, `HostAuditEvent::AuthorizationBound`, `TransactionError::AuthorizationRequired`, `GovernedSupervisedError::AuthorizationRequired`. New dependency edge `stack-ffi -> stack-authority` (stack-authority depends on no workspace crate: no cycle). Tested: `tests/api_surface.rs`, the `compile_fail` doc tests. |
 
 Test-only, present only when compiled with `-DSTACK_FFI_TESTING` (CMake
 `ffi_init_redteam`; never defined by `build.rs`):
@@ -101,6 +107,7 @@ Rust additions in `src/lib.rs`: `host_initialize`, `host_seal_current_thread`,
 | -11 | Calling thread not sealed. Nothing ran; the thread is untouched. |
 | -12 | Initialization failed (latched). Nothing ran. |
 | -13 | A capability change is pending. Nothing ran, nothing consumed. |
+| -18 | `stack_execute_governed_transaction_authorized` only: the capability digest is NULL or all zero (D2-A). Nothing ran, nothing consumed, nothing audited. |
 
 ## 2. Governance policy of the FFI host
 
@@ -493,6 +500,7 @@ What is now done (each statement names its test):
 | -15 | Other limits invalid (deadline above one hour, output above the buffer or 1 MiB, reap bound above a minute). |
 | -16 | `worker_sha256` is NULL. The digest of the worker image is required. Nothing spawned, nothing consumed. |
 | -17 | The image does not hash to `worker_sha256`. Nothing spawned; tokens taken for the call are refunded and one `SupervisedFailed` event with 0 tokens is written. |
+| -18 | `stack_supervised_run_authorized` only: the capability digest is NULL or all zero (D2-A). Nothing checked, spawned, consumed or audited. |
 
   While a worker runs the call counts as in flight. A capability change that
   is waiting TERMINATES it (R2-K-24, below) instead of waiting for it.

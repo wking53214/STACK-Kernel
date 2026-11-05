@@ -5,6 +5,16 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+# D2-A: the safe governed entry points take an `AuthorizedAction`, which only
+# `stack_authority::Authority::authorize` can mint. stack-authority depends on
+# nothing in this workspace, so the edge cannot make a cycle.
+stack-authority = { path = "../stack-authority" }
+
+[dev-dependencies]
+# TEST FIXTURE issuer only: tests stand in for the capability issuer that lives
+# outside the kernel. Nothing in src/ signs.
+ed25519-dalek.workspace = true
+sha2.workspace = true
 
 [build-dependencies]
 cc = "1.0"

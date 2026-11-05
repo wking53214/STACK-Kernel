@@ -1221,6 +1221,9 @@ name = "stack-ffi"
 version = "1.0.0"
 dependencies = [
  "cc",
+ "ed25519-dalek",
+ "sha2",
+ "stack-authority",
 ]
 
 [[package]]

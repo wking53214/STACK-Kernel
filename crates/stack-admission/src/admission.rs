@@ -393,15 +393,18 @@ pub trait CancellableExecutor: Executor {
         self.run(kind, limits, args)
     }
 
-    /// [`Self::run_cancellable`] plus the facts the supervisor observed
-    /// (D1-C). The default observes nothing.
+    /// [`Self::run_cancellable`] on behalf of the authorization `stack-authority`
+    /// granted (D2-A), plus the facts the supervisor observed (D1-C). The
+    /// default ignores the authorization and observes nothing.
     fn run_cancellable_observed(
         &self,
+        authorization: &AuthorizedAction,
         kind: WorkerKind,
         limits: &ExecutionLimits,
         args: &[u8],
         cancel: &CancelToken,
     ) -> Result<ObservedRun, ExecutorError> {
+        let _ = authorization;
         Ok(ObservedRun {
             report: self.run_cancellable(kind, limits, args, cancel)?,
             observed: None,
@@ -821,9 +824,9 @@ impl Admission {
         let run = if refused_before_spawn.is_some() {
             None
         } else if let Some(c) = &self.cancellable {
-            Some(c.run_cancellable_observed(kind, &self.policy.limits, &args, &cancel))
+            Some(c.run_cancellable_observed(&action, kind, &self.policy.limits, &args, &cancel))
         } else {
-            Some(self.executor.run_observed(kind, &self.policy.limits, &args))
+            Some(self.executor.run_observed_authorized(&action, kind, &self.policy.limits, &args))
         };
         drop(in_flight);
         let measured_ns = u64::try_from(wall.elapsed().as_nanos()).unwrap_or(u64::MAX);

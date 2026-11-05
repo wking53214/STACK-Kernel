@@ -7,6 +7,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
@@ -82,13 +84,13 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
     // The host's mask has never been set: the capability is not granted and
     // nothing runs.
     assert!(matches!(
-        executor.run(WorkerKind::ReturnBytes, &limits(), b""),
+        executor.run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &limits(), b""),
         Err(ExecutorError::Refused(m)) if m.contains("CapabilityDenied")
     ));
 
     // Granted: the run completes, and its bytes are what the worker said.
     stack_ffi::host_set_capabilities(0x01, 0, 0, 0).expect("grant");
-    let report = executor.run(WorkerKind::ReturnBytes, &limits(), b"").expect("report");
+    let report = executor.run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &limits(), b"").expect("report");
     match report.outcome {
         RunOutcome::Completed { exit_code: 0, ref result } => assert_eq!(result.as_slice(), RETURN_BYTES_RESULT),
         ref other => panic!("expected Completed, got {other:?}"),
@@ -97,7 +99,7 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
     // Revoked: refused again, with the worker not even looked at.
     stack_ffi::host_set_capabilities(0x04, 0, 0, 0).expect("revoke");
     assert!(matches!(
-        executor.run(WorkerKind::ReturnBytes, &limits(), b""),
+        executor.run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &limits(), b""),
         Err(ExecutorError::Refused(m)) if m.contains("CapabilityDenied")
     ));
     stack_ffi::host_set_capabilities(0x01, 0, 0, 0).expect("grant again");
@@ -110,7 +112,7 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
     let t0 = std::time::Instant::now();
     let mut served = 0u32;
     loop {
-        match pricey.run(WorkerKind::ReturnBytes, &limits(), b"") {
+        match pricey.run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &limits(), b"") {
             Ok(r) => {
                 assert!(matches!(r.outcome, RunOutcome::Completed { .. }));
                 served += 1;
@@ -135,13 +137,13 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
     std::fs::set_permissions(&swapped, std::fs::Permissions::from_mode(0o755)).unwrap();
     let pinned = SupervisedExecutor::new(config(swapped.clone())).expect("a copy of the worker, pinned");
     assert!(matches!(
-        pinned.run(WorkerKind::ReturnBytes, &limits(), b"").expect("report").outcome,
+        pinned.run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &limits(), b"").expect("report").outcome,
         RunOutcome::Completed { .. }
     ));
     std::fs::copy(std::path::Path::new("/usr/bin/true"), &swapped).unwrap();
     std::fs::set_permissions(&swapped, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(matches!(
-        pinned.run(WorkerKind::ReturnBytes, &limits(), b""),
+        pinned.run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &limits(), b""),
         Err(ExecutorError::Refused(m)) if m.contains("WorkerDigestMismatch")
     ));
     std::fs::remove_dir_all(&swap_dir).unwrap();
@@ -155,7 +157,7 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
         std::thread::spawn(move || {
             let mut slow = ExecutionLimits::with_deadline_ns(3_000_000_000);
             slow.max_output_bytes = 64;
-            spinner.run(WorkerKind::SpinForever, &slow, b"")
+            spinner.run_authorized(&common::authorization(), WorkerKind::SpinForever, &slow, b"")
         })
     };
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -166,7 +168,7 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
     assert_eq!(ended.outcome, RunOutcome::Terminated { signal: 9 });
     assert!(ended.elapsed_ns < 1_000_000_000, "terminated, not run to its deadline: {}", ended.elapsed_ns);
     assert!(matches!(
-        spinner.run(WorkerKind::ReturnBytes, &limits(), b""),
+        spinner.run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &limits(), b""),
         Err(ExecutorError::Refused(m)) if m.contains("CapabilityDenied")
     ));
     stack_ffi::host_set_capabilities(0x01, 0, 0, 0).expect("grant again");
@@ -174,7 +176,7 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
     // A timeout is a timeout, not a completion and not an error.
     let mut quick = ExecutionLimits::with_deadline_ns(150_000_000);
     quick.max_output_bytes = 64;
-    let report = executor.run(WorkerKind::SpinForever, &quick, b"").expect("report");
+    let report = executor.run_authorized(&common::authorization(), WorkerKind::SpinForever, &quick, b"").expect("report");
     assert_eq!(report.outcome, RunOutcome::TimedOut);
     assert!(report.elapsed_ns >= 150_000_000 && report.elapsed_ns <= 150_000_000 + 1_000_000_000);
     assert_eq!(stack_ffi::supervised_unconfirmed_count(), 0);

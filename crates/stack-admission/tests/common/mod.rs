@@ -20,7 +20,7 @@ use stack_admission::{
     SupervisedExecutor, WorkerConfig, WorkerKind,
 };
 use stack_authority::{
-    Capability, Digest32, FileUseStore, ManualClock, PublicKey, Purpose, ResourceScope, RevocationList, TrustAnchor,
+    ActionRequest, Authority, AuthorityConfig, AuthorizedAction, Capability, Digest32, FileUseStore, ManualClock, PublicKey, Purpose, ResourceScope, RevocationList, TrustAnchor,
     TrustSet, NONCE_BYTES,
 };
 use stack_receipt::{
@@ -238,6 +238,28 @@ impl Executor for CountingExecutor {
     fn run_observed(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<ObservedRun, ExecutorError> {
         self.note_run();
         self.inner.run_observed(kind, limits, args)
+    }
+
+    fn run_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<RunReport, ExecutorError> {
+        self.note_run();
+        self.inner.run_authorized(authorization, kind, limits, args)
+    }
+
+    fn run_observed_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<ObservedRun, ExecutorError> {
+        self.note_run();
+        self.inner.run_observed_authorized(authorization, kind, limits, args)
     }
 
     fn worker_binding(&self, kind: WorkerKind, limits: &ExecutionLimits) -> Option<stack_receipt::WorkerBinding> {
@@ -852,4 +874,37 @@ pub fn expected_worker_limits() -> stack_receipt::AppliedLimits {
 /// The spellings of a scope's unchecked items.
 pub fn not_checked(v: &LogVerification) -> Vec<&'static str> {
     v.scope.not_checked.iter().map(|l| l.as_str()).collect()
+}
+
+/// A real `AuthorizedAction`, minted by `Authority::authorize` from a capability
+/// the fixture issuer signed for `operation` on `RESOURCE`, against a
+/// non-durable use store (these callers need the type, not the store).
+pub fn authorization_for(operation: &str) -> AuthorizedAction {
+    let digest = Digest32::from_bytes(fixture_bytes32("authorization subject"));
+    let root = Digest32::from_bytes(fixture_bytes32("authorization root"));
+    let wire = CapSpec::for_digests(digest, root, operation, RESOURCE).issue();
+    let config = AuthorityConfig {
+        require_durable_use_store: false,
+        ..AuthorityConfig::new(KERNEL)
+    };
+    let authority = Authority::new(config, issuer_trust(), RevocationList::new(16)).unwrap();
+    let clock = ManualClock::new(T0 + 1);
+    authority
+        .authorize(
+            &wire,
+            &ActionRequest {
+                subject_digest: digest,
+                decision_root: root,
+                operation: operation.to_owned(),
+                resource: RESOURCE.to_owned(),
+            },
+            &clock,
+            &stack_authority::MemoryUseStore::new(16),
+        )
+        .unwrap()
+}
+
+/// [`authorization_for`] an arbitrary operation.
+pub fn authorization() -> AuthorizedAction {
+    authorization_for("echo")
 }
