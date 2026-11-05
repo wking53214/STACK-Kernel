@@ -333,6 +333,8 @@ pub struct Builder {
     receipt_log: Option<Box<dyn ReceiptLog>>,
     replay: Option<PathBuf>,
     uses: Option<PathBuf>,
+    replay_store: Option<Box<dyn stack_trident::ReplayStore>>,
+    use_store: Option<Box<dyn stack_authority::UseStore>>,
 }
 
 impl Builder {
@@ -347,7 +349,21 @@ impl Builder {
             receipt_log: None,
             replay: None,
             uses: None,
+            replay_store: None,
+            use_store: None,
         }
+    }
+
+    /// Uses this replay store instead of opening the file in the directory.
+    pub fn replay_store(mut self, store: Box<dyn stack_trident::ReplayStore>) -> Self {
+        self.replay_store = Some(store);
+        self
+    }
+
+    /// Uses this one-time-use store instead of opening the file in the directory.
+    pub fn use_store(mut self, store: Box<dyn stack_authority::UseStore>) -> Self {
+        self.use_store = Some(store);
+        self
     }
 
     /// A kernel restarting after another one that last read `previous_now`:
@@ -418,13 +434,20 @@ impl Builder {
                     .map_err(|e| BuildError::Recorder(e.into()))?,
             ),
         };
-        let replay_store = Box::new(
-            FileStore::open(self.replay.clone().unwrap_or_else(|| replay_path(&self.dir)))
-                .map_err(stack_trident::StartError::from)?,
-        );
-        let use_store = Box::new(
-            FileUseStore::open(self.uses.clone().unwrap_or_else(|| uses_path(&self.dir)), 1024).map_err(|_| BuildError::UseStoreNotDurable)?,
-        );
+        let replay_store: Box<dyn stack_trident::ReplayStore> = match self.replay_store {
+            Some(s) => s,
+            None => Box::new(
+                FileStore::open(self.replay.clone().unwrap_or_else(|| replay_path(&self.dir)))
+                    .map_err(stack_trident::StartError::from)?,
+            ),
+        };
+        let use_store: Box<dyn stack_authority::UseStore> = match self.use_store {
+            Some(s) => s,
+            None => Box::new(
+                FileUseStore::open(self.uses.clone().unwrap_or_else(|| uses_path(&self.dir)), 1024)
+                    .map_err(|_| BuildError::UseStoreNotDurable)?,
+            ),
+        };
         let parts = Parts {
             trident: self.trident,
             keyring: sender_ring(),

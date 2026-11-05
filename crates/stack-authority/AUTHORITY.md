@@ -75,6 +75,24 @@ is refused at every instant of its window (`adversarial::revoked_capability`).
 Distributing the trust set and the revocation list to every verifier is
 the operator's job. This crate consults only the copies it is given.
 
+Revocation after authorization (implemented, tested). `authorize` is a
+point-in-time decision. `Authority::revocation_epoch` is a monotonic
+counter that advances on every write access to the revocation list or the
+trust set; `Authority::recheck(&AuthorizedAction)` re-evaluates revocation
+by id and digest and the issuer key's presence and revocation, failing
+closed when either lock is poisoned; `Authority::set_change_hook` lets the
+enforcement layer run a re-check after each change
+(`revocation_epoch::*`). The key's validity window is not re-applied by
+`recheck`. Acting on a failed re-check (refusing before spawn, asking a
+running worker to stop) is the admission layer's job, see the
+`stack-admission` rustdoc (`CancellableExecutor`, `Admission::enforce_revocations`)
+and its tests (`stack-admission/tests/revocation.rs`: revoked between
+authorize and spawn, revoked while running, unrelated capability unaffected,
+unreadable revocation list fails closed). Implemented and tested with a test
+executor; [limitation] the FFI `SupervisedExecutor` does not yet implement
+the stop hook, so a signed capability revoked mid-run does not stop a real
+worker.
+
 ## 3. Wire format, `stack-capability/1`
 
 Big-endian integers; `u16`-length-prefixed UTF-8 strings with no control
@@ -198,6 +216,49 @@ store to run with (`store::corruption_fails_closed_on_open`,
 poisons the store until it is reopened (not reached by a test: no I/O
 fault injection exists here). Uses survive a reopen and a second verifier
 process over the same log (`adversarial::replay_after_restart`).
+
+### Supported topology
+
+Labels: [tested] means a named test reproduces it on the real `FileUseStore`;
+[not supported] means no claim is made and nothing is tested.
+
+* **Single process** [tested]. Any number of threads share one store;
+  a one-time capability is authorized exactly once
+  (`store::concurrent_consumption_is_accepted_exactly_once`,
+  `adversarial::concurrent_consumption_by_many_threads_accepted_exactly_once`).
+* **Several processes on ONE host, one at a time** [tested]. The store holds
+  an exclusive advisory file lock (`File::try_lock`) for its whole life, so
+  processes on the same host and the same local file system take turns: the
+  process that does not hold the lock fails to open and has no store, so it
+  denies. Two real processes racing one one-time capability yield exactly one
+  authorization, the other is denied as locked or as a replay
+  (`store_failure_modes::two_processes_race_one_one_time_capability_exactly_one_is_authorized`).
+  After the winner exits, a later process refuses the capability as a replay
+  (same test). A process killed after the commit has still consumed the
+  capability (`store_failure_modes::lost_ack_real_process_aborts_after_the_commit_and_the_retry_is_a_replay`).
+  This is mutual exclusion on one machine. It is not concurrent sharing: there
+  is never more than one active user of a log.
+* **Multiple hosts** [not supported]. There is no replication, no shared
+  store and no distributed consensus here, and the file lock is not one: it
+  is a local operating-system lock. Two hosts with separate logs each accept
+  a one-time capability once. A log on a network file system is not tested
+  and not claimed. [BLOCKED: no multi-host environment exists to test in.]
+
+Failure behavior, each reproduced on the real store:
+a use committed but never acknowledged stays consumed
+(`store_failure_modes::lost_ack_in_process_the_use_is_committed_and_the_retry_is_a_replay`);
+a record present twice fails closed on open
+(`a_record_appended_twice_byte_for_byte_fails_closed_on_open`,
+`a_record_replacing_its_neighbour_byte_for_byte_fails_closed_on_open`);
+rollback to a prior valid state is NOT detected from the file, and a use
+forgotten by the rollback can then be consumed again; it IS detected by
+comparing `FileUseStore::head()` with a head recorded elsewhere
+(`rollback_to_a_prior_state_is_not_detected_from_the_file_and_is_detected_against_an_external_head`);
+storage unavailable at open, or lost while running, denies
+(`real_unavailable_storage_at_open_fails_closed`,
+`storage_lost_mid_run_denies_and_the_failed_attempt_consumes_nothing`; the
+mid-run failure is injected by a wrapper over the real store, because no
+real write fault can be provoked here).
 
 ## 6. HMAC in stack-trident versus Ed25519 here
 

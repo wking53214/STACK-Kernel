@@ -309,6 +309,38 @@ content. Reject: `log_corrupt`, `sequence_gap`, `prev_hash_mismatch`,
 | receipt generation fails after Attempted | `a_receipt_generation_failure_leaves_an_incomplete_unknown_execution` | INCOMPLETE `unknown` |
 | kernel SIGKILLed between Attempted and terminal | `log::a_process_killed_between_attempted_and_terminal_leaves_the_attempt_open` | INCOMPLETE `unknown` |
 
+## 5a. Supported topology
+
+[tested] unless marked.
+
+* **Single process.** One recorder owns the log and appends in order.
+* **Several processes on ONE host, one at a time.** `FileReceiptLog` holds an
+  exclusive advisory lock for its life; a second process fails at open with
+  `LogError::Locked` and so cannot write. Two real processes opening one log:
+  exactly one holds it
+  (`log_failure_modes::two_processes_open_one_log_exactly_one_holds_it`).
+  A local operating-system lock on one machine: not concurrent writing, not
+  distributed consensus.
+* **Multiple hosts** [not supported]. No replication, no shared log, no
+  consensus. [BLOCKED: no multi-host environment to test in.]
+
+A process that dies after `Attempted` is written leaves the attempt open and
+the verifier reports INCOMPLETE with an unknown outcome, never success
+(`log_failure_modes::attempt_written_and_the_process_aborts_is_incomplete_never_success`,
+`attempt_written_and_the_handle_dropped_is_incomplete_never_success`, and
+`log::a_process_killed_between_attempted_and_terminal_leaves_the_attempt_open`).
+A frame present twice fails closed on open
+(`a_frame_appended_twice_byte_for_byte_fails_closed_on_open`,
+`a_frame_inserted_twice_inside_the_committed_chain_fails_closed_on_open`).
+Rollback to an earlier valid state is not detected from the file: the
+verifier sees a crash (INCOMPLETE) and lists
+`log_rollback_not_detectable_without_anchor`; comparing `head()` with a head
+recorded elsewhere detects it
+(`rollback_to_an_earlier_state_reads_as_a_crash_and_is_detected_only_against_an_external_head`).
+Unavailable storage at open fails closed
+(`real_unavailable_storage_at_open_fails_closed`); a failing append mid-run is
+tested through a failing log wrapper at the trait (see section 6).
+
 ## 6. Limitations, stated
 
 * One receipt key per kernel at a time; rotation is two overlapping
