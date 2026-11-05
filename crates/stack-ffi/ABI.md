@@ -374,6 +374,28 @@ What is now done (each statement names its test):
   reaped it reports `TerminationUnconfirmed`, never a success, keeps the pid and
   pidfd in a table of 64, and every later run first re-kills and reaps them and
   refuses to spawn when the table is full (`SupervisorError`, errno `EBUSY`).
+  R2-K-23: the slot is RESERVED before the fork, so a worker is never spawned
+  that could not be tracked, and the check and the tracking can no longer
+  race (four runs racing for one free slot: one spawns, three are refused
+  `EBUSY` with nothing forked; before, all four forked and three were
+  untracked). A reservation is held for the whole run and given back when the
+  run ends, so at most 64 runs (in progress plus unconfirmed) exist at once; a
+  65th concurrent run is refused `EBUSY`. Behaviour change: that is a cap on
+  concurrent supervised runs per process that did not exist before.
+  A worker is signaled and reaped only through its pidfd (`pidfd_send_signal`,
+  `waitid(P_PIDFD)`): a worker reaped elsewhere (a SIGCHLD handler, a
+  `waitpid(-1)`) answers ESRCH/ECHILD and is forgotten, and its pid number, which
+  may by then belong to someone else, is never signaled or waited on. The
+  process group is signaled only while the worker is checked alive and
+  unreaped. On a kernel without pidfd (older than 5.3) the old by-number
+  behaviour remains for a run in progress, and a tracked unconfirmed worker is
+  reaped by number but not re-signaled; that path is tested only by the
+  existing fallback test, not for reuse. Tests (real pid reuse, produced by
+  setting `ns_last_pid`, which needs root): "a worker reaped elsewhere cannot
+  make the supervisor kill or reap whoever now holds its pid", "a tracked
+  unconfirmed worker reaped elsewhere is forgotten, not signaled by number", "the
+  tracking slot is reserved before the fork", "a run that completes gives its
+  reserved slot back" (`worker_reap_tests.cpp`, ctest `STACKWorkerReap`).
   The test seam that simulates an ineffective kill exists only when
   `-DSTACK_SUPERVISED_TESTING` is defined (CMake targets `stack_worker_reap_tests`
   and `ffi_supervised_tests`); it is in no shipped build. Tests: `STACKWorkerReap`

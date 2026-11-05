@@ -113,6 +113,16 @@ tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
   into the same inode between open and exec would run, and a non-worker program
   would run with no seccomp filter (the worker installs its own). That mode is
   for callers who accept it; it is not what the FFI offers.
+- Pid reuse and the tracking table (R2-K-23; implemented and tested in
+  `worker_reap_tests.cpp`, root needed for the reuse tests). With a pidfd the
+  supervisor signals and reaps the worker only through the descriptor, never by
+  a pid number that may have been reused after someone else reaped the worker;
+  a worker that is gone answers ESRCH/ECHILD and is forgotten. The process group
+  is signaled only while the worker is checked alive and unreaped. The tracking
+  slot for a worker that might go unconfirmed is reserved BEFORE the fork, and a
+  full table is a refusal (`EBUSY`), not a silent drop; the cost is a cap of 64
+  runs in progress plus unconfirmed. Without pidfd support (older than Linux 5.3)
+  the by-number behaviour remains for a run in progress.
 - The wait after SIGKILL is bounded (`reap_timeout_ns`, default 2 s). A worker
   that is not reaped in time is `TerminationUnconfirmed`: never a success, still
   tracked (`UnconfirmedCount`, `ReapUnconfirmed`).

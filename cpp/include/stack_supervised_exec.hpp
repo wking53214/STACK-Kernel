@@ -79,6 +79,9 @@
  *     the effective user, the child sets PR_SET_NO_NEW_PRIVS before the exec, and
  *     WorkerSpec::expected_sha256 pins the image: the bytes read through the opened
  *     descriptor are hashed and a sealed memfd copy of those bytes is what executes.
+ *   - With a pidfd the child is signaled and reaped only through it (pidfd_send_signal,
+ *     waitid(P_PIDFD)), never by a pid number another process may have reused; the
+ *     tracking slot for an unconfirmed child is reserved before the fork (R2-K-23).
  *   - Otherwise the child is reaped and both parent-side descriptors are
  *     closed, on every path. There is no heap allocation in the parent; the
  *     result goes into the caller's buffer.
@@ -311,8 +314,12 @@ public:
         }
         const uint64_t t0 = MonotonicNs();
         const uint64_t deadline = t0 + limits.wall_clock_deadline_ns;
-        if (ReapUnconfirmed() >= kMaxUnconfirmedChildren) {
-            // Too many children whose death was never confirmed: spawn no more.
+        // A tracking slot is reserved BEFORE anything is forked (R2-K-23): a worker is
+        // never spawned that could not be tracked if its death went unconfirmed. A full
+        // table is a refusal, not a silent drop.
+        (void)ReapUnconfirmed();
+        SlotGuard slot{ReserveSlot()};
+        if (slot.index < 0) {
             report.outcome = Outcome::SupervisorError;
             report.error_number = EBUSY;
             return report;
@@ -351,7 +358,7 @@ public:
         // Parent.
         report.child_pid = pid;
         pipe_w.Close();
-        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity);
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity, slot);
         return report;
     }
 
@@ -381,8 +388,10 @@ public:
         }
         const uint64_t t0 = MonotonicNs();
         const uint64_t deadline = t0 + limits.wall_clock_deadline_ns;
-        if (ReapUnconfirmed() >= kMaxUnconfirmedChildren) {
-            // Too many children whose death was never confirmed: spawn no more.
+        // Reserve the tracking slot before the fork (see RunThunk).
+        (void)ReapUnconfirmed();
+        SlotGuard slot{ReserveSlot()};
+        if (slot.index < 0) {
             report.outcome = Outcome::SupervisorError;
             report.error_number = EBUSY;
             return report;
@@ -441,7 +450,7 @@ public:
         report.child_pid = pid;
         pipe_w.Close();
         image.Close();
-        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity);
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity, slot);
         return report;
     }
 
@@ -511,13 +520,14 @@ public:
 private:
     struct FdGuard;
     struct FrameParser;
+    struct SlotGuard;
 
     // The parent half of a run, shared by the fork-of-caller path and the
     // worker path: watch the child until it exits or the deadline passes,
     // kill it, reap it, and classify what was seen. pipe_r is the read end of
     // the result pipe (the write end is already closed here).
     static void Supervise(ExecutionReport& report, const Limits& limits, pid_t pid, FdGuard& pipe_r, uint64_t t0,
-                          uint64_t deadline, uint8_t* result, std::size_t result_capacity) noexcept {
+                          uint64_t deadline, uint8_t* result, std::size_t result_capacity, SlotGuard& slot) noexcept {
         (void)::setpgid(pid, pid);  // the child does the same; whichever runs first wins
         (void)::fcntl(pipe_r.fd, F_SETFL, O_NONBLOCK);
         FdGuard pidfd{PidfdOpen(pid)};
@@ -610,7 +620,7 @@ private:
                 // SIGKILL did not take effect in time. The child may still be
                 // running: say so, keep tracking it, report no success.
                 KillChild(pid, pidfd.fd);
-                TrackUnconfirmed(pid, pidfd);
+                TrackUnconfirmed(slot, pid, pidfd);
                 report.outcome = Outcome::TerminationUnconfirmed;
                 report.error_number = ETIMEDOUT;
                 report.elapsed_ns = MonotonicNs() - t0;
@@ -643,16 +653,46 @@ private:
     // Bounded reap and the children that could not be confirmed dead.
     // ------------------------------------------------------------------
 
-    // Waits for pid to be reaped, at most bound_ns, re-sending SIGKILL every
+    // waitid(P_PIDFD) is called by number so no glibc newer than the kernel's is needed.
+    static constexpr long kPidfdIdType = 3;  // P_PIDFD
+
+    // Reaps the child if it has ended, without blocking. With a pidfd the wait is on THAT
+    // process and no other (R2-K-23): a pid number that was reaped elsewhere and reused can
+    // never be reaped here. Returns 1 reaped (status set), 0 still running, -1 error with
+    // errno set (ECHILD: it is gone, reaped by someone else; its status is unknown). Without a
+    // pidfd (kernel older than 5.3) it falls back to waitpid on the number, which is only
+    // correct while nothing else reaps children of this process.
+    [[nodiscard]] static int TryReap(pid_t pid, int pidfd, int& status) noexcept {
+#ifdef __NR_waitid
+        if (pidfd >= 0) {
+            siginfo_t info{};
+            const long r = ::syscall(__NR_waitid, kPidfdIdType, pidfd, &info, WEXITED | WNOHANG, nullptr);
+            if (r < 0) return errno == EINTR ? 0 : -1;
+            if (info.si_pid == 0) return 0;
+            const int code = info.si_status;
+            if (info.si_code == CLD_EXITED) status = (code & 0xff) << 8;
+            else if (info.si_code == CLD_KILLED) status = code & 0x7f;
+            else if (info.si_code == CLD_DUMPED) status = (code & 0x7f) | 0x80;
+            else return 0;
+            return 1;
+        }
+#endif
+        const pid_t w = ::waitpid(pid, &status, WNOHANG);
+        if (w == pid) return 1;
+        if (w < 0 && errno != EINTR) return -1;
+        return 0;
+    }
+
+    // Waits for the child to be reaped, at most bound_ns, re-sending SIGKILL every
     // 100 ms while it waits (when `resend`). Returns 1 reaped (status set),
-    // 0 not reaped in time, -1 waitpid failed (errno set).
+    // 0 not reaped in time, -1 the wait failed (errno set; ECHILD means it was reaped
+    // elsewhere).
     [[nodiscard]] static int ReapBounded(pid_t pid, int pidfd, uint64_t bound_ns, int& status, bool resend) noexcept {
         const uint64_t end = MonotonicNs() + bound_ns;
         uint64_t next_kill = MonotonicNs() + 100'000'000ULL;
         for (;;) {
-            const pid_t w = ::waitpid(pid, &status, WNOHANG);
-            if (w == pid) return 1;
-            if (w < 0 && errno != EINTR) return -1;
+            const int w = TryReap(pid, pidfd, status);
+            if (w != 0) return w;
             const uint64_t now = MonotonicNs();
             if (now >= end) return 0;
             if (resend && now >= next_kill) {
@@ -671,23 +711,46 @@ private:
         }
     }
 
-    // Slot states in unconfirmed_pid_: 0 free, > 0 a tracked pid, kSlotBusy being edited.
+    // Slot states in unconfirmed_pid_: 0 free, > 0 a tracked pid (a worker whose death was not
+    // confirmed), kSlotBusy being edited, kSlotReserved held by a run in progress (R2-K-23).
     static constexpr pid_t kSlotBusy = -2;
+    static constexpr pid_t kSlotReserved = -3;
     static inline std::atomic<pid_t> unconfirmed_pid_[kMaxUnconfirmedChildren]{};
     static inline int unconfirmed_fd_[kMaxUnconfirmedChildren]{};
 
-    // Takes over the pidfd (the guard no longer closes it). If every slot is
-    // taken the pid is untracked (callers refuse new runs before that happens).
-    static void TrackUnconfirmed(pid_t pid, FdGuard& pidfd) noexcept {
+    // Reserves a free slot for a run about to fork. Returns its index, or -1 when every slot is
+    // taken (tracked or reserved): the run is refused, it does not spawn untracked.
+    [[nodiscard]] static int ReserveSlot() noexcept {
         for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
             pid_t expected = 0;
-            if (unconfirmed_pid_[i].compare_exchange_strong(expected, kSlotBusy, std::memory_order_acq_rel)) {
-                unconfirmed_fd_[i] = pidfd.fd;
-                pidfd.fd = -1;
-                unconfirmed_pid_[i].store(pid, std::memory_order_release);
-                return;
+            if (unconfirmed_pid_[i].compare_exchange_strong(expected, kSlotReserved, std::memory_order_acq_rel)) {
+                unconfirmed_fd_[i] = -1;
+                return static_cast<int>(i);
             }
         }
+        return -1;
+    }
+
+    // Holds a reservation for the life of a run; gives it back unless the run handed it to a
+    // tracked pid.
+    struct SlotGuard {
+        int index;
+        explicit SlotGuard(int i) noexcept : index(i) {}
+        SlotGuard(const SlotGuard&) = delete;
+        SlotGuard& operator=(const SlotGuard&) = delete;
+        ~SlotGuard() noexcept {
+            if (index >= 0) unconfirmed_pid_[static_cast<std::size_t>(index)].store(0, std::memory_order_release);
+        }
+    };
+
+    // Moves the reserved slot to the tracked pid and takes over the pidfd (the guard no longer
+    // closes it). Cannot fail: the slot was reserved before the fork.
+    static void TrackUnconfirmed(SlotGuard& slot, pid_t pid, FdGuard& pidfd) noexcept {
+        const std::size_t i = static_cast<std::size_t>(slot.index);
+        unconfirmed_fd_[i] = pidfd.fd;
+        pidfd.fd = -1;
+        unconfirmed_pid_[i].store(pid, std::memory_order_release);
+        slot.index = -1;
     }
 
 public:
@@ -695,7 +758,7 @@ public:
     [[nodiscard]] static std::size_t UnconfirmedCount() noexcept {
         std::size_t n = 0;
         for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
-            if (unconfirmed_pid_[i].load(std::memory_order_acquire) != 0) ++n;
+            if (unconfirmed_pid_[i].load(std::memory_order_acquire) > 0) ++n;
         }
         return n;
     }
@@ -704,6 +767,11 @@ public:
      * Re-sends SIGKILL to each tracked child that is still there and reaps the
      * ones that have gone. Returns how many remain unconfirmed. Called at the
      * start of every run; a monitor may call it too.
+     *
+     * A tracked child is reached only through its pidfd (R2-K-23): a child that was reaped
+     * elsewhere (ECHILD, or ESRCH on the signal) is forgotten and its number is never signaled
+     * or waited on, so a pid that has been reused cannot be hit. A tracked child with no pidfd
+     * (kernel older than 5.3) is reaped by number but never re-signaled.
      */
     static std::size_t ReapUnconfirmed() noexcept {
         for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
@@ -711,13 +779,14 @@ public:
             if (p <= 0) continue;
             if (!unconfirmed_pid_[i].compare_exchange_strong(p, kSlotBusy, std::memory_order_acq_rel)) continue;
             int status = 0;
-            const pid_t w = ::waitpid(p, &status, WNOHANG);
-            if (w == p || (w < 0 && errno == ECHILD)) {
-                if (unconfirmed_fd_[i] >= 0) ::close(unconfirmed_fd_[i]);
+            const int fd = unconfirmed_fd_[i];
+            const int rc = TryReap(p, fd, status);
+            if (rc == 1 || (rc < 0 && errno == ECHILD)) {
+                if (fd >= 0) ::close(fd);
                 unconfirmed_fd_[i] = -1;
                 unconfirmed_pid_[i].store(0, std::memory_order_release);
             } else {
-                KillChild(p, unconfirmed_fd_[i]);
+                if (fd >= 0) KillChild(p, fd);
                 unconfirmed_pid_[i].store(p, std::memory_order_release);
             }
         }
@@ -865,10 +934,20 @@ private:
 #endif
     }
 
-    // Only called while the child is not yet reaped, so its pid (and its
-    // process group, which the child leads) cannot have been reused. With a
-    // pidfd the child itself is signaled through the descriptor, which names
-    // that process and no other.
+    // Sends SIGKILL to the child (R2-K-23).
+    //
+    // With a pidfd the signal goes ONLY through the descriptor, which names that process and
+    // no other: if the process is gone (reaped elsewhere) the kernel answers ESRCH and nothing
+    // is signaled. The child's process group is signaled by number only while the child is
+    // checked alive and unreaped (waitid on the pidfd with WNOHANG|WNOWAIT answers "no state
+    // change"); a child that has exited, or was reaped, gets no group signal, because a pid
+    // number is reusable once reaped. The check and the group signal are two calls: the
+    // window between them is the time another thread would need to reap the child AND have
+    // its number reused, and the filter denies the worker any descendant, so the group signal
+    // is defense in depth, not the kill.
+    //
+    // Without a pidfd (kernel older than 5.3) the child is signaled by number, as before: the
+    // caller has not reaped it and nothing else is assumed to.
 #ifdef STACK_SUPERVISED_TESTING
     static inline KillHook kill_hook_ = nullptr;
 #endif
@@ -879,9 +958,25 @@ private:
 #ifdef STACK_SUPERVISED_TESTING
         if (kill_hook_ != nullptr && kill_hook_(pid, pidfd)) return;
 #endif
+        if (pidfd >= 0) {
+            if (ChildIsAliveAndUnreaped(pidfd)) (void)::kill(-pid, SIGKILL);
+            (void)PidfdSendKill(pidfd);  // ESRCH: already gone
+            return;
+        }
         (void)::kill(-pid, SIGKILL);
-        if (pidfd >= 0 && PidfdSendKill(pidfd)) return;
         (void)::kill(pid, SIGKILL);
+    }
+
+    // True when the process behind pidfd exists, has not exited and has not been reaped.
+    [[nodiscard]] static bool ChildIsAliveAndUnreaped(int pidfd) noexcept {
+#ifdef __NR_waitid
+        siginfo_t info{};
+        const long r = ::syscall(__NR_waitid, kPidfdIdType, pidfd, &info, WEXITED | WNOHANG | WNOWAIT, nullptr);
+        return r == 0 && info.si_pid == 0;
+#else
+        (void)pidfd;
+        return false;
+#endif
     }
 
     [[nodiscard]] static bool PidfdSendKill(int pidfd) noexcept {
