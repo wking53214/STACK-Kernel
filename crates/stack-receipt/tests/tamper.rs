@@ -53,6 +53,7 @@ fn verify_full(chain: &[SignedRecord]) -> Verification {
             audience: Some("kernel-1"),
             kernel_id: Some("kernel-1"),
             result_bytes: Some(result_bytes()),
+            ..Expectations::default()
         },
     )
 }

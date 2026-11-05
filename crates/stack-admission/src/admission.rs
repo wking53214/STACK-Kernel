@@ -15,8 +15,11 @@
 //! about a subject, so nothing is written and `Refused::recorded` is
 //! false.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use stack_authority::{
@@ -37,7 +40,7 @@ use stack_trident::{
 use crate::binding::{self, BindingFinding};
 use crate::clock::KernelClock;
 use crate::config::{ConfigError, KernelPolicy};
-use crate::executor::{Executor, RunOutcome, WorkerKind};
+use crate::executor::{ExecutionLimits, Executor, ExecutorError, ObservedRun, RunOutcome, RunReport, WorkerKind};
 use crate::payload::{self, PayloadError};
 
 /// What the operator hands the kernel to build its boundaries from. Every
@@ -327,6 +330,147 @@ impl AdmissionResult {
     }
 }
 
+/// A cooperative request to stop one run. The admission layer cancels the
+/// token of every in-flight run whose permission no longer stands; an
+/// executor that honours it stops the worker and reports how it ended. The
+/// token latches: a cancel that arrives before the executor starts is
+/// still seen.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(Arc<(Mutex<bool>, Condvar)>);
+
+impl CancelToken {
+    /// A token that has not been cancelled.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Latches the request and wakes every waiter.
+    pub fn cancel(&self) {
+        let mut flag = self.0 .0.lock().unwrap_or_else(PoisonError::into_inner);
+        *flag = true;
+        self.0 .1.notify_all();
+    }
+
+    /// Whether a cancel was requested.
+    pub fn is_cancelled(&self) -> bool {
+        *self.0 .0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits up to `timeout` for a cancel; returns whether one arrived.
+    pub fn wait_cancelled(&self, timeout: Duration) -> bool {
+        let guard = self.0 .0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (guard, _) = self
+            .0
+             .1
+            .wait_timeout_while(guard, timeout, |cancelled| !*cancelled)
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard
+    }
+}
+
+/// An [`Executor`] that can be asked to stop a run in progress. The default
+/// ignores the token, which is the honest state of an executor with no way
+/// to stop a worker: the run goes on and its real outcome is recorded.
+///
+/// The hook lives here and not on [`Executor`] itself. Implemented and tested
+/// for test executors and for `SupervisedExecutor` (the FFI worker): a cancel
+/// asks the host, by run id, to SIGKILL the real worker through its pidfd, so a
+/// signed capability revoked mid-run ends the run as `Terminated` (never a
+/// success) within a bounded time (`tests/revocation_real_worker.rs`). Use
+/// [`Admission::with_cancellable_executor`] to install one.
+pub trait CancellableExecutor: Executor {
+    /// As [`Executor::run`], stopping the worker and returning a
+    /// non-success outcome (for example `Terminated`) once `cancel` fires.
+    fn run_cancellable(
+        &self,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+        cancel: &CancelToken,
+    ) -> Result<RunReport, ExecutorError> {
+        let _ = cancel;
+        self.run(kind, limits, args)
+    }
+
+    /// [`Self::run_cancellable`] on behalf of the authorization `stack-authority`
+    /// granted (D2-A), plus the facts the supervisor observed (D1-C). The
+    /// default ignores the authorization and observes nothing.
+    fn run_cancellable_observed(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+        cancel: &CancelToken,
+    ) -> Result<ObservedRun, ExecutorError> {
+        let _ = authorization;
+        Ok(ObservedRun {
+            report: self.run_cancellable(kind, limits, args, cancel)?,
+            observed: None,
+        })
+    }
+}
+
+/// One run between the attempt record and its terminal record.
+#[derive(Debug)]
+struct InFlight {
+    action: AuthorizedAction,
+    cancel: CancelToken,
+}
+
+/// The runs currently executing, so a revocation can find them.
+#[derive(Debug, Default)]
+struct InFlightRegistry {
+    next: AtomicU64,
+    runs: Mutex<HashMap<u64, InFlight>>,
+}
+
+impl InFlightRegistry {
+    fn add(self: &Arc<Self>, action: AuthorizedAction, cancel: CancelToken) -> InFlightGuard {
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        self.runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, InFlight { action, cancel });
+        InFlightGuard {
+            registry: Arc::clone(self),
+            id,
+        }
+    }
+
+    /// Re-checks every in-flight run against `authority` and cancels each
+    /// whose permission no longer stands, for any reason (a failed
+    /// re-check, including an unreadable trust state, cancels). Returns how
+    /// many it cancelled.
+    fn enforce(&self, authority: &Authority) -> usize {
+        let runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut cancelled = 0;
+        for run in runs.values() {
+            if authority.recheck(&run.action).is_err() {
+                run.cancel.cancel();
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+}
+
+/// Removes its run from the registry when dropped.
+struct InFlightGuard {
+    registry: Arc<InFlightRegistry>,
+    id: u64,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.registry
+            .runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.id);
+    }
+}
+
 /// The kernel's admission boundary.
 #[derive(Debug)]
 pub struct Admission {
@@ -337,6 +481,8 @@ pub struct Admission {
     use_store: Box<dyn UseStore>,
     recorder: Recorder,
     executor: Box<dyn Executor>,
+    cancellable: Option<Box<dyn CancellableExecutor>>,
+    registry: Arc<InFlightRegistry>,
     clock: Arc<dyn Clock>,
 }
 
@@ -398,6 +544,11 @@ impl Admission {
             policy.provenance.clone(),
             Box::new(KernelClock::new(Arc::clone(&clock))),
         )?;
+        let registry = Arc::new(InFlightRegistry::default());
+        let hook_registry = Arc::clone(&registry);
+        authority.set_change_hook(move |a| {
+            hook_registry.enforce(a);
+        });
         Ok(Self {
             policy,
             limits,
@@ -406,8 +557,33 @@ impl Admission {
             use_store: parts.use_store,
             recorder,
             executor: parts.executor,
+            cancellable: None,
+            registry,
             clock,
         })
+    }
+
+    /// Runs workers through `executor` instead of the one in [`Parts`], so
+    /// that a run can be stopped when its capability is revoked. See
+    /// [`CancellableExecutor`] for what is and is not implemented.
+    #[must_use]
+    pub fn with_cancellable_executor(mut self, executor: Box<dyn CancellableExecutor>) -> Self {
+        self.cancellable = Some(executor);
+        self
+    }
+
+    /// Re-checks every run in flight now and asks each one whose
+    /// permission no longer stands to stop. Called automatically after any
+    /// change made through [`Admission::authority`]; public for an operator
+    /// who restored state by other means. Returns how many runs it asked
+    /// to stop.
+    pub fn enforce_revocations(&self) -> usize {
+        self.registry.enforce(&self.authority)
+    }
+
+    /// How many runs are between their attempt record and their terminal.
+    pub fn in_flight(&self) -> usize {
+        self.registry.runs.lock().unwrap_or_else(PoisonError::into_inner).len()
     }
 
     /// The policy.
@@ -509,7 +685,7 @@ impl Admission {
                 nonce: *handoff.nonce.as_bytes(),
                 assurance: Assurance::Production,
             }),
-            native_digest: None,
+            native_digest: request.native_digest.clone(),
         };
         let exec = self
             .recorder
@@ -609,7 +785,17 @@ impl Admission {
             resource: action.resource().to_owned(),
             argument_digest: Digest32::from_bytes(Sha256::digest(&args).into()),
         };
-        let running = match exec.attempt(actual, self.clock.now_unix_ms()) {
+        // The worker image and limits the executor will run under are bound in
+        // the same record (receipt format version 2), when it can name them.
+        let runner: &dyn Executor = match &self.cancellable {
+            Some(c) => c.as_ref(),
+            None => self.executor.as_ref(),
+        };
+        let attempt = match runner.worker_binding(kind, &self.policy.limits) {
+            Some(worker) => exec.attempt_with_worker(actual, self.clock.now_unix_ms(), worker),
+            None => exec.attempt(actual, self.clock.now_unix_ms()),
+        };
+        let running = match attempt {
             Ok(r) => r,
             Err(stack_receipt::AttemptUnrecorded(e)) => {
                 return AdmissionResult::Refused(Refused {
@@ -622,27 +808,56 @@ impl Admission {
             }
         };
 
+        // ---- 5b. Revocation re-check, after the attempt is durable and
+        // before anything is spawned. The run is registered first, so a
+        // revocation after this point finds it and asks it to stop; one
+        // before it is seen by the re-check. A failed re-check (revoked,
+        // issuer key withdrawn, trust state unreadable) closes the attempt
+        // as Interrupted and nothing runs.
+        let cancel = CancelToken::new();
+        let in_flight = self.registry.add(action.clone(), cancel.clone());
+        let refused_before_spawn = self.authority.recheck(&action).err();
+
         // ---- 6. Execution through the seam, under the kernel's limits.
         let wall = std::time::Instant::now();
-        let report = self.executor.run(kind, &self.policy.limits, &args);
+        let run = if refused_before_spawn.is_some() {
+            None
+        } else if let Some(c) = &self.cancellable {
+            Some(c.run_cancellable_observed(&action, kind, &self.policy.limits, &args, &cancel))
+        } else {
+            Some(self.executor.run_observed_authorized(&action, kind, &self.policy.limits, &args))
+        };
+        drop(in_flight);
         let measured_ns = u64::try_from(wall.elapsed().as_nanos()).unwrap_or(u64::MAX);
 
         // ---- 7. The terminal event from what was observed. Anything the
         // executor could not report is Unknown; an executor that claims a
         // completion after its own deadline fired, or a result longer than
         // the cap, is not believed.
-        let (outcome, result, elapsed_ns) = match report {
-            Ok(report) => {
+        let (outcome, result, elapsed_ns, supervisor_facts) = match run {
+            None => (
+                Outcome::Interrupted {
+                    reason: clean_text(&format!(
+                        "permission no longer stands before spawn: {}",
+                        refused_before_spawn.map_or_else(String::new, |e| e.to_string())
+                    )),
+                },
+                None,
+                0,
+                None,
+            ),
+            Some(Ok(ObservedRun { report, observed })) => {
                 let elapsed = report.elapsed_ns;
                 let (outcome, result) = self.observed(report.outcome, report.deadline_fired);
-                (outcome, result, elapsed)
+                (outcome, result, elapsed, observed)
             }
-            Err(e) => (
+            Some(Err(e)) => (
                 Outcome::Unknown {
                     reason: clean_text(&format!("executor failed: {e}")),
                 },
                 None,
                 measured_ns,
+                None,
             ),
         };
         let terminal = Terminal {
@@ -650,7 +865,15 @@ impl Admission {
             completed_at_ms: self.clock.now_unix_ms(),
             elapsed_ns,
         };
-        match running.finish(terminal) {
+        // A supervisor that observed the process and the result pipe gets a
+        // version 2 terminal carrying those facts (D1-C); an executor that
+        // observed nothing keeps the version 1 terminal and the verifier says
+        // so as a limitation.
+        let finished = match supervisor_facts {
+            Some(facts) => running.finish_observed(terminal, facts),
+            None => running.finish(terminal),
+        };
+        match finished {
             Ok(closed) => match (&outcome, result) {
                 (Outcome::Completed { exit_code, result_digest }, Some(result)) => {
                     // ---- 8. Success: a recorded Completed.

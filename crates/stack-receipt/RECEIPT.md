@@ -111,6 +111,129 @@ produced by the real `cns_composition.super_gate.SuperGate.decide`
 committed script under `python3 -I` at CNS commit
 `4acd8f958a091900d43f553eba7fe83f7d33c4d6`; `tests/decision.rs`).
 
+### Format version 2: supervisor-observed facts (D1-C)
+
+Status: implemented and tested in this crate and in `stack-admission`, which writes it on every real run.
+
+A terminal event may carry the two facts the supervisor observed
+(`cpp/CONTAINMENT.md`, "Supervisor-observed facts and payload claims"):
+`exit_observed` (`not_observed`, `exited` with a code, `signaled` with a signal,
+`killed_by_supervisor` with a signal, `unreaped`) and `frame_status`
+(`not_read`, `valid`, `missing`, `malformed`, `oversized`, `trailing`,
+`conflicting`). They are written under their own tag so version 1 is untouched:
+
+| | Version 1 | Version 2 |
+|---|---|---|
+| record tag | `stack-receipt/1\n` | `stack-receipt/2\n` |
+| event | every event, terminal tag 5 (`Event::Terminal`) | only the terminal tag 6 (`Event::TerminalObserved`): the version 1 terminal body, then `exit_observed` (u8, plus i32 for exited, signaled, killed) and `frame_status` (u8) |
+| written by | `Recorder::finish` (unchanged) | `Recorder::finish_observed` |
+
+A record has one encoding: the decoder refuses a version 2 body under the
+version 1 tag and the reverse (`tests/observed_v2.rs`
+`a_record_has_one_encoding_so_the_version_and_the_event_must_agree`), and a tag
+it does not know (`stack-receipt/3`) is `BadTag`. A log may hold both versions.
+
+Compatibility: a version 1 log verifies unchanged. `tests/fixtures/v1_log.bin` was
+written by the version 1 writer before this format existed; `tests/compat_v1.rs`
+asserts that the current writer still produces those exact bytes for version 1
+events, that the log verifies as `VERIFIED_WITH_LIMITATIONS` with no finding, and
+that the facts it cannot show come out as the limitation
+`supervisor_observed_facts_not_recorded`, not as a failure.
+
+Verification of a version 2 terminal (`Check::ObservedFactsConsistentWithOutcome`):
+`completed` needs `exited` 0 and `valid`; `result_missing` needs `exited` 0 and a
+frame that is not `valid`; `unreaped` goes with `termination_unconfirmed` and
+with nothing else. A violation is the rejecting finding
+`observed_facts_contradict_outcome`. `valid` beside `timed_out`, `crashed` or
+`exited_non_zero` is allowed: the frame is a fact about the pipe, not about success.
+The facts are the supervisor's observation. Nothing in a receipt, version 2 or
+not, makes the result bytes anything but the worker's own claim
+(`result_is_self_reported` stays a limitation of every `completed`).
+
+Wired (Step 1, R3-K-01): `stack-admission` records its terminal through
+`Executor::run_observed` and `Recorder::finish_observed`, so a real admission run
+writes a version 2 terminal (`tests/observed_terminal.rs`). An executor that
+observes nothing, and a run refused before spawn, still write a version 1 terminal
+and carry `supervisor_observed_facts_not_recorded`.
+
+### Format version 2 additions: worker identity and use evidence (Step 2, R-7, G-5)
+
+Status: implemented and tested (`tests/worker_use_evidence.rs`,
+`stack-admission/tests/worker_use_native.rs`, `stack-authority/tests/use_evidence.rs`).
+Two further version 2 events, under the same `stack-receipt/2` tag and the same
+one-encoding rule; version 1 records are untouched (`tests/compat_v1.rs` pins the
+bytes).
+
+| Event | Version 1 tag byte | Version 2 tag byte | Addition |
+|---|---|---|---|
+| `Attempted` | 4 | 8 | after `started_at_ms`: `image_sha256` (32 bytes), then the limits the supervisor was given as explicit fields: `wall_clock_deadline_ns`, `cpu_seconds`, `address_space_bytes`, `max_output_bytes`, `file_size_bytes` (u64 each), `nofile` (u32). 76 bytes. |
+| `Authorized` | 2 | 7 | after the action: the use store's evidence, a kind byte then `not_provided`, `non_durable_memory`, `durable` (record hash, position u64, head) or `no_new_record` (position, head) |
+
+The limits are written explicitly (76 bytes) and not as a digest: a digest of the
+limits plus the deadline is 40 bytes, but only the explicit form lets a verifier
+state under which limits the worker ran without already knowing them. The deadline
+is recorded in nanoseconds, exactly as applied; `AppliedLimits::wall_clock_deadline_ms`
+rounds up. They are the limits the kernel handed the supervisor. A zero
+`cpu_seconds` or `nofile` means the supervisor derived the value, and the derived
+value is not reported back (so it is not in the record).
+
+`image_sha256` is the digest the supervisor pinned at construction and re-verifies
+against the image it executes on every run (R2-K-21). It is the kernel's statement
+of which program ran; a verifier that holds the release record checks it with
+`Expectations::worker_image_sha256` (finding `worker_image_mismatch`), and the
+limits with `Expectations::worker_limits` (finding `worker_limits_mismatch`). With
+neither supplied the verifier says `worker_expectation_not_supplied`.
+
+Use evidence: `stack-authority`'s `UseStore::record_use_evidenced` returns where
+the use was recorded. `FileUseStore` gives the new record's hash, its position
+(from 1) and the store head; `MemoryUseStore` gives the labeled marker
+`non_durable_memory`, never a position; a store that predates the method gives
+`not_provided`. The verifier reports absence in a version 1 `Authorized` as the
+limitation `use_evidence_not_recorded`, `not_provided` as
+`use_evidence_not_provided_by_store`, `non_durable_memory` as
+`use_evidence_non_durable`, and a durable record at position 0 as the finding
+`use_evidence_malformed`. The evidence is what the store REPORTED. It is not
+checked against the store file here, and two executions claiming the same
+position are not cross-checked (planned).
+
+### Which native component each digest refers to (G-4, R-6)
+
+Four digests sit in a record and are never merged or truncated:
+
+| Field | Refers to | Checked by |
+|---|---|---|
+| `subject.digest` | the CNS content, recomputed by the kernel from the payload's `subject` | `Expectations::subject_content` (`subject_digest_mismatch`) |
+| `handoff` (sender fingerprint, sequence, nonce, assurance) | the Trident handoff: the MAC verification result. The Trident verified the envelope MAC under a shared key and the kernel records that it did so under the Production profile. The MAC itself is not in the record | not re-checked here (`handoff_provenance_not_rechecked`) |
+| `native_digest` (label and digest) | optional: the sender's own digest of its native record, for example a Sentinel ledger row hash, passed in the payload's `native_digest` field and authenticated by the Trident MAC with the rest of the payload | `Expectations::native_digest` (`native_digest_mismatch`); without it `native_component_not_verified` |
+| `capability.cap_digest` | the signed capability bytes | not re-checked (`capability_signature_not_rechecked`) |
+
+The kernel does not recompute the native digest: no Sentinel verification hook
+exists in admission (planned). Tampering with the native digest and tampering with
+the subject digest are caught by different expectations and neither finding implies
+the other (`tests/worker_use_evidence.rs`
+`tampering_the_native_digest_is_caught_and_the_subject_digest_still_checks_out` and
+`tampering_the_cns_subject_digest_is_caught_and_the_native_digest_still_checks_out`;
+the same through a real run in `stack-admission/tests/worker_use_native.rs`).
+
+### Outcome vocabulary
+
+The campaign names map onto the existing outcomes without a rename
+(`OutcomeKind::campaign_name`; the full table, with the stage names and the
+in-memory `RUNNING`, is in `cpp/CONTAINMENT.md`). `as_str` is unchanged.
+
+| Campaign | Receipt outcome kind(s) |
+|---|---|
+| `COMPLETED` | `completed` |
+| `TIMED_OUT` | `timed_out` |
+| `TERMINATED` | `terminated` |
+| `TERMINATION_UNCONFIRMED` | `termination_unconfirmed` |
+| `CRASHED` | `crashed`, `seccomp_violation`, `resource_limit`, `exited_non_zero` |
+| `RESULT_INVALID` | `result_missing` (exit 0, frame not valid), `result_oversized` |
+| `INTERRUPTED` | `interrupted` (a recorded deliberate stop) and, for a host that died mid-run, an `attempted` with no terminal event, which the verifier reports as `INCOMPLETE`, outcome `unknown` (`terminal_missing`) |
+| `UNKNOWN` | `unknown` |
+| `RUNNING` | none: an in-memory state, never a terminal receipt event |
+| `PROPOSED`, `AUTHORIZED`, `REJECTED`, `ATTEMPTED` | stages `proposed`, `authorized`, `rejected`, `attempted` |
+
 ## 4. The log file, `stack-receipt/log/1`
 
 Magic (32 bytes), two hashed header slots (generation, committed length,
@@ -244,6 +367,38 @@ content. Reject: `log_corrupt`, `sequence_gap`, `prev_hash_mismatch`,
 | receipt generation fails after Attempted | `a_receipt_generation_failure_leaves_an_incomplete_unknown_execution` | INCOMPLETE `unknown` |
 | kernel SIGKILLed between Attempted and terminal | `log::a_process_killed_between_attempted_and_terminal_leaves_the_attempt_open` | INCOMPLETE `unknown` |
 
+## 5a. Supported topology
+
+[tested] unless marked.
+
+* **Single process.** One recorder owns the log and appends in order.
+* **Several processes on ONE host, one at a time.** `FileReceiptLog` holds an
+  exclusive advisory lock for its life; a second process fails at open with
+  `LogError::Locked` and so cannot write. Two real processes opening one log:
+  exactly one holds it
+  (`log_failure_modes::two_processes_open_one_log_exactly_one_holds_it`).
+  A local operating-system lock on one machine: not concurrent writing, not
+  distributed consensus.
+* **Multiple hosts** [not supported]. No replication, no shared log, no
+  consensus. [BLOCKED: no multi-host environment to test in.]
+
+A process that dies after `Attempted` is written leaves the attempt open and
+the verifier reports INCOMPLETE with an unknown outcome, never success
+(`log_failure_modes::attempt_written_and_the_process_aborts_is_incomplete_never_success`,
+`attempt_written_and_the_handle_dropped_is_incomplete_never_success`, and
+`log::a_process_killed_between_attempted_and_terminal_leaves_the_attempt_open`).
+A frame present twice fails closed on open
+(`a_frame_appended_twice_byte_for_byte_fails_closed_on_open`,
+`a_frame_inserted_twice_inside_the_committed_chain_fails_closed_on_open`).
+Rollback to an earlier valid state is not detected from the file: the
+verifier sees a crash (INCOMPLETE) and lists
+`log_rollback_not_detectable_without_anchor`; comparing `head()` with a head
+recorded elsewhere detects it
+(`rollback_to_an_earlier_state_reads_as_a_crash_and_is_detected_only_against_an_external_head`).
+Unavailable storage at open fails closed
+(`real_unavailable_storage_at_open_fails_closed`); a failing append mid-run is
+tested through a failing log wrapper at the trait (see section 6).
+
 ## 6. Limitations, stated
 
 * One receipt key per kernel at a time; rotation is two overlapping
@@ -293,3 +448,12 @@ verify_log(&[SignedRecord], &TrustedReceiptKeys, &Expectations) -> LogVerificati
 verify_receipt_chain(&[SignedRecord], ExecutionId, &TrustedReceiptKeys, &Expectations) -> Verification
 Verification::to_json(&self) -> String ; LogVerification::to_json(&self) -> String
 ```
+
+## Execution authorization (D2-A) and the receipt
+
+Implemented: the capability digest the C++ host receives is `Authorized.capability.cap_digest`,
+recorded in full in the receipt. The host's audit ring carries only a label derived from it,
+which is not evidence. A receipt cannot show that the host was reached only through the
+authorized entry points: in-process code can call the raw C symbols (see
+`crates/stack-ffi/ABI.md` section 9). The worker image and limits (`Attempted`) and the use
+evidence (`Authorized`) are version 2 additions described above.

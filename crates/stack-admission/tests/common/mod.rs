@@ -16,11 +16,11 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stack_admission::{
-    Admission, AdmissionResult, BuildError, ExecutionLimits, Executor, ExecutorError, KernelPolicy, Parts, Refused, RunReport,
+    Admission, AdmissionResult, BuildError, ExecutionLimits, Executor, ExecutorError, KernelPolicy, ObservedRun, Parts, Refused, RunReport,
     SupervisedExecutor, WorkerConfig, WorkerKind,
 };
 use stack_authority::{
-    Capability, Digest32, FileUseStore, ManualClock, PublicKey, Purpose, ResourceScope, RevocationList, TrustAnchor,
+    ActionRequest, Authority, AuthorityConfig, AuthorizedAction, Capability, Digest32, FileUseStore, ManualClock, PublicKey, Purpose, ResourceScope, RevocationList, TrustAnchor,
     TrustSet, NONCE_BYTES,
 };
 use stack_receipt::{
@@ -215,8 +215,8 @@ pub struct CountingExecutor {
     pub seen: Arc<Mutex<Vec<Vec<ReceiptStage>>>>,
 }
 
-impl Executor for CountingExecutor {
-    fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError> {
+impl CountingExecutor {
+    fn note_run(&self) {
         self.runs.fetch_add(1, Ordering::SeqCst);
         let stages = std::fs::read(&self.receipts)
             .ok()
@@ -226,7 +226,44 @@ impl Executor for CountingExecutor {
         if let Ok(mut seen) = self.seen.lock() {
             seen.push(stages);
         }
+    }
+}
+
+impl Executor for CountingExecutor {
+    fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError> {
+        self.note_run();
         self.inner.run(kind, limits, args)
+    }
+
+    fn run_observed(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<ObservedRun, ExecutorError> {
+        self.note_run();
+        self.inner.run_observed(kind, limits, args)
+    }
+
+    fn run_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<RunReport, ExecutorError> {
+        self.note_run();
+        self.inner.run_authorized(authorization, kind, limits, args)
+    }
+
+    fn run_observed_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<ObservedRun, ExecutorError> {
+        self.note_run();
+        self.inner.run_observed_authorized(authorization, kind, limits, args)
+    }
+
+    fn worker_binding(&self, kind: WorkerKind, limits: &ExecutionLimits) -> Option<stack_receipt::WorkerBinding> {
+        self.inner.worker_binding(kind, limits)
     }
 }
 
@@ -333,6 +370,8 @@ pub struct Builder {
     receipt_log: Option<Box<dyn ReceiptLog>>,
     replay: Option<PathBuf>,
     uses: Option<PathBuf>,
+    replay_store: Option<Box<dyn stack_trident::ReplayStore>>,
+    use_store: Option<Box<dyn stack_authority::UseStore>>,
 }
 
 impl Builder {
@@ -347,7 +386,21 @@ impl Builder {
             receipt_log: None,
             replay: None,
             uses: None,
+            replay_store: None,
+            use_store: None,
         }
+    }
+
+    /// Uses this replay store instead of opening the file in the directory.
+    pub fn replay_store(mut self, store: Box<dyn stack_trident::ReplayStore>) -> Self {
+        self.replay_store = Some(store);
+        self
+    }
+
+    /// Uses this one-time-use store instead of opening the file in the directory.
+    pub fn use_store(mut self, store: Box<dyn stack_authority::UseStore>) -> Self {
+        self.use_store = Some(store);
+        self
     }
 
     /// A kernel restarting after another one that last read `previous_now`:
@@ -418,13 +471,20 @@ impl Builder {
                     .map_err(|e| BuildError::Recorder(e.into()))?,
             ),
         };
-        let replay_store = Box::new(
-            FileStore::open(self.replay.clone().unwrap_or_else(|| replay_path(&self.dir)))
-                .map_err(stack_trident::StartError::from)?,
-        );
-        let use_store = Box::new(
-            FileUseStore::open(self.uses.clone().unwrap_or_else(|| uses_path(&self.dir)), 1024).map_err(|_| BuildError::UseStoreNotDurable)?,
-        );
+        let replay_store: Box<dyn stack_trident::ReplayStore> = match self.replay_store {
+            Some(s) => s,
+            None => Box::new(
+                FileStore::open(self.replay.clone().unwrap_or_else(|| replay_path(&self.dir)))
+                    .map_err(stack_trident::StartError::from)?,
+            ),
+        };
+        let use_store: Box<dyn stack_authority::UseStore> = match self.use_store {
+            Some(s) => s,
+            None => Box::new(
+                FileUseStore::open(self.uses.clone().unwrap_or_else(|| uses_path(&self.dir)), 1024)
+                    .map_err(|_| BuildError::UseStoreNotDurable)?,
+            ),
+        };
         let parts = Parts {
             trident: self.trident,
             keyring: sender_ring(),
@@ -785,11 +845,66 @@ pub fn verify_bytes_full(bytes: &[u8], case: &Value, result: Option<&[u8]>) -> L
         audience: Some(KERNEL),
         kernel_id: Some(KERNEL),
         result_bytes: result,
+        worker_image_sha256: Some(&expected_worker_image()),
+        ..Expectations::default()
     };
     stack_receipt::verify_log_bytes(bytes, &receipt_trust(), &exp)
+}
+
+/// The worker image digest an auditor expects: the SHA-256 of the worker
+/// program this build compiled, computed here and not read from any receipt.
+pub fn expected_worker_image() -> Digest32 {
+    let path = std::ffi::CString::new(stack_ffi::WORKER_BUILD_PATH).expect("no NUL");
+    Digest32::from_bytes(stack_ffi::worker_image_sha256(&path).expect("hash the worker build"))
+}
+
+/// The limits an auditor expects the kernel policy to have applied.
+pub fn expected_worker_limits() -> stack_receipt::AppliedLimits {
+    let l = policy().limits;
+    stack_receipt::AppliedLimits {
+        wall_clock_deadline_ns: l.wall_clock_deadline_ns,
+        cpu_seconds: l.cpu_seconds,
+        address_space_bytes: l.address_space_bytes,
+        max_output_bytes: l.max_output_bytes,
+        file_size_bytes: l.file_size_bytes,
+        nofile: l.nofile,
+    }
 }
 
 /// The spellings of a scope's unchecked items.
 pub fn not_checked(v: &LogVerification) -> Vec<&'static str> {
     v.scope.not_checked.iter().map(|l| l.as_str()).collect()
+}
+
+/// A real `AuthorizedAction`, minted by `Authority::authorize` from a capability
+/// the fixture issuer signed for `operation` on `RESOURCE`, against a
+/// non-durable use store (these callers need the type, not the store).
+pub fn authorization_for(operation: &str) -> AuthorizedAction {
+    let digest = Digest32::from_bytes(fixture_bytes32("authorization subject"));
+    let root = Digest32::from_bytes(fixture_bytes32("authorization root"));
+    let wire = CapSpec::for_digests(digest, root, operation, RESOURCE).issue();
+    let config = AuthorityConfig {
+        require_durable_use_store: false,
+        ..AuthorityConfig::new(KERNEL)
+    };
+    let authority = Authority::new(config, issuer_trust(), RevocationList::new(16)).unwrap();
+    let clock = ManualClock::new(T0 + 1);
+    authority
+        .authorize(
+            &wire,
+            &ActionRequest {
+                subject_digest: digest,
+                decision_root: root,
+                operation: operation.to_owned(),
+                resource: RESOURCE.to_owned(),
+            },
+            &clock,
+            &stack_authority::MemoryUseStore::new(16),
+        )
+        .unwrap()
+}
+
+/// [`authorization_for`] an arbitrary operation.
+pub fn authorization() -> AuthorizedAction {
+    authorization_for("echo")
 }

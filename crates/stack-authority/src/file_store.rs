@@ -63,7 +63,7 @@ use sha2::{Digest, Sha256};
 
 use crate::capability::{CapabilityDigest, MAX_ID_BYTES};
 use crate::digest::Digest32;
-use crate::store::{check_and_record, UseError, UseKey, UseStore};
+use crate::store::{check_and_record, UseError, UseEvidence, UseKey, UseStore};
 
 /// The header every log starts with.
 pub const LOG_HEADER: &[u8] = b"stack-authority/use-log/1\n";
@@ -341,16 +341,20 @@ impl FileUseStore {
     }
 }
 
-impl UseStore for FileUseStore {
-    fn record_use(&self, key: &UseKey<'_>, one_time: bool, expires_at_ms: u64, now_ms: u64) -> Result<(), UseError> {
+impl FileUseStore {
+    fn record_evidenced(&self, key: &UseKey<'_>, one_time: bool, expires_at_ms: u64, now_ms: u64) -> Result<UseEvidence, UseError> {
         let mut inner = self.inner.lock().map_err(|_| UseError::Unavailable)?;
         if inner.poisoned {
             return Err(UseError::Unavailable);
         }
         let inserted = check_and_record(&mut inner.index, self.capacity, key, one_time, expires_at_ms, now_ms)?;
+        let position = u64::try_from(inner.records).unwrap_or(u64::MAX);
         if !inserted {
             // A reusable capability already on record: nothing to write.
-            return Ok(());
+            return Ok(UseEvidence::NoNewRecord {
+                position,
+                head: Digest32::from_bytes(inner.head),
+            });
         }
         if Self::append(&mut inner, key, one_time, expires_at_ms, now_ms).is_err() {
             // The on-disk state is unknown. Deny this use and every
@@ -359,7 +363,22 @@ impl UseStore for FileUseStore {
             inner.index.remove(key.cap_id);
             return Err(UseError::Unavailable);
         }
-        Ok(())
+        let head = Digest32::from_bytes(inner.head);
+        Ok(UseEvidence::Durable {
+            record_hash: head,
+            position: u64::try_from(inner.records).unwrap_or(u64::MAX),
+            head,
+        })
+    }
+}
+
+impl UseStore for FileUseStore {
+    fn record_use(&self, key: &UseKey<'_>, one_time: bool, expires_at_ms: u64, now_ms: u64) -> Result<(), UseError> {
+        self.record_evidenced(key, one_time, expires_at_ms, now_ms).map(|_| ())
+    }
+
+    fn record_use_evidenced(&self, key: &UseKey<'_>, one_time: bool, expires_at_ms: u64, now_ms: u64) -> Result<UseEvidence, UseError> {
+        self.record_evidenced(key, one_time, expires_at_ms, now_ms)
     }
 
     fn is_durable(&self) -> bool {

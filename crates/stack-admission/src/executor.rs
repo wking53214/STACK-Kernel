@@ -24,6 +24,12 @@ use std::ffi::CString;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+
+use stack_authority::AuthorizedAction;
+
+use crate::admission::{CancelToken, CancellableExecutor};
 
 /// Longest wall-clock deadline the supervisor accepts: one hour.
 pub const MAX_DEADLINE_NS: u64 = 3_600_000_000_000;
@@ -236,6 +242,19 @@ pub struct RunReport {
     pub deadline_fired: bool,
 }
 
+/// A [`RunReport`] with the facts the supervisor observed itself (D1-C):
+/// how the process ended and what the result pipe held. `observed` is `None`
+/// for an executor that does not observe them (a test double, or an older
+/// supervisor); the receipt then records a version 1 terminal, and the
+/// verifier lists the missing facts as a limitation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedRun {
+    /// The report `run` returns.
+    pub report: RunReport,
+    /// What the supervisor observed, when it did.
+    pub observed: Option<stack_receipt::Observed>,
+}
+
 /// Why an executor could not produce a report at all.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExecutorError {
@@ -263,6 +282,56 @@ pub enum ExecutorError {
 pub trait Executor: Send + Sync + fmt::Debug {
     /// Runs `kind` under `limits` with `args` as its argument bytes.
     fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError>;
+
+    /// [`Self::run`] plus the facts the supervisor observed (D1-C). The default
+    /// observes nothing, so an executor written before D1-C keeps working
+    /// unchanged; [`SupervisedExecutor`] overrides it.
+    fn run_observed(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<ObservedRun, ExecutorError> {
+        Ok(ObservedRun {
+            report: self.run(kind, limits, args)?,
+            observed: None,
+        })
+    }
+
+    /// The worker program and the limits this executor would run `kind` under,
+    /// for the receipt's `Attempted` record (receipt format version 2). The
+    /// default says nothing, so an executor that cannot name its worker
+    /// (a test double) writes a version 1 `Attempted` and the verifier lists
+    /// the missing identity as a limitation.
+    fn worker_binding(&self, kind: WorkerKind, limits: &ExecutionLimits) -> Option<stack_receipt::WorkerBinding> {
+        let _ = (kind, limits);
+        None
+    }
+
+    /// [`Self::run`] on behalf of the authorization `stack-authority` granted
+    /// (D2-A). The pipeline calls this and never `run`. The default ignores the
+    /// authorization and calls `run`, which is right for a test double and
+    /// wrong for an executor that reaches the host: [`SupervisedExecutor`]
+    /// refuses `run` and passes the authorization's capability digest to the
+    /// host here.
+    fn run_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<RunReport, ExecutorError> {
+        let _ = authorization;
+        self.run(kind, limits, args)
+    }
+
+    /// [`Self::run_authorized`] plus the facts the supervisor observed (D1-C).
+    /// The default is [`Self::run_observed`].
+    fn run_observed_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<ObservedRun, ExecutorError> {
+        let _ = authorization;
+        self.run_observed(kind, limits, args)
+    }
 }
 
 /// Everything the real executor needs from kernel configuration. None of it
@@ -381,8 +450,150 @@ impl WorkerKind {
     }
 }
 
+/// The receipt's spelling of what the supervisor observed. A code this crate
+/// does not know becomes "not observed" / "not read": the receipt cannot carry
+/// a value it has no name for, and it never invents a success.
+fn receipt_observed(report: &stack_ffi::SupervisedReport) -> stack_receipt::Observed {
+    use stack_receipt::{ExitObserved as E, FrameStatus as F};
+    let exit = match report.exit_observed {
+        stack_ffi::ExitObserved::Exited(code) => E::Exited { code },
+        stack_ffi::ExitObserved::Signaled(signal) => E::Signaled { signal },
+        stack_ffi::ExitObserved::KilledBySupervisor(signal) => E::KilledBySupervisor { signal },
+        stack_ffi::ExitObserved::Unreaped => E::Unreaped,
+        stack_ffi::ExitObserved::None | stack_ffi::ExitObserved::Unrecognized(_) => E::NotObserved,
+    };
+    let frame = match report.frame_status {
+        stack_ffi::FrameStatus::Valid => F::Valid,
+        stack_ffi::FrameStatus::Missing => F::Missing,
+        stack_ffi::FrameStatus::Malformed => F::Malformed,
+        stack_ffi::FrameStatus::Oversized => F::Oversized,
+        stack_ffi::FrameStatus::Trailing => F::Trailing,
+        stack_ffi::FrameStatus::Conflicting => F::Conflicting,
+        stack_ffi::FrameStatus::NotRead | stack_ffi::FrameStatus::Unrecognized(_) => F::NotRead,
+    };
+    stack_receipt::Observed { exit, frame }
+}
+
+/// True exactly when the supervisor's own observations are those `Completed`
+/// requires: it saw the worker exit 0 before the deadline and held one
+/// well-formed frame. A supervisor that says `Completed` without them is not
+/// believed.
+fn completed_conditions_hold(report: &stack_ffi::SupervisedReport) -> bool {
+    !report.deadline_fired
+        && report.exit_observed == stack_ffi::ExitObserved::Exited(0)
+        && report.frame_status == stack_ffi::FrameStatus::Valid
+}
+
 impl Executor for SupervisedExecutor {
-    fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, _args: &[u8]) -> Result<RunReport, ExecutorError> {
+    fn worker_binding(&self, _kind: WorkerKind, limits: &ExecutionLimits) -> Option<stack_receipt::WorkerBinding> {
+        Some(stack_receipt::WorkerBinding {
+            // The digest this executor pinned at construction and that the
+            // supervisor re-verifies against the image it executes on every run.
+            image_sha256: stack_receipt::Digest32::from_bytes(self.worker_sha256),
+            limits: stack_receipt::AppliedLimits {
+                wall_clock_deadline_ns: limits.wall_clock_deadline_ns,
+                cpu_seconds: limits.cpu_seconds,
+                address_space_bytes: limits.address_space_bytes,
+                max_output_bytes: limits.max_output_bytes,
+                file_size_bytes: limits.file_size_bytes,
+                nofile: limits.nofile,
+            },
+        })
+    }
+
+    /// Refused: the real executor runs only on behalf of an
+    /// [`AuthorizedAction`] (D2-A). Use [`Executor::run_authorized`].
+    fn run(&self, _kind: WorkerKind, _limits: &ExecutionLimits, _args: &[u8]) -> Result<RunReport, ExecutorError> {
+        Err(ExecutorError::Refused(NO_AUTHORIZATION.to_owned()))
+    }
+
+    /// Refused, as [`Self::run`].
+    fn run_observed(&self, _kind: WorkerKind, _limits: &ExecutionLimits, _args: &[u8]) -> Result<ObservedRun, ExecutorError> {
+        Err(ExecutorError::Refused(NO_AUTHORIZATION.to_owned()))
+    }
+
+    fn run_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<RunReport, ExecutorError> {
+        self.run_with_facts(authorization, kind, limits, args, None).map(|(report, _)| report)
+    }
+
+    fn run_observed_authorized(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+    ) -> Result<ObservedRun, ExecutorError> {
+        self.run_with_facts(authorization, kind, limits, args, None)
+            .map(|(report, observed)| ObservedRun {
+                report,
+                observed: Some(observed),
+            })
+    }
+}
+
+/// Run ids for the host's table of runs that can be stopped. Process wide, so two
+/// executors in one process never name the same run.
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The stop hook for the real worker (R-5 remainder). A [`CancelToken`] that fires
+/// while a run is in flight asks the host, by run id, to SIGKILL the worker through
+/// its pidfd: the same kill a capability-mask revocation uses. The run then ends as
+/// `Terminated`, which is never a success, and its receipt says so.
+impl CancellableExecutor for SupervisedExecutor {
+    fn run_cancellable_observed(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+        cancel: &CancelToken,
+    ) -> Result<ObservedRun, ExecutorError> {
+        let run_id = NEXT_RUN_ID.fetch_add(1, Ordering::SeqCst);
+        let finished = AtomicBool::new(false);
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Wake on the token (it notifies at once); the timeout only lets
+                // this thread see that the run is over.
+                while !finished.load(Ordering::Acquire) {
+                    if cancel.wait_cancelled(Duration::from_millis(10)) {
+                        // The host may not have registered the run yet (a cancel can
+                        // beat the spawn): keep asking until it has, or the run ends.
+                        while !finished.load(Ordering::Acquire) && !stack_ffi::supervised_cancel(run_id) {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        return;
+                    }
+                }
+            });
+            let r = self.run_with_facts(authorization, kind, limits, args, Some(run_id));
+            finished.store(true, Ordering::Release);
+            r
+        });
+        result.map(|(report, observed)| ObservedRun {
+            report,
+            observed: Some(observed),
+        })
+    }
+}
+
+/// Why [`SupervisedExecutor`] refuses the methods that name no authorization.
+const NO_AUTHORIZATION: &str = "the supervised executor runs only on behalf of an AuthorizedAction (run_authorized)";
+
+impl SupervisedExecutor {
+    fn run_with_facts(
+        &self,
+        authorization: &AuthorizedAction,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        _args: &[u8],
+        run_id: Option<u64>,
+    ) -> Result<(RunReport, stack_receipt::Observed), ExecutorError> {
         let capacity = usize::try_from(limits.max_output_bytes.min(MAX_OUTPUT_BYTES))
             .map_err(|_| ExecutorError::Call("result cap does not fit".to_owned()))?;
         let mut out = vec![0u8; capacity];
@@ -403,10 +614,16 @@ impl Executor for SupervisedExecutor {
             worker_sha256: Some(self.worker_sha256),
             reap_timeout_ns: self.reap_timeout_ns,
         };
-        let report = stack_ffi::supervised_run_governed(&request, &ffi_limits, &mut out)
-            .map_err(|e| ExecutorError::Refused(format!("{e:?}")))?;
+        let result = match run_id {
+            Some(id) => stack_ffi::supervised_run_governed_cancellable(authorization, id, &request, &ffi_limits, &mut out),
+            None => stack_ffi::supervised_run_governed(authorization, &request, &ffi_limits, &mut out),
+        };
+        let report = result.map_err(|e| ExecutorError::Refused(format!("{e:?}")))?;
         use stack_ffi::SupervisedOutcome as O;
         let outcome = match report.outcome {
+            O::Completed if !completed_conditions_hold(&report) => RunOutcome::Unknown {
+                reason: "supervisor reported a completion without an observed exit 0 and one valid frame".to_owned(),
+            },
             O::Completed => match usize::try_from(report.result_length).ok().and_then(|n| out.get(..n)) {
                 Some(bytes) => RunOutcome::Completed {
                     exit_code: report.exit_code,
@@ -460,17 +677,72 @@ impl Executor for SupervisedExecutor {
                 reason: format!("unrecognized supervisor outcome code {code}"),
             },
         };
-        Ok(RunReport {
-            outcome,
-            elapsed_ns: report.elapsed_ns,
-            deadline_fired: report.deadline_fired,
-        })
+        Ok((
+            RunReport {
+                outcome,
+                elapsed_ns: report.elapsed_ns,
+                deadline_fired: report.deadline_fired,
+            },
+            receipt_observed(&report),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ffi_report(outcome: stack_ffi::SupervisedOutcome, exit: stack_ffi::ExitObserved, frame: stack_ffi::FrameStatus) -> stack_ffi::SupervisedReport {
+        stack_ffi::SupervisedReport {
+            outcome,
+            elapsed_ns: 1,
+            exit_code: 0,
+            signal_number: 0,
+            error_number: 0,
+            child_pid: 1,
+            deadline_fired: false,
+            result_length: 0,
+            result_self_reported: true,
+            exit_observed: exit,
+            frame_status: frame,
+        }
+    }
+
+    #[test]
+    fn a_completion_is_believed_only_with_an_observed_clean_exit_and_one_valid_frame() {
+        use stack_ffi::{ExitObserved as E, FrameStatus as F, SupervisedOutcome::Completed};
+        assert!(completed_conditions_hold(&ffi_report(Completed, E::Exited(0), F::Valid)));
+        for (exit, frame) in [
+            (E::Exited(3), F::Valid),
+            (E::Exited(0), F::Missing),
+            (E::Exited(0), F::Conflicting),
+            (E::Signaled(11), F::Valid),
+            (E::KilledBySupervisor(9), F::Valid),
+            (E::None, F::Valid),
+            (E::Exited(0), F::NotRead),
+        ] {
+            assert!(!completed_conditions_hold(&ffi_report(Completed, exit, frame)), "{exit:?} {frame:?}");
+        }
+        let mut late = ffi_report(Completed, E::Exited(0), F::Valid);
+        late.deadline_fired = true;
+        assert!(!completed_conditions_hold(&late));
+    }
+
+    #[test]
+    fn what_the_supervisor_observed_reaches_the_receipt_vocabulary_unchanged() {
+        use stack_ffi::{ExitObserved as E, FrameStatus as F, SupervisedOutcome as O};
+        use stack_receipt::{ExitObserved as RE, FrameStatus as RF};
+        let o = receipt_observed(&ffi_report(O::TimedOut, E::KilledBySupervisor(9), F::Valid));
+        assert_eq!((o.exit, o.frame), (RE::KilledBySupervisor { signal: 9 }, RF::Valid));
+        let o = receipt_observed(&ffi_report(O::TerminationUnconfirmed, E::Unreaped, F::NotRead));
+        assert_eq!((o.exit, o.frame), (RE::Unreaped, RF::NotRead));
+        let o = receipt_observed(&ffi_report(O::Crashed, E::Signaled(11), F::Conflicting));
+        assert_eq!((o.exit, o.frame), (RE::Signaled { signal: 11 }, RF::Conflicting));
+        // A code this crate has no name for is never read as a success.
+        let o = receipt_observed(&ffi_report(O::Completed, E::Unrecognized(99), F::Unrecognized(99)));
+        assert_eq!((o.exit, o.frame), (RE::NotObserved, RF::NotRead));
+        assert!(!o.supports_completed());
+    }
 
     #[test]
     fn kinds_round_trip_through_their_spelling() {

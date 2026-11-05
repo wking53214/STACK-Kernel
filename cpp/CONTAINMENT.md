@@ -79,9 +79,9 @@ baseline probes on it: a payload that returns the caller's memory
 well-formed frame then `exit_group(0)` (`Completed` with the forged bytes).
 `RunWorker` closes the first and bounds the second. Labels: implemented and
 tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
-`STACKWorkerExec`, 19 cases) and `cpp/tests/worker_reap_tests.cpp` (`STACKWorkerReap`,
-5 cases); the governed FFI path is `cpp/tests/ffi_supervised_tests.cpp`
-(`STACKFfiSupervised`, 13 cases).
+`STACKWorkerExec`, 31 cases) and `cpp/tests/worker_reap_tests.cpp` (`STACKWorkerReap`,
+10 cases); the governed FFI path is `cpp/tests/ffi_supervised_tests.cpp`
+(`STACKFfiSupervised`, 23 cases).
 
 The pid-reuse property (after the worker was reaped elsewhere, the supervisor
 never kills, group-kills or waits on its pid number, does not report success and
@@ -165,6 +165,94 @@ Plain `sudo -E` is ignored on the CI runner and must not be used.
   `CloseRange`). The seccomp filter already stopped the payload from using one.
 - Not done: no compute-debt charge; no argument delivery; ELF workers only. Still true: same uid, filesystem view and
   network namespace as the caller.
+
+## Supervisor-observed facts and payload claims (D1-C)
+
+Status: implemented and tested; the labels below say which.
+
+The supervisor reports two facts of its own beside the outcome. Neither is
+derived from any payload-written content other than the well-formedness of the
+result frame, and the frame carries no field the supervisor interprets beyond
+the result bytes.
+
+| Fact | Values | Source | Where |
+|---|---|---|---|
+| `exit_observed` | `Exited` (with `exit_code`), `Signaled` (with `signal_number`), `KilledBySupervisor` (the supervisor sent SIGKILL and the worker ended by it, with `signal_number` 9), `Unreaped` (SIGKILL sent, not reaped within the bound; the worker may still run), `None` (nothing forked, or the wait failed) | the wait status and the supervisor's own kill | `ExecutionReport::exit_observed`; `stack_supervised_report.exit_observed`; Rust `ExitObserved`; receipt format version 2 |
+| `frame_status` | `Valid` (exactly one complete frame with a good magic, length within the cap and checksum, nothing after it), `Missing` (no byte arrived), `Malformed` (bytes arrived, no complete valid frame: junk, a bad checksum, cut short), `Oversized`, `Trailing` (one good frame then bytes that are not a second complete frame), `Conflicting` (two or more complete frames), `NotRead` (the pipe was not evaluated: nothing spawned, wait failed, termination unconfirmed) | the frame parser's well-formedness only | same |
+
+`Valid` says one well-formed frame arrived. It does not say the run succeeded
+and it does not say the result is true: a valid frame accompanies `TimedOut`,
+`Crashed` and `ExitedNonZero` in the matrix below. `Completed` keeps its strict
+meaning and is now also checkable from the facts: `Completed` if and only if
+`exit_observed == Exited` with `exit_code` 0, `deadline_fired` false and
+`frame_status == Valid` (asserted for every matrix case by
+`RequireSuccessOnlyOnTheCompletedConditions`, and for every shipped kind through
+the Rust wrapper). `Completed` never means the result is correct. The result
+bytes stay permanently untrusted and self-reported (`result_self_reported`).
+
+### Outcome vocabulary mapping
+
+The campaign vocabulary is mapped onto the existing names; nothing is renamed,
+and the existing spellings (`Outcome`, the ABI integers, the receipt
+`OutcomeKind::as_str`) are unchanged. The mapping is code
+(`SupervisedOutcome::campaign_name`, `OutcomeKind::campaign_name`) and tested
+(`lib.rs` `test_d1c_campaign_vocabulary_maps_each_outcome_once`,
+`stack-receipt/tests/observed_v2.rs` `campaign_vocabulary_maps_each_existing_outcome_once`).
+
+| Campaign name | Existing name | Notes |
+|---|---|---|
+| `PROPOSED`, `AUTHORIZED`, `REJECTED`, `ATTEMPTED` | receipt stages `proposed`, `authorized`, `rejected`, `attempted` | stages of the receipt, not supervisor outcomes |
+| `RUNNING` | none | an in-memory state of a run in progress. It never appears as a terminal receipt event and no report carries it |
+| `COMPLETED` | `Outcome::Completed` / receipt `completed` | strict meaning above |
+| `INTERRUPTED` | receipt `Outcome::Interrupted` (the kernel stopped the run deliberately before any kill, recorded) and, for a supervisor or host that died mid-run, the verifier's finding for an `attempted` with no terminal event (`TerminalMissing`, state `INCOMPLETE`, outcome `unknown`) | two sources, one campaign name; no supervisor report can say it, because a dead supervisor reports nothing |
+| `TIMED_OUT` | `TimedOut` | deadline passed, `KilledBySupervisor` |
+| `TERMINATED` | `Terminated` | killed on a capability change request, confirmed reaped |
+| `TERMINATION_UNCONFIRMED` | `TerminationUnconfirmed` | `Unreaped`; the worker may still run |
+| `CRASHED` | `Crashed`, `SeccompViolation`, `ResourceLimit`, `ExitedNonZero` | ended abnormally by itself; the original name, signal and exit code are kept |
+| `RESULT_INVALID` | `ResultMissing`, `ResultOversized` | exit 0 but `frame_status` is not `Valid` (or the frame was oversized): never `Completed` |
+| `UNKNOWN` | `SpawnFailed`, `SupervisorError`, `InvalidLimits`, `SigchldIgnored`, an unrecognized code; receipt `unknown` | the end was not observed |
+
+### Adversarial matrix and the test that covers each case
+
+Every row asserts outcome, `exit_observed`, `frame_status` and the
+success-only-on-Completed-conditions rule. Tests are Catch2 case names unless
+stated. Results: all pass (ctest 22/22).
+
+| # | Case | Outcome | exit_observed | frame_status | Test |
+|---|---|---|---|---|---|
+| 1 | fabricated success frame, keeps running to the deadline | `TimedOut` | `KilledBySupervisor` 9 | `Valid` | "Matrix 01" (`worker_exec_tests.cpp`); older: "a forged frame then a spin is TimedOut, never Completed" |
+| 2 | well-formed frame, then exit 3 | `ExitedNonZero` | `Exited` 3 | `Valid` | "Matrix 02" |
+| 3 | invalid frame, then exit 0 (RESULT_INVALID) | `ResultMissing` | `Exited` 0 | `Malformed` | "Matrix 03" (junk, and cut short); older: "frames that are not clean are not Completed" |
+| 4 | several frames | `ResultMissing` | `Exited` 0 | `Conflicting` | "Matrix 04" |
+| 5 | output beyond the limit | `ResultOversized` | `Exited` or `KilledBySupervisor` (depends on the race) | `Oversized` | "Matrix 05" (also a frame one byte over a cap of 8) |
+| 6 | result channel closed early, then spin | filtered: `SeccompViolation`; unfiltered: `TimedOut` | `Signaled` SIGSYS; `KilledBySupervisor` | `Missing` | "Matrix 06" |
+| 7 | exit 0 without a result | `ResultMissing` | `Exited` 0 | `Missing` | "Matrix 07" |
+| 8 | probes and tampers with descriptors | probe: `Completed` (its own report is a claim); clobber: `ResultMissing` | `Exited` 0 | `Valid`; `Missing` | "Matrix 08" (lists `/proc/self/fd`, tries write, close and dup on every fd 4 to 1023 and a read on the write end while the supervisor leaks inheritable fds on purpose; replaces its own result fd) |
+| 9 | hang during result delivery | `TimedOut` | `KilledBySupervisor` 9 | `Malformed` | "Matrix 09" |
+| 10 | killed at the deadline | `TimedOut` | `KilledBySupervisor` 9 | `Missing` | "Matrix 10" (C++ worker); "D1-C matrix 10" (`ffi_supervised_tests.cpp`, exported C ABI); `test_d1c_matrix_10_...` (`lib.rs`, Rust wrapper) |
+| 11 | supervisor cannot confirm termination (kill-suppression seam) | `TerminationUnconfirmed` | `Unreaped` | `NotRead` | "Matrix 11" (`worker_reap_tests.cpp`, with a forged valid frame already sent); "D1-C matrix 11" (`ffi_supervised_tests.cpp`, C ABI); older: "an ineffective kill is TerminationUnconfirmed" |
+| 12 | child's frame says complete, supervisor saw a deadline or a signal | `TimedOut`; `Crashed`; `TimedOut` | `KilledBySupervisor`; `Signaled` SIGSEGV; `KilledBySupervisor` | `Valid`; `Valid`; (frame after the deadline) | "Matrix 12" (three sections) |
+
+Also: `ffi_c_caller.c` (ctest `STACKFfiCCaller`) drives success, a deadline
+kill, a crash and two refusals through the C ABI; `test_d1c_success_only_on_the_completed_conditions_for_every_shipped_kind`
+(`lib.rs`) applies the rule to all seven shipped kinds through Rust.
+
+BLOCKED, with the reason:
+
+- Cases 1 to 9 and 12 through the FFI and the Rust wrapper. The governed entry
+  runs payload kinds 0 to 6 only, and the hostile-frame kinds exist only in the
+  test build of the worker. Reaching them from the FFI would need a hook on the
+  shipped path, which the campaign forbids. They run through the real worker
+  program in C++, and the FFI struct mapping is checked for what the shipped
+  kinds can produce.
+- Case 11 from Rust. The kill-suppression seam is a C++ compile-time seam
+  (`STACK_SUPERVISED_TESTING`) that exists only in C++ test binaries. Covered in
+  C++ and through the exported C ABI.
+
+A case where the worker's own claim and the supervisor's observation disagree
+is decided by the supervisor: the deadline wins over a complete frame, a signal
+death wins over a complete frame, and an unconfirmed termination is never
+reported as a result.
 
 ## What the executor does not do
 
@@ -319,6 +407,21 @@ time into a 50 ms budget (idle: 50 to 54 ms). R2-K-16: the cooperative
 deadline is therefore a lower bound on how long a payload may run, not a tight
 one. The cause inside the kernel's CPU-timer delivery was not investigated.
 The supervised executor's wall-clock kill is the bounded path.
+
+## Authorized entry points and stopping a run (D2-A, R-5)
+
+Implemented and tested. The authorized supervised run and in-process transaction require a
+non-zero capability digest (-18 otherwise, nothing spawned); the run can be named by a run id
+and stopped with `stack_supervised_cancel`, which sends the SIGKILL through the worker's pidfd
+exactly as a capability-mask revocation does, ending the run `Terminated` and audited
+`SupervisedTerminated`. Tests: `cpp/tests/ffi_authorized_caller.c` (ctest
+`STACKFfiAuthorizedCaller`), `crates/stack-admission/tests/revocation_real_worker.rs`
+(a 3 s spin worker is dead within 1 s of the revocation, measured 58 ms).
+
+Limits: the host cannot tell a real digest from a made-up non-zero one, and in-process code can
+call the raw symbols; the audit entry carries a label, not the digest (ABI.md section 9).
+See also "D2-C follow-up (deferred)" in `crates/stack-ffi/ABI.md`: a separate kernel process
+owning execution is NOT implemented.
 
 ## CI parity: tests run as an ordinary user
 

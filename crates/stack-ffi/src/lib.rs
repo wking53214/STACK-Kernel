@@ -6,12 +6,24 @@
 #![no_std]
 #![allow(non_camel_case_types)]
 
+use stack_authority::AuthorizedAction;
+
 extern "C" {
     pub fn stack_host_initialize() -> i32;
     pub fn stack_host_seal_current_thread() -> i32;
     pub fn stack_host_initialize_and_seal() -> i32;
     pub fn stack_host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> i32;
     pub fn stack_execute_governed_transaction(
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        deadline_budget_ticks: u64,
+        hard_timeout_nanoseconds: u64,
+    ) -> i32;
+    /// D2-A. As `stack_execute_governed_transaction`, plus the 32-byte capability
+    /// digest. -18 for a null or all-zero digest.
+    pub fn stack_execute_governed_transaction_authorized(
+        capability_digest: *const u8,
         context_id: u64,
         required_capability_m0: u64,
         required_tokens: u32,
@@ -55,6 +67,45 @@ extern "C" {
         out_capacity: usize,
         report: *mut SupervisedReportFfi,
     ) -> i32;
+    /// D2-A. As `stack_supervised_run_governed`, plus the 32-byte capability
+    /// digest. -18 for a null or all-zero digest.
+    pub fn stack_supervised_run_authorized(
+        capability_digest: *const u8,
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        payload_kind: u32,
+        worker_path: *const core::ffi::c_char,
+        worker_sha256: *const u8,
+        limits: *const SupervisedLimitsFfi,
+        reap_timeout_ns: u64,
+        out: *mut u8,
+        out_capacity: usize,
+        report: *mut SupervisedReportFfi,
+    ) -> i32;
+    /// R-5. As `stack_supervised_run_authorized`, plus a caller-chosen non-zero
+    /// run id the run can be stopped by. -19 when the id is 0, in flight, or the
+    /// table is full.
+    pub fn stack_supervised_run_authorized_cancellable(
+        capability_digest: *const u8,
+        run_id: u64,
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        payload_kind: u32,
+        worker_path: *const core::ffi::c_char,
+        worker_sha256: *const u8,
+        limits: *const SupervisedLimitsFfi,
+        reap_timeout_ns: u64,
+        out: *mut u8,
+        out_capacity: usize,
+        report: *mut SupervisedReportFfi,
+    ) -> i32;
+    /// R-5. Stops the run named `run_id`: 1 when it was in flight, 0 for a no-op.
+    pub fn stack_supervised_cancel(run_id: u64) -> i32;
+    /// R-5. Runs in flight past governance that can be stopped by id.
+    pub fn stack_supervised_in_flight_count() -> u64;
+    pub fn stack_host_worker_spawn_count() -> u64;
     pub fn stack_supervised_image_sha256(path: *const core::ffi::c_char, out: *mut u8) -> i32;
     pub fn stack_supervised_unconfirmed_count() -> u64;
     pub fn stack_supervised_reap_unconfirmed() -> u64;
@@ -99,8 +150,14 @@ pub struct SupervisedReportFfi {
     pub deadline_fired: u8,
     /// 1 when result bytes were delivered: the worker's own claim.
     pub result_self_reported: u8,
-    pub reserved: [u8; 2],
+    /// D1-C: how the supervisor saw the process end (see [`ExitObserved`]). Was `reserved[0]`.
+    pub exit_observed: u8,
+    /// D1-C: what the supervisor made of the result pipe (see [`FrameStatus`]). Was `reserved[1]`.
+    pub frame_status: u8,
 }
+
+// The report keeps the size it had before D1-C added two facts in its reserved bytes.
+const _: () = assert!(core::mem::size_of::<SupervisedReportFfi>() == 40);
 
 /// Process initialization only (I-02): constructs the host once, registers the
 /// deadline signal handler and creates this thread's deadline timer. Does not
@@ -168,40 +225,103 @@ pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> Result<(), C
     }
 }
 
-/// Safe wrapper for executing a governed transaction on the in-process path.
+/// Executes a governed transaction on the in-process path, on behalf of an
+/// [`AuthorizedAction`] (D2-A).
+///
+/// The capability digest of `authorization` is handed to the C++ host, which
+/// refuses an all-zero digest ([`TransactionError::AuthorizationRequired`])
+/// and leaves a label derived from the digest in its audit trail. Safe code
+/// can only obtain an `AuthorizedAction` from `stack_authority::Authority::authorize`.
+///
+/// NON-GUARANTEE: this is an anti-misuse boundary, not protection from code in
+/// the same process. Such code can call the raw C symbol with any 32 non-zero
+/// bytes, and the host cannot tell them from a real digest.
 ///
 /// This path has a cooperative CPU-time deadline and is not isolation; see
-/// `supervised_run` for a payload that must be stopped. The C codes -1 and
-/// -3 keep their original meaning and still map to `ExecutionFailed`; the
-/// codes added for D-18 map to the distinct variants below.
+/// [`supervised_run_governed`] for a payload that must be stopped. The C codes
+/// -1 and -3 keep their original meaning and still map to `ExecutionFailed`.
+///
+/// ```compile_fail,E0061
+/// // The authorization is a required argument.
+/// let _ = stack_ffi::execute_governed_transaction(0, 1, 1, u64::MAX, 1_000_000_000);
+/// ```
+///
+/// ```compile_fail,E0451
+/// // An AuthorizedAction cannot be built by hand: its fields are private.
+/// let _ = stack_authority::AuthorizedAction { cap_id: String::new() };
+/// ```
 pub fn execute_governed_transaction(
+    authorization: &AuthorizedAction,
     context_id: u64,
     required_capability_m0: u64,
     required_tokens: u32,
     deadline_budget_ticks: u64,
     hard_timeout_nanoseconds: u64,
 ) -> Result<(), TransactionError> {
-    unsafe {
-        match stack_execute_governed_transaction(
+    let digest = authorization.cap_digest().as_bytes();
+    // SAFETY: `digest` points to 32 readable bytes for the call.
+    let rc = unsafe {
+        stack_execute_governed_transaction_authorized(
+            digest.as_ptr(),
             context_id,
             required_capability_m0,
             required_tokens,
             deadline_budget_ticks,
             hard_timeout_nanoseconds,
-        ) {
-            0 => Ok(()),
-            -4 => Err(TransactionError::CapabilityDenied),
-            -5 => Err(TransactionError::RateLimited),
-            -6 => Err(TransactionError::HardTimeout),
-            -7 => Err(TransactionError::SoftwareDeadline),
-            -8 => Err(TransactionError::DebtCeiling),
-            -9 => Err(TransactionError::InvalidHardTimeout),
-            -10 => Err(TransactionError::TimerArmFailed),
-            -11 => Err(TransactionError::ThreadNotSealed),
-            -12 => Err(TransactionError::InitializationFailed),
-            -13 => Err(TransactionError::CapabilityChangePending),
-            _ => Err(TransactionError::ExecutionFailed),
-        }
+        )
+    };
+    transaction_result(rc)
+}
+
+/// The in-process governed transaction WITHOUT any authorization. It checks the
+/// capability mask and the rate limit and nothing else; the host cannot tell
+/// who asked.
+///
+/// # Safety
+///
+/// The caller takes responsibility for the authorization the safe
+/// [`execute_governed_transaction`] requires: nothing here shows that anything
+/// authorized the call. Use it only where the caller has authorized the action
+/// by other means (host tests, tools).
+///
+/// ```compile_fail,E0133
+/// // D2-A: the unauthorized transaction is not callable from safe code.
+/// let _ = stack_ffi::execute_governed_transaction_unauthorized(0, 1, 1, u64::MAX, 1_000_000_000);
+/// ```
+pub unsafe fn execute_governed_transaction_unauthorized(
+    context_id: u64,
+    required_capability_m0: u64,
+    required_tokens: u32,
+    deadline_budget_ticks: u64,
+    hard_timeout_nanoseconds: u64,
+) -> Result<(), TransactionError> {
+    let rc = unsafe {
+        stack_execute_governed_transaction(
+            context_id,
+            required_capability_m0,
+            required_tokens,
+            deadline_budget_ticks,
+            hard_timeout_nanoseconds,
+        )
+    };
+    transaction_result(rc)
+}
+
+fn transaction_result(rc: i32) -> Result<(), TransactionError> {
+    match rc {
+        0 => Ok(()),
+        -4 => Err(TransactionError::CapabilityDenied),
+        -5 => Err(TransactionError::RateLimited),
+        -6 => Err(TransactionError::HardTimeout),
+        -7 => Err(TransactionError::SoftwareDeadline),
+        -8 => Err(TransactionError::DebtCeiling),
+        -9 => Err(TransactionError::InvalidHardTimeout),
+        -10 => Err(TransactionError::TimerArmFailed),
+        -11 => Err(TransactionError::ThreadNotSealed),
+        -12 => Err(TransactionError::InitializationFailed),
+        -13 => Err(TransactionError::CapabilityChangePending),
+        -18 => Err(TransactionError::AuthorizationRequired),
+        _ => Err(TransactionError::ExecutionFailed),
     }
 }
 
@@ -304,6 +424,29 @@ pub enum SupervisedOutcome {
 }
 
 impl SupervisedOutcome {
+    /// The campaign vocabulary name of this outcome (D1-C). Additive: no existing
+    /// name changes; the table is in `cpp/CONTAINMENT.md`. `RUNNING` never appears
+    /// here (an in-memory state), and `INTERRUPTED` is what a later verifier infers
+    /// from an attempt with no terminal event, so no run reports it.
+    pub const fn campaign_name(self) -> &'static str {
+        match self {
+            SupervisedOutcome::Completed => "COMPLETED",
+            SupervisedOutcome::TimedOut => "TIMED_OUT",
+            SupervisedOutcome::Terminated => "TERMINATED",
+            SupervisedOutcome::TerminationUnconfirmed => "TERMINATION_UNCONFIRMED",
+            SupervisedOutcome::Crashed
+            | SupervisedOutcome::SeccompViolation
+            | SupervisedOutcome::ResourceLimit
+            | SupervisedOutcome::ExitedNonZero => "CRASHED",
+            SupervisedOutcome::ResultMissing | SupervisedOutcome::ResultOversized => "RESULT_INVALID",
+            SupervisedOutcome::SpawnFailed
+            | SupervisedOutcome::SupervisorError
+            | SupervisedOutcome::InvalidLimits
+            | SupervisedOutcome::SigchldIgnored
+            | SupervisedOutcome::Unrecognized(_) => "UNKNOWN",
+        }
+    }
+
     fn from_code(code: i32) -> Self {
         match code {
             0 => SupervisedOutcome::Completed,
@@ -321,6 +464,76 @@ impl SupervisedOutcome {
             12 => SupervisedOutcome::TerminationUnconfirmed,
             13 => SupervisedOutcome::Terminated,
             other => SupervisedOutcome::Unrecognized(other),
+        }
+    }
+}
+
+/// How the supervisor saw the worker process end (D1-C). Observed from the wait
+/// status and from the supervisor's own kill; nothing the worker writes can change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitObserved {
+    /// No child was forked, or its end was not observed (the wait failed).
+    None,
+    /// The worker called exit with this status.
+    Exited(i32),
+    /// The worker was ended by this signal and the supervisor did not send it.
+    Signaled(i32),
+    /// The supervisor sent SIGKILL (deadline, oversized result, cancel) and the worker ended by it.
+    KilledBySupervisor(i32),
+    /// SIGKILL was sent and the worker was not reaped in time; it may still be running.
+    Unreaped,
+    /// A code this crate does not know; carried rather than collapsed.
+    Unrecognized(u8),
+}
+
+impl ExitObserved {
+    fn from_raw(kind: u8, exit_code: i32, signal: i32) -> Self {
+        match kind {
+            0 => ExitObserved::None,
+            1 => ExitObserved::Exited(exit_code),
+            2 => ExitObserved::Signaled(signal),
+            3 => ExitObserved::KilledBySupervisor(signal),
+            4 => ExitObserved::Unreaped,
+            other => ExitObserved::Unrecognized(other),
+        }
+    }
+}
+
+/// What the supervisor made of the bytes on the result pipe (D1-C). Only the
+/// frame's well-formedness is judged; the result bytes are never interpreted.
+/// `Valid` says "one well-formed frame arrived", not that the run succeeded and
+/// not that the result is true: a valid frame can accompany a timeout or a crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameStatus {
+    /// The pipe was not evaluated (nothing spawned, wait failed, termination unconfirmed).
+    NotRead,
+    /// Exactly one complete, well-formed frame and nothing after it.
+    Valid,
+    /// No byte arrived.
+    Missing,
+    /// Bytes arrived but no complete frame with a good magic and checksum.
+    Malformed,
+    /// The header announced more than the result cap.
+    Oversized,
+    /// One good frame, then bytes that are not a second complete frame.
+    Trailing,
+    /// Two or more complete, well-formed frames.
+    Conflicting,
+    /// A code this crate does not know; carried rather than collapsed.
+    Unrecognized(u8),
+}
+
+impl FrameStatus {
+    fn from_raw(code: u8) -> Self {
+        match code {
+            0 => FrameStatus::NotRead,
+            1 => FrameStatus::Valid,
+            2 => FrameStatus::Missing,
+            3 => FrameStatus::Malformed,
+            4 => FrameStatus::Oversized,
+            5 => FrameStatus::Trailing,
+            6 => FrameStatus::Conflicting,
+            other => FrameStatus::Unrecognized(other),
         }
     }
 }
@@ -348,6 +561,28 @@ pub struct SupervisedReport {
     /// "a well-formed frame came from a process that exited 0 in time" may be
     /// inferred from them.
     pub result_self_reported: bool,
+    /// D1-C: how the supervisor saw the process end. Never derived from payload bytes.
+    pub exit_observed: ExitObserved,
+    /// D1-C: what the supervisor made of the result pipe. Well-formedness only.
+    pub frame_status: FrameStatus,
+}
+
+impl SupervisedReport {
+    fn from_ffi(r: &SupervisedReportFfi) -> Self {
+        SupervisedReport {
+            outcome: SupervisedOutcome::from_code(r.outcome),
+            elapsed_ns: r.elapsed_ns,
+            exit_code: r.exit_code,
+            signal_number: r.signal_number,
+            error_number: r.error_number,
+            child_pid: r.child_pid,
+            deadline_fired: r.deadline_fired != 0,
+            result_length: r.result_length,
+            result_self_reported: r.result_self_reported != 0,
+            exit_observed: ExitObserved::from_raw(r.exit_observed, r.exit_code, r.signal_number),
+            frame_status: FrameStatus::from_raw(r.frame_status),
+        }
+    }
 }
 
 /// Why `supervised_run` could not even produce a report.
@@ -426,17 +661,7 @@ pub unsafe fn supervised_run(
         )
     };
     match rc {
-        0 => Ok(SupervisedReport {
-            outcome: SupervisedOutcome::from_code(ffi_report.outcome),
-            elapsed_ns: ffi_report.elapsed_ns,
-            exit_code: ffi_report.exit_code,
-            signal_number: ffi_report.signal_number,
-            error_number: ffi_report.error_number,
-            child_pid: ffi_report.child_pid,
-            deadline_fired: ffi_report.deadline_fired != 0,
-            result_length: ffi_report.result_length,
-            result_self_reported: ffi_report.result_self_reported != 0,
-        }),
+        0 => Ok(SupervisedReport::from_ffi(&ffi_report)),
         -1 => Err(SupervisedCallError::NullArgument),
         -2 => Err(SupervisedCallError::UnknownPayloadKind),
         other => Err(SupervisedCallError::Unrecognized(other)),
@@ -499,6 +724,13 @@ pub enum GovernedSupervisedError {
     WorkerDigestRequired,
     /// The image at the worker path does not hash to the pinned digest.
     WorkerDigestMismatch,
+    /// The capability digest was null or all zero: no authorization was named
+    /// (D2-A). Nothing was checked, spawned or consumed. The safe API cannot
+    /// produce this; a raw C caller can.
+    AuthorizationRequired,
+    /// The run id is 0, already names a run in flight, or the table of runs that
+    /// can be stopped by id is full (R-5). Nothing was spawned or consumed.
+    RunIdUnavailable,
     /// A code this crate does not know.
     Unrecognized(i32),
 }
@@ -517,30 +749,149 @@ pub fn worker_image_sha256(path: &core::ffi::CStr) -> Option<[u8; 32]> {
 
 /// Runs a built-in worker kind in a separate worker PROGRAM (fork then exec;
 /// the worker has none of this process's memory, an empty environment, and
-/// only descriptors 0 to 2 and its result pipe) after the capability and
-/// rate-limit checks of the initialized host, with a wall-clock deadline that
-/// ends in SIGKILL. `Err` means the request was refused before anything was
-/// spawned. `Ok` carries the outcome, which may be any [`SupervisedOutcome`],
-/// timeouts and `TerminationUnconfirmed` included; one audit event records it
-/// (see [`host_audit_read_slot`]).
+/// only descriptors 0 to 2 and its result pipe) on behalf of an
+/// [`AuthorizedAction`] (D2-A), after the capability and rate-limit checks of
+/// the initialized host, with a wall-clock deadline that ends in SIGKILL. `Err`
+/// means the request was refused before anything was spawned. `Ok` carries the
+/// outcome, which may be any [`SupervisedOutcome`], timeouts and
+/// `TerminationUnconfirmed` included; one audit event records the outcome (see
+/// [`host_audit_read_slot`]).
+///
+/// The capability digest of `authorization` is handed to the C++ host, which
+/// refuses an all-zero digest ([`GovernedSupervisedError::AuthorizationRequired`])
+/// and records an `AuthorizationBound` audit event before governance runs. That
+/// event carries only a LABEL derived from the digest (see
+/// [`capability_label`]); it is not an integrity value. The full digest is
+/// recorded in the receipt.
+///
+/// NON-GUARANTEE: this is an anti-misuse boundary, not protection from code in
+/// the same process. Such code can call the raw C symbols with any 32 non-zero
+/// bytes, and the host cannot tell them from a real digest.
 ///
 /// `Completed` means the worker exited 0 within the deadline and sent a
 /// well-formed frame. The bytes are self-reported (`result_self_reported`).
 /// Do not call this from a sealed thread (it fails with `WorkerUnavailable`).
+///
+/// ```compile_fail,E0061
+/// // The authorization is a required argument.
+/// fn misuse(
+///     request: &stack_ffi::GovernedSupervisedRequest<'_>,
+///     limits: &stack_ffi::SupervisedLimits,
+///     out: &mut [u8],
+/// ) {
+///     let _ = stack_ffi::supervised_run_governed(request, limits, out);
+/// }
+/// ```
 pub fn supervised_run_governed(
+    authorization: &AuthorizedAction,
     request: &GovernedSupervisedRequest<'_>,
     limits: &SupervisedLimits,
     out: &mut [u8],
 ) -> Result<SupervisedReport, GovernedSupervisedError> {
-    let ffi_limits = SupervisedLimitsFfi {
-        wall_clock_deadline_ns: limits.wall_clock_deadline_ns,
-        cpu_seconds: limits.cpu_seconds,
-        address_space_bytes: limits.address_space_bytes,
-        max_output_bytes: limits.max_output_bytes,
-        file_size_bytes: limits.file_size_bytes,
-        nofile: limits.nofile,
-        reserved: 0,
+    let ffi_limits = SupervisedLimitsFfi::from(limits);
+    let mut ffi_report = SupervisedReportFfi::default();
+    let digest = authorization.cap_digest().as_bytes();
+    // SAFETY: every pointer is valid for the call: `digest` is 32 bytes, the
+    // worker path is a NUL-terminated CStr, and `out` and the report are
+    // writable for the lengths given.
+    let rc = unsafe {
+        stack_supervised_run_authorized(
+            digest.as_ptr(),
+            request.context_id,
+            request.required_capability_m0,
+            request.required_tokens,
+            request.kind.code(),
+            request.worker_path.as_ptr(),
+            request.worker_sha256.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()),
+            &ffi_limits,
+            request.reap_timeout_ns,
+            out.as_mut_ptr(),
+            out.len(),
+            &mut ffi_report,
+        )
     };
+    governed_result(rc, &ffi_report)
+}
+
+/// [`supervised_run_governed`] for a run that can be stopped from another
+/// thread (R-5): `run_id` is chosen by the caller, must not be 0 and must not
+/// name a run already in flight ([`GovernedSupervisedError::RunIdUnavailable`]),
+/// and [`supervised_cancel`] with it kills the worker through its pidfd, the same
+/// kill a capability-mask revocation uses. A stopped run returns `Ok` with
+/// [`SupervisedOutcome::Terminated`], audited as `SupervisedTerminated`; it is
+/// never a success. The host keeps 64 such runs at a time.
+pub fn supervised_run_governed_cancellable(
+    authorization: &AuthorizedAction,
+    run_id: u64,
+    request: &GovernedSupervisedRequest<'_>,
+    limits: &SupervisedLimits,
+    out: &mut [u8],
+) -> Result<SupervisedReport, GovernedSupervisedError> {
+    let ffi_limits = SupervisedLimitsFfi::from(limits);
+    let mut ffi_report = SupervisedReportFfi::default();
+    let digest = authorization.cap_digest().as_bytes();
+    // SAFETY: as in `supervised_run_governed`.
+    let rc = unsafe {
+        stack_supervised_run_authorized_cancellable(
+            digest.as_ptr(),
+            run_id,
+            request.context_id,
+            request.required_capability_m0,
+            request.required_tokens,
+            request.kind.code(),
+            request.worker_path.as_ptr(),
+            request.worker_sha256.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()),
+            &ffi_limits,
+            request.reap_timeout_ns,
+            out.as_mut_ptr(),
+            out.len(),
+            &mut ffi_report,
+        )
+    };
+    governed_result(rc, &ffi_report)
+}
+
+/// Stops the run that was started with this `run_id` by
+/// [`supervised_run_governed_cancellable`]. `true` when a run with that id was in
+/// flight: its worker is killed now, or the moment it is spawned. `false` when no
+/// run has that id (never started, already finished, or 0): a no-op that touches
+/// nothing. Callable from any thread. It needs no authorization because it can
+/// only end a run early, never start or widen one.
+pub fn supervised_cancel(run_id: u64) -> bool {
+    unsafe { stack_supervised_cancel(run_id) == 1 }
+}
+
+/// Runs started with [`supervised_run_governed_cancellable`] that are past
+/// governance and have a worker spawning or running. For tests and operators.
+pub fn supervised_in_flight_count() -> u64 {
+    unsafe { stack_supervised_in_flight_count() }
+}
+
+/// The governed supervised run WITHOUT any authorization. It checks the
+/// capability mask and the rate limit, and nothing shows who asked.
+///
+/// # Safety
+///
+/// The caller takes responsibility for the authorization the safe
+/// [`supervised_run_governed`] requires. Use it only where the caller has
+/// authorized the action by other means (host tests, tools).
+///
+/// ```compile_fail,E0133
+/// // D2-A: the unauthorized run is not callable from safe code.
+/// fn misuse(
+///     request: &stack_ffi::GovernedSupervisedRequest<'_>,
+///     limits: &stack_ffi::SupervisedLimits,
+///     out: &mut [u8],
+/// ) {
+///     let _ = stack_ffi::supervised_run_governed_unauthorized(request, limits, out);
+/// }
+/// ```
+pub unsafe fn supervised_run_governed_unauthorized(
+    request: &GovernedSupervisedRequest<'_>,
+    limits: &SupervisedLimits,
+    out: &mut [u8],
+) -> Result<SupervisedReport, GovernedSupervisedError> {
+    let ffi_limits = SupervisedLimitsFfi::from(limits);
     let mut ffi_report = SupervisedReportFfi::default();
     let rc = unsafe {
         stack_supervised_run_governed(
@@ -557,18 +908,26 @@ pub fn supervised_run_governed(
             &mut ffi_report,
         )
     };
+    governed_result(rc, &ffi_report)
+}
+
+impl From<&SupervisedLimits> for SupervisedLimitsFfi {
+    fn from(limits: &SupervisedLimits) -> Self {
+        Self {
+            wall_clock_deadline_ns: limits.wall_clock_deadline_ns,
+            cpu_seconds: limits.cpu_seconds,
+            address_space_bytes: limits.address_space_bytes,
+            max_output_bytes: limits.max_output_bytes,
+            file_size_bytes: limits.file_size_bytes,
+            nofile: limits.nofile,
+            reserved: 0,
+        }
+    }
+}
+
+fn governed_result(rc: i32, report: &SupervisedReportFfi) -> Result<SupervisedReport, GovernedSupervisedError> {
     match rc {
-        0 => Ok(SupervisedReport {
-            outcome: SupervisedOutcome::from_code(ffi_report.outcome),
-            elapsed_ns: ffi_report.elapsed_ns,
-            exit_code: ffi_report.exit_code,
-            signal_number: ffi_report.signal_number,
-            error_number: ffi_report.error_number,
-            child_pid: ffi_report.child_pid,
-            deadline_fired: ffi_report.deadline_fired != 0,
-            result_length: ffi_report.result_length,
-            result_self_reported: ffi_report.result_self_reported != 0,
-        }),
+        0 => Ok(SupervisedReport::from_ffi(report)),
         -1 => Err(GovernedSupervisedError::NotInitialized),
         -2 => Err(GovernedSupervisedError::UnknownPayloadKind),
         -3 => Err(GovernedSupervisedError::NullArgument),
@@ -581,8 +940,27 @@ pub fn supervised_run_governed(
         -15 => Err(GovernedSupervisedError::InvalidLimits),
         -16 => Err(GovernedSupervisedError::WorkerDigestRequired),
         -17 => Err(GovernedSupervisedError::WorkerDigestMismatch),
+        -18 => Err(GovernedSupervisedError::AuthorizationRequired),
+        -19 => Err(GovernedSupervisedError::RunIdUnavailable),
         other => Err(GovernedSupervisedError::Unrecognized(other)),
     }
+}
+
+/// The audit LABEL of a capability digest: its first 8 bytes, big endian. This
+/// is what the host's `AuthorizationBound` audit event carries in
+/// [`HostAuditRecord::context_id`]. A label identifies an entry in a trail; it
+/// is NOT a MAC, an integrity value or a secret, and 64 bits of a digest prove
+/// nothing. The full 32-byte digest is in the receipt.
+pub fn capability_label(digest: &[u8; 32]) -> u64 {
+    let mut label = [0u8; 8];
+    label.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(label)
+}
+
+/// Supervised worker processes this host has spawned, by any entry point. A
+/// refusal that spawns nothing leaves it unchanged.
+pub fn host_worker_spawn_count() -> u64 {
+    unsafe { stack_host_worker_spawn_count() }
 }
 
 /// Supervised workers that were sent SIGKILL and not yet confirmed reaped
@@ -655,6 +1033,10 @@ pub enum HostAuditEvent {
     /// A supervised worker was killed because a pending capability revocation
     /// asked for it (R2-K-24); its tokens were spent.
     SupervisedTerminated,
+    /// D2-A: an authorized entry point reached governance. `context_id` of the
+    /// record carries the capability LABEL ([`capability_label`]) and `tokens`
+    /// carries the rate-limit domain. A label is not an integrity value.
+    AuthorizationBound,
     /// A value this crate does not know; carried rather than collapsed.
     Unrecognized(u8),
 }
@@ -672,6 +1054,7 @@ impl HostAuditEvent {
             7 => HostAuditEvent::SupervisedFailed,
             8 => HostAuditEvent::SupervisedTerminationUnconfirmed,
             9 => HostAuditEvent::SupervisedTerminated,
+            10 => HostAuditEvent::AuthorizationBound,
             other => HostAuditEvent::Unrecognized(other),
         }
     }
@@ -769,6 +1152,10 @@ pub enum TransactionError {
     /// flight to drain and holds new ones out (I-04). Nothing ran and nothing
     /// was consumed. Retry.
     CapabilityChangePending,
+    /// The capability digest was null or all zero: no authorization was named
+    /// (D2-A). Nothing ran, nothing was consumed. The safe API cannot produce
+    /// this; a raw C caller can.
+    AuthorizationRequired,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -782,6 +1169,37 @@ pub struct AuditRecord {
 mod tests {
     extern crate std;
     use super::*;
+
+    // D2-A: the tests below exercise the host's own governance (mask, tokens,
+    // deadlines, revocation) and name no authorization. They call the
+    // unauthorized entry points through these two local wrappers, which shadow
+    // the glob import of the safe functions. The authorized path has its own
+    // tests in `tests/authorized_run.rs`.
+    fn execute_governed_transaction(
+        context_id: u64,
+        required_capability_m0: u64,
+        required_tokens: u32,
+        deadline_budget_ticks: u64,
+        hard_timeout_nanoseconds: u64,
+    ) -> Result<(), TransactionError> {
+        unsafe {
+            execute_governed_transaction_unauthorized(
+                context_id,
+                required_capability_m0,
+                required_tokens,
+                deadline_budget_ticks,
+                hard_timeout_nanoseconds,
+            )
+        }
+    }
+
+    fn supervised_run_governed(
+        request: &GovernedSupervisedRequest<'_>,
+        limits: &SupervisedLimits,
+        out: &mut [u8],
+    ) -> Result<SupervisedReport, GovernedSupervisedError> {
+        unsafe { supervised_run_governed_unauthorized(request, limits, out) }
+    }
 
     /// Sealing installs a seccomp filter that cannot be removed, so it runs in
     /// a child copy of this test binary. The parent only checks that the child
@@ -1882,5 +2300,154 @@ mod tests {
             return;
         }
         run_in_child("tests::test_governed_supervised_repeated_timeouts_leave_no_zombie_and_no_descriptor", CHILD_ENV);
+    }
+
+    /// D1-C: the two supervisor-observed facts survive the C struct and the
+    /// Rust mapping, for a run that ends cleanly and for one the supervisor kills.
+    #[test]
+    fn test_d1c_exit_observed_and_frame_status_map_from_the_ffi_report() {
+        let mut raw = SupervisedReportFfi::default();
+        assert_eq!(SupervisedReport::from_ffi(&raw).exit_observed, ExitObserved::None);
+        assert_eq!(SupervisedReport::from_ffi(&raw).frame_status, FrameStatus::NotRead);
+        raw.exit_observed = 1;
+        raw.exit_code = 3;
+        raw.frame_status = 1;
+        let r = SupervisedReport::from_ffi(&raw);
+        assert_eq!((r.exit_observed, r.frame_status), (ExitObserved::Exited(3), FrameStatus::Valid));
+        raw.exit_observed = 2;
+        raw.signal_number = 11;
+        assert_eq!(SupervisedReport::from_ffi(&raw).exit_observed, ExitObserved::Signaled(11));
+        raw.exit_observed = 3;
+        raw.signal_number = 9;
+        raw.frame_status = 6;
+        let r = SupervisedReport::from_ffi(&raw);
+        assert_eq!((r.exit_observed, r.frame_status), (ExitObserved::KilledBySupervisor(9), FrameStatus::Conflicting));
+        raw.exit_observed = 4;
+        assert_eq!(SupervisedReport::from_ffi(&raw).exit_observed, ExitObserved::Unreaped);
+        raw.exit_observed = 200;
+        raw.frame_status = 201;
+        let r = SupervisedReport::from_ffi(&raw);
+        assert_eq!((r.exit_observed, r.frame_status), (ExitObserved::Unrecognized(200), FrameStatus::Unrecognized(201)));
+    }
+
+    #[test]
+    fn test_d1c_governed_runs_report_what_the_supervisor_observed() {
+        const CHILD_ENV: &str = "STACK_FFI_D1C_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let mut out = [0u8; 64];
+            let mut run = |kind, deadline| {
+                let mut req = governed_request(&path, 8, 0x01, kind);
+                req.required_tokens = 1;
+                supervised_run_governed(&req, &governed_limits(deadline), &mut out).expect("report")
+            };
+            let ok = run(PayloadKind::ReturnBytes, 2_000_000_000);
+            assert_eq!(ok.outcome, SupervisedOutcome::Completed);
+            assert_eq!((ok.exit_observed, ok.frame_status), (ExitObserved::Exited(0), FrameStatus::Valid));
+            let spin = run(PayloadKind::SpinForever, 150_000_000);
+            assert_eq!(spin.outcome, SupervisedOutcome::TimedOut);
+            assert_eq!((spin.exit_observed, spin.frame_status), (ExitObserved::KilledBySupervisor(9), FrameStatus::Missing));
+            let nz = run(PayloadKind::ExitNonZero, 2_000_000_000);
+            assert_eq!((nz.exit_observed, nz.frame_status), (ExitObserved::Exited(3), FrameStatus::Missing));
+            let crash = run(PayloadKind::Crash, 2_000_000_000);
+            assert_eq!(crash.exit_observed, ExitObserved::Signaled(11));
+            return;
+        }
+        run_in_child("tests::test_d1c_governed_runs_report_what_the_supervisor_observed", CHILD_ENV);
+    }
+
+    /// D1-C vocabulary: every existing outcome has exactly one campaign name, and
+    /// only `Completed` maps to COMPLETED.
+    #[test]
+    fn test_d1c_campaign_vocabulary_maps_each_outcome_once() {
+        let table = [
+            (0, "COMPLETED"),
+            (1, "TIMED_OUT"),
+            (2, "CRASHED"),
+            (3, "CRASHED"),
+            (4, "CRASHED"),
+            (5, "RESULT_INVALID"),
+            (6, "RESULT_INVALID"),
+            (7, "CRASHED"),
+            (8, "UNKNOWN"),
+            (9, "UNKNOWN"),
+            (10, "UNKNOWN"),
+            (11, "UNKNOWN"),
+            (12, "TERMINATION_UNCONFIRMED"),
+            (13, "TERMINATED"),
+            (99, "UNKNOWN"),
+        ];
+        for (code, name) in table {
+            assert_eq!(SupervisedOutcome::from_code(code).campaign_name(), name, "code {code}");
+        }
+    }
+
+    /// D1-C adversarial matrix case 10 through the Rust FFI wrapper: a worker that never
+    /// finishes is killed at the deadline, and the supervisor, not the worker, says so.
+    /// (Cases 1 to 9 and 12 need worker kinds the governed entry does not carry; they run
+    /// through the real worker in cpp/tests/worker_exec_tests.cpp. Case 11 needs the
+    /// C++ kill seam, which exists only in C++ test binaries.)
+    #[test]
+    fn test_d1c_matrix_10_a_worker_that_never_finishes_is_killed_at_the_deadline() {
+        const CHILD_ENV: &str = "STACK_FFI_D1C_M10_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let mut out = [0u8; 64];
+            for (i, kind) in [PayloadKind::SpinForever, PayloadKind::BlockForever].into_iter().enumerate() {
+                let mut req = governed_request(&path, 9 + i as u64, 0x01, kind);
+                req.required_tokens = 1;
+                let r = supervised_run_governed(&req, &governed_limits(150_000_000), &mut out).expect("report");
+                assert_eq!(r.outcome, SupervisedOutcome::TimedOut, "{kind:?}");
+                assert_eq!(r.outcome.campaign_name(), "TIMED_OUT");
+                assert!(r.deadline_fired);
+                assert_eq!(r.exit_observed, ExitObserved::KilledBySupervisor(9), "{kind:?}");
+                assert_eq!(r.frame_status, FrameStatus::Missing, "{kind:?}");
+                assert!(!r.result_self_reported);
+                assert_eq!(r.result_length, 0);
+            }
+            return;
+        }
+        run_in_child("tests::test_d1c_matrix_10_a_worker_that_never_finishes_is_killed_at_the_deadline", CHILD_ENV);
+    }
+
+    /// Success is Completed with an observed exit 0 and one valid frame, and nothing else, for every
+    /// shipped kind the Rust wrapper can run.
+    #[test]
+    fn test_d1c_success_only_on_the_completed_conditions_for_every_shipped_kind() {
+        const CHILD_ENV: &str = "STACK_FFI_D1C_ALLKINDS_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let mut out = [0u8; 64];
+            let kinds = [
+                PayloadKind::ReturnBytes,
+                PayloadKind::SpinForever,
+                PayloadKind::BlockForever,
+                PayloadKind::Crash,
+                PayloadKind::Abort,
+                PayloadKind::ExitNonZero,
+                PayloadKind::ForbiddenSyscall,
+            ];
+            for (i, kind) in kinds.into_iter().enumerate() {
+                let mut req = governed_request(&path, 10 + (i as u64 % 4), 0x01, kind);
+                req.required_tokens = 1;
+                let r = supervised_run_governed(&req, &governed_limits(150_000_000), &mut out).expect("report");
+                let conditions = r.exit_observed == ExitObserved::Exited(0)
+                    && !r.deadline_fired
+                    && r.frame_status == FrameStatus::Valid;
+                assert_eq!(r.outcome == SupervisedOutcome::Completed, conditions, "{kind:?}: {r:?}");
+                assert_eq!(r.outcome.campaign_name() == "COMPLETED", conditions, "{kind:?}");
+                if !conditions {
+                    assert!(!r.result_self_reported, "{kind:?}");
+                }
+            }
+            return;
+        }
+        run_in_child("tests::test_d1c_success_only_on_the_completed_conditions_for_every_shipped_kind", CHILD_ENV);
     }
 }

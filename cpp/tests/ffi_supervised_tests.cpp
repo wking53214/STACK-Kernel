@@ -66,8 +66,10 @@ struct stack_supervised_report {
     int32_t child_pid;
     uint8_t deadline_fired;
     uint8_t result_self_reported;
-    uint8_t reserved[2];
+    uint8_t exit_observed;  // D1-C, was reserved[0]
+    uint8_t frame_status;   // D1-C, was reserved[1]
 };
+static_assert(sizeof(stack_supervised_report) == 40, "the report keeps its ABI size");
 int stack_supervised_run_governed(uint64_t, uint64_t, uint32_t, uint32_t, const char*, const uint8_t*,
                                   const stack_supervised_limits*, uint64_t, uint8_t*, size_t, stack_supervised_report*);
 int stack_supervised_image_sha256(const char*, uint8_t*);
@@ -648,4 +650,95 @@ TEST_CASE("Governed supervised: concurrent runs from several threads are account
     REQUIRE(served.load() == 8);  // 8 x 100 fits in the 900 above the floor
     REQUIRE(Audit(d, kAuditSupervisedCompleted).count == 8);
     ServedRequests(d, /*already_spent*/ 8);
+}
+
+// ---------------------------------------------------------------------------
+// D1-C through the exported C ABI: exit_observed and frame_status in the report struct.
+// The governed entry runs only the shipped worker kinds (0 to 6), so the hostile-frame
+// cases (1 to 9 and 12) are exercised through the real worker in worker_exec_tests.cpp;
+// here the struct mapping is checked for the cases the shipped kinds can reach.
+// ---------------------------------------------------------------------------
+namespace {
+// stack::supervised::ExitKind and FrameStatus values as the C ABI carries them.
+constexpr uint8_t kExitNone = 0, kExitExited = 1, kExitSignaled = 2, kExitKilledBySupervisor = 3, kExitUnreaped = 4;
+constexpr uint8_t kFrameNotRead = 0, kFrameValid = 1, kFrameMissing = 2;
+}  // namespace
+
+TEST_CASE("Governed supervised D1-C: a clean run reports Exited(0) and one valid frame", "[governed][d1c]") {
+    Setup();
+    const Result r = Governed(2, kCap, 1, 0 /* return bytes */);
+    REQUIRE(r.rc == kRan);
+    REQUIRE(r.report.outcome == kCompleted);
+    REQUIRE(r.report.exit_observed == kExitExited);
+    REQUIRE(r.report.exit_code == 0);
+    REQUIRE(r.report.frame_status == kFrameValid);
+    REQUIRE(r.report.result_self_reported == 1);
+}
+
+TEST_CASE("Governed supervised D1-C matrix 10: killed at the deadline is KilledBySupervisor with no frame", "[governed][d1c][matrix]") {
+    Setup();
+    for (const uint32_t kind : {1u, 2u}) {  // spin, futex block
+        const Result r = Governed(3, kCap, 1, kind, 150 * kMs);
+        INFO(kind);
+        REQUIRE(r.rc == kRan);
+        REQUIRE(r.report.outcome == kTimedOut);
+        REQUIRE(r.report.deadline_fired == 1);
+        REQUIRE(r.report.exit_observed == kExitKilledBySupervisor);
+        REQUIRE(r.report.signal_number == SIGKILL);
+        REQUIRE(r.report.frame_status == kFrameMissing);
+        REQUIRE(r.report.result_self_reported == 0);
+    }
+}
+
+TEST_CASE("Governed supervised D1-C: crash, abort, non-zero exit and a denied syscall are never Completed", "[governed][d1c]") {
+    Setup();
+    struct Case { uint32_t kind; uint8_t exit; int code; int signal; };
+    const Case cases[] = {
+        {3, kExitSignaled, -1, SIGSEGV}, {4, kExitSignaled, -1, SIGABRT},
+        {5, kExitExited, 3, 0}, {6, kExitSignaled, -1, SIGSYS},
+    };
+    for (const Case& c : cases) {
+        const Result r = Governed(4, kCap, 1, c.kind);
+        INFO(c.kind);
+        REQUIRE(r.rc == kRan);
+        REQUIRE(r.report.outcome != kCompleted);
+        REQUIRE(r.report.exit_observed == c.exit);
+        REQUIRE(r.report.exit_code == c.code);
+        REQUIRE(r.report.signal_number == c.signal);
+        REQUIRE(r.report.frame_status == kFrameMissing);
+        REQUIRE(r.report.result_self_reported == 0);
+    }
+}
+
+TEST_CASE("Governed supervised D1-C matrix 11: termination unconfirmed reports Unreaped and an unread pipe", "[governed][d1c][matrix][reap]") {
+    Setup();
+    namespace sv = stack::supervised;
+    sv::SupervisedExecutor::SetKillHookForTesting(&IneffectiveKill);
+    const Result r = Governed(13, kCap, 1, 1 /* spin */, 100 * kMs, STACK_WORKER_PATH, 200 * kMs);
+    sv::SupervisedExecutor::SetKillHookForTesting(nullptr);
+    for (int i = 0; i < 400 && stack_supervised_reap_unconfirmed() != 0; ++i) ::usleep(10'000);
+    REQUIRE(r.rc == kRan);
+    REQUIRE(r.report.outcome == kTerminationUnconfirmed);
+    REQUIRE(r.report.exit_observed == kExitUnreaped);
+    REQUIRE(r.report.frame_status == kFrameNotRead);
+    REQUIRE(r.report.result_self_reported == 0);
+    REQUIRE(r.report.result_length == 0);
+    REQUIRE(stack_supervised_unconfirmed_count() == 0);
+}
+
+TEST_CASE("Governed supervised D1-C: a run that spawns nothing observed nothing", "[governed][d1c]") {
+    Setup();
+    stack_supervised_report seeded;
+    std::memset(&seeded, 0xFF, sizeof seeded);
+    stack_supervised_limits l{};
+    l.wall_clock_deadline_ns = 1'000 * kMs;
+    l.address_space_bytes = 1ULL << 30;
+    l.max_output_bytes = 64;
+    uint8_t out[64];
+    // An unusable worker path is refused before anything is spawned; the report is zeroed.
+    const int rc = stack_supervised_run_governed(5, kCap, 1, 0, "/nonexistent/stack_worker", g_worker_digest, &l, 0, out,
+                                                 sizeof out, &seeded);
+    REQUIRE(rc == kWorkerUnusable);
+    REQUIRE(seeded.exit_observed == kExitNone);
+    REQUIRE(seeded.frame_status == kFrameNotRead);
 }

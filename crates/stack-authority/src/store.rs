@@ -22,6 +22,7 @@ use std::fmt;
 use std::sync::Mutex;
 
 use crate::capability::CapabilityDigest;
+use crate::digest::Digest32;
 
 /// What a use is recorded under: the capability's id and its digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,39 @@ pub enum UseError {
     Unavailable,
 }
 
+/// What the use store returned when it recorded a use: the evidence an
+/// auditor can hold the store to later. Carried in the receipt's
+/// `Authorized` record. It is evidence of what the store REPORTED, not proof
+/// that the store is honest; a durable store's head can be anchored elsewhere
+/// by an operator, a non-durable one proves nothing across a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseEvidence {
+    /// The store returned none (a store written before this API, or a test
+    /// double). Nothing can be said about where the use was recorded.
+    NotProvided,
+    /// [`MemoryUseStore`]: the use was recorded in memory only. A clearly
+    /// labeled non-durable marker, never a durable position.
+    NonDurableMemory,
+    /// A durable store appended a new use record.
+    Durable {
+        /// Hash of the new use record (chained to its predecessor).
+        record_hash: Digest32,
+        /// Position of the record in the store, counting from 1.
+        position: u64,
+        /// The store head after the append (equal to `record_hash` for a
+        /// hash-chained log).
+        head: Digest32,
+    },
+    /// A durable store already held this reusable capability, so it wrote
+    /// nothing; this is its head and record count at that moment.
+    NoNewRecord {
+        /// Number of records in the store.
+        position: u64,
+        /// The store head.
+        head: Digest32,
+    },
+}
+
 /// Atomic check-and-record of capability uses.
 pub trait UseStore: Send + Sync + fmt::Debug {
     /// Records a use of the capability `key` at `now_ms`. The entry may be
@@ -60,6 +94,22 @@ pub trait UseStore: Send + Sync + fmt::Debug {
     /// on every thread, and, for a durable store, after a restart.
     fn record_use(&self, key: &UseKey<'_>, one_time: bool, expires_at_ms: u64, now_ms: u64)
         -> Result<(), UseError>;
+
+    /// [`Self::record_use`], returning the evidence of where the use was
+    /// recorded. The default calls `record_use` and reports
+    /// [`UseEvidence::NotProvided`], so a store written before this method
+    /// keeps working unchanged and is never credited with a position it did
+    /// not give.
+    fn record_use_evidenced(
+        &self,
+        key: &UseKey<'_>,
+        one_time: bool,
+        expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<UseEvidence, UseError> {
+        self.record_use(key, one_time, expires_at_ms, now_ms)?;
+        Ok(UseEvidence::NotProvided)
+    }
 
     /// Whether recorded uses survive a restart of the process.
     fn is_durable(&self) -> bool;
@@ -136,6 +186,17 @@ impl UseStore for MemoryUseStore {
     ) -> Result<(), UseError> {
         let mut map = self.inner.lock().map_err(|_| UseError::Unavailable)?;
         check_and_record(&mut map, self.capacity, key, one_time, expires_at_ms, now_ms).map(|_| ())
+    }
+
+    fn record_use_evidenced(
+        &self,
+        key: &UseKey<'_>,
+        one_time: bool,
+        expires_at_ms: u64,
+        now_ms: u64,
+    ) -> Result<UseEvidence, UseError> {
+        self.record_use(key, one_time, expires_at_ms, now_ms)?;
+        Ok(UseEvidence::NonDurableMemory)
     }
 
     fn is_durable(&self) -> bool {

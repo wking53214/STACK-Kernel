@@ -197,6 +197,17 @@ pub fn authorized() -> Event {
     Event::Authorized(Authorized {
         capability: capability(),
         action: action(),
+        use_evidence: None,
+    })
+}
+
+/// The fixture Authorized event under format version 2: it carries the use
+/// store's evidence.
+pub fn authorized_with_evidence(evidence: stack_receipt::UseEvidence) -> Event {
+    Event::Authorized(Authorized {
+        capability: capability(),
+        action: action(),
+        use_evidence: Some(evidence),
     })
 }
 
@@ -216,6 +227,33 @@ pub fn attempted() -> Event {
             argument_digest: d(0xbb),
         },
         started_at_ms: T0 + 3,
+        worker: None,
+    })
+}
+
+/// The fixture worker binding.
+pub fn worker_binding() -> stack_receipt::WorkerBinding {
+    stack_receipt::WorkerBinding {
+        image_sha256: d(0xc1),
+        limits: stack_receipt::AppliedLimits {
+            wall_clock_deadline_ns: 2_000_000_000,
+            cpu_seconds: 0,
+            address_space_bytes: 4 << 30,
+            max_output_bytes: 4096,
+            file_size_bytes: 0,
+            nofile: 0,
+        },
+    }
+}
+
+/// The fixture Attempted event under format version 2: it binds the worker.
+pub fn attempted_with_worker() -> Event {
+    let Event::Attempted(a) = attempted() else {
+        unreachable!()
+    };
+    Event::Attempted(stack_receipt::Attempted {
+        worker: Some(worker_binding()),
+        ..a
     })
 }
 

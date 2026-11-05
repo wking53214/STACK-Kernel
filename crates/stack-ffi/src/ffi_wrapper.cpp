@@ -161,6 +161,113 @@ static telemetry::SeccompAuditRing<1024> g_audit_ring;
 // Number of times the built-in governed payload has run (I-01: a completed
 // transaction must have run it; a refused one must not have).
 static std::atomic<uint64_t> g_payload_runs{0};
+// Number of supervised worker processes this host has spawned (a run whose
+// report has a child pid), by any entry point. A refusal that spawns nothing
+// leaves it unchanged; tests use it as the "worker never invoked" counter.
+static std::atomic<uint64_t> g_worker_spawns{0};
+
+// D2-A. The authorized entry points require a capability digest. An all-zero
+// digest (or a null pointer) names no authorization and is refused with
+// kAuthorizationRequired before anything else is looked at. ANY other 32 bytes
+// pass: the host cannot tell a real digest from a made-up one, because it holds
+// no trust set. This is an anti-misuse boundary for callers that go through the
+// Rust API (which can only obtain a digest from an AuthorizedAction), not a
+// defence against code in this process that calls these symbols directly.
+static constexpr int kAuthorizationRequired = -18;
+
+static bool DigestIsPresent(const uint8_t* digest) noexcept {
+    if (digest == nullptr) return false;
+    uint8_t any = 0;
+    for (std::size_t i = 0; i < 32; ++i) any |= digest[i];
+    return any != 0;
+}
+
+// The audit LABEL of a capability digest: its first 8 bytes, big endian.
+static uint64_t DigestLabel(const uint8_t* digest) noexcept {
+    uint64_t label = 0;
+    for (std::size_t i = 0; i < 8; ++i) label = (label << 8) | digest[i];
+    return label;
+}
+
+// ---------------------------------------------------------------------------
+// In-flight run registry (R-5 remainder). A caller that wants to be able to stop
+// a governed supervised run names it with a non-zero run id of its own choosing
+// (stack_supervised_run_authorized_cancellable) and stops it with
+// stack_supervised_cancel(run_id). A stop is the SAME kill the capability-mask
+// revocation uses: CancelHandle::Request, which SIGKILLs through the worker's
+// pidfd, so the run ends as Terminated (13), audited as SupervisedTerminated.
+//
+// Fixed table, no allocation, one spin lock (this file uses no std::mutex). A
+// slot is claimed before governance, so an id cannot be in two runs at once; the
+// run's CancelHandle is attached when governance has passed and detached, under
+// the same lock, before the handle goes out of scope. Cancel calls
+// handle->Request() under the lock, so after DetachHandle returns no cancel can
+// touch the handle. A cancel that arrives before the handle exists is remembered
+// (cancel_pending) and delivered at attach; one that arrives for an id that is
+// not registered (never started, or already finished) is a no-op returning 0.
+// ---------------------------------------------------------------------------
+static constexpr std::size_t kMaxInFlightRuns = 64;
+
+struct RunSlot {
+    uint64_t run_id;                      // 0 = free
+    supervised::CancelHandle* handle;     // null until governance passed / after the run
+    bool cancel_pending;
+};
+static RunSlot g_runs[kMaxInFlightRuns]{};
+static std::atomic_flag g_runs_lock = ATOMIC_FLAG_INIT;
+
+struct RunsLock {
+    RunsLock() noexcept { while (g_runs_lock.test_and_set(std::memory_order_acquire)) {} }
+    ~RunsLock() noexcept { g_runs_lock.clear(std::memory_order_release); }
+};
+
+// Claims a slot for run_id. False when the id is already in flight or the table is full.
+static bool ClaimRun(uint64_t run_id) noexcept {
+    RunsLock lock;
+    RunSlot* free_slot = nullptr;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) return false;
+        if (slot.run_id == 0 && free_slot == nullptr) free_slot = &slot;
+    }
+    if (free_slot == nullptr) return false;
+    *free_slot = RunSlot{run_id, nullptr, false};
+    return true;
+}
+
+static void AttachRun(uint64_t run_id, supervised::CancelHandle& handle) noexcept {
+    RunsLock lock;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) {
+            slot.handle = &handle;
+            if (slot.cancel_pending) handle.Request();
+            return;
+        }
+    }
+}
+
+static void DetachRun(uint64_t run_id) noexcept {
+    RunsLock lock;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) { slot.handle = nullptr; return; }
+    }
+}
+
+static void ReleaseRun(uint64_t run_id) noexcept {
+    RunsLock lock;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) { slot = RunSlot{0, nullptr, false}; return; }
+    }
+}
+
+// Releases the claimed slot on every exit path of the run.
+struct RunClaim {
+    uint64_t run_id;
+    explicit RunClaim(uint64_t id) noexcept : run_id(id) {}
+    ~RunClaim() noexcept { if (run_id != 0) ReleaseRun(run_id); }
+    RunClaim(const RunClaim&) = delete;
+    RunClaim& operator=(const RunClaim&) = delete;
+};
+static constexpr int kRunIdUnavailable = -19;
 
 // The one-time process work. Runs on exactly one thread, the one that moved
 // the state to InProgress. The order matters: the two steps that can fail
@@ -296,7 +403,8 @@ int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t 
 //       nothing was consumed. Retry.
 // This is the in-process path: cooperative deadline, not isolation. A
 // payload that must be stopped goes through stack_supervised_run.
-int stack_execute_governed_transaction(
+static int ExecuteGovernedTransactionImpl(
+    const uint8_t* capability_digest,
     uint64_t context_id,
     uint64_t required_capability_bits,
     uint32_t required_tokens,
@@ -309,6 +417,10 @@ int stack_execute_governed_transaction(
     // Decision B: no implicit seal. The host's own ExecuteGovernedTransaction
     // would seal an unsealed caller; it is never reached from here unsealed.
     if (!host::SeccompFilterEngine::IsInstalledOnThisThread()) return -11;
+
+    // D2-A: an authorized call leaves its label in the audit trail before
+    // governance runs, so a refusal by governance is attributable too.
+    if (capability_digest != nullptr) g_host->RecordAuthorizationLabel(DigestLabel(capability_digest), context_id);
 
     // Build capability token with context
     host::CapabilityMask256 required_mask(required_capability_bits, 0, 0, 0);
@@ -344,6 +456,37 @@ int stack_execute_governed_transaction(
             return -3;
     }
     return -3;
+}
+
+int stack_execute_governed_transaction(
+    uint64_t context_id,
+    uint64_t required_capability_bits,
+    uint32_t required_tokens,
+    uint64_t deadline_budget_ticks,
+    uint64_t hard_timeout_nanoseconds)
+{
+    return ExecuteGovernedTransactionImpl(nullptr, context_id, required_capability_bits, required_tokens,
+                                          deadline_budget_ticks, hard_timeout_nanoseconds);
+}
+
+// D2-A. As stack_execute_governed_transaction, plus the digest (32 bytes) of the
+// capability that authorized the call. Return codes are those above, and:
+//  -18  capability_digest is null or all zero: no authorization is named.
+//       Nothing ran, nothing was consumed, nothing was audited.
+// Any other 32 bytes are accepted (see kAuthorizationRequired). On a call that
+// reaches governance the audit trail gains one AuthorizationBound event whose
+// label is derived from the digest.
+int stack_execute_governed_transaction_authorized(
+    const uint8_t* capability_digest,
+    uint64_t context_id,
+    uint64_t required_capability_bits,
+    uint32_t required_tokens,
+    uint64_t deadline_budget_ticks,
+    uint64_t hard_timeout_nanoseconds)
+{
+    if (!DigestIsPresent(capability_digest)) return kAuthorizationRequired;
+    return ExecuteGovernedTransactionImpl(capability_digest, context_id, required_capability_bits,
+                                          required_tokens, deadline_budget_ticks, hard_timeout_nanoseconds);
 }
 
 // ---------------------------------------------------------------------------
@@ -384,8 +527,19 @@ struct stack_supervised_report {
     // worker's own claim and nothing more (RACE-02). Was reserved[0]; the
     // struct has the same size and layout, old callers read it as zero.
     uint8_t result_self_reported;
-    uint8_t reserved[2];
+    // D1-C. Were reserved[0] and reserved[1]: the struct has the same size (40)
+    // and layout, and an old caller that never read them sees them as bytes it
+    // already ignored. Both are facts the SUPERVISOR observed, never read from
+    // payload content (cpp/include/stack_supervised_exec.hpp, ExitKind and
+    // FrameStatus):
+    //   exit_observed  0 none, 1 exited, 2 signaled, 3 killed by supervisor, 4 unreaped
+    //   frame_status   0 not read, 1 valid, 2 missing, 3 malformed, 4 oversized,
+    //                  5 trailing, 6 conflicting (more than one frame)
+    // The number that goes with exit_observed is exit_code or signal_number.
+    uint8_t exit_observed;
+    uint8_t frame_status;
 };
+static_assert(sizeof(stack_supervised_report) == 40, "ABI: the report keeps its size (D1-C)");
 
 static void FillReport(stack_supervised_report* report, const supervised::ExecutionReport& r) {
     report->elapsed_ns = r.elapsed_ns;
@@ -397,7 +551,8 @@ static void FillReport(stack_supervised_report* report, const supervised::Execut
     report->child_pid = static_cast<int32_t>(r.child_pid);
     report->deadline_fired = r.deadline_fired ? 1 : 0;
     report->result_self_reported = r.result_self_reported ? 1 : 0;
-    report->reserved[0] = report->reserved[1] = 0;
+    report->exit_observed = static_cast<uint8_t>(r.exit_observed);
+    report->frame_status = static_cast<uint8_t>(r.frame_status);
 }
 
 static const char kFfiPayloadBytes[] = "stack-ffi-payload-v1";
@@ -519,7 +674,9 @@ int stack_supervised_run(
 // exec, so the worker image cannot be opened and the call is -14 with nothing
 // spawned and nothing consumed.
 // ---------------------------------------------------------------------------
-int stack_supervised_run_governed(
+static int SupervisedRunGovernedImpl(
+    const uint8_t* capability_digest,
+    uint64_t run_id,
     uint64_t context_id,
     uint64_t required_capability_m0,
     uint32_t required_tokens,
@@ -568,11 +725,26 @@ int stack_supervised_run_governed(
     host::CapabilityMask256 required_mask(required_capability_m0, 0, 0, 0);
     host::SIMDCapabilityToken token(context_id, required_mask);
 
+    // D2-A: an authorized call leaves its label in the audit trail before
+    // governance runs, so a refusal by governance is attributable too.
+    if (capability_digest != nullptr) g_host->RecordAuthorizationLabel(DigestLabel(capability_digest), context_id);
+
+    // R-5: a run that may be stopped by id claims its id before governance.
+    if (run_id != 0 && !ClaimRun(run_id)) return kRunIdUnavailable;
+    RunClaim claim(run_id);
+
     supervised::ExecutionReport r{};
     auto governed = g_host->ExecuteGovernedSupervised(
         token, required_tokens, limits->wall_clock_deadline_ns,
         [&](supervised::CancelHandle& cancel) -> FfiHost::SupervisedRunResult {
+            // The handle is detached before this lambda returns, while it is still alive.
+            struct Attached {
+                uint64_t id;
+                Attached(uint64_t i, supervised::CancelHandle& h) noexcept : id(i) { if (id != 0) AttachRun(id, h); }
+                ~Attached() noexcept { if (id != 0) DetachRun(id); }
+            } attached(run_id, cancel);
             r = supervised::SupervisedExecutor::RunWorker(l, spec, out, out_capacity, &cancel);
+            if (r.child_pid != 0) g_worker_spawns.fetch_add(1, std::memory_order_relaxed);
             if (r.child_pid == 0) return FfiHost::SupervisedRunResult::NotSpawned;
             switch (r.outcome) {
                 case supervised::Outcome::Completed: return FfiHost::SupervisedRunResult::Completed;
@@ -600,6 +772,119 @@ int stack_supervised_run_governed(
     }
     FillReport(report, r);
     return 0;
+}
+
+int stack_supervised_run_governed(
+    uint64_t context_id,
+    uint64_t required_capability_m0,
+    uint32_t required_tokens,
+    uint32_t payload_kind,
+    const char* worker_path,
+    const uint8_t* worker_sha256,
+    const stack_supervised_limits* limits,
+    uint64_t reap_timeout_ns,
+    uint8_t* out,
+    size_t out_capacity,
+    stack_supervised_report* report)
+{
+    return SupervisedRunGovernedImpl(nullptr, 0, context_id, required_capability_m0, required_tokens, payload_kind,
+                                     worker_path, worker_sha256, limits, reap_timeout_ns, out, out_capacity, report);
+}
+
+// D2-A. As stack_supervised_run_governed, plus the digest (32 bytes) of the
+// capability that authorized the run. Every return code above keeps its meaning, and:
+//  -18  capability_digest is null or all zero: no authorization is named. Nothing
+//       was checked, spawned, consumed or audited; the report is zeroed.
+// Any other 32 bytes are accepted: the host holds no trust set and cannot tell a
+// real digest from a made-up one (see kAuthorizationRequired). A call that reaches
+// governance adds one AuthorizationBound audit event (label = first 8 bytes of the
+// digest, big endian, context_id; the rate-limit domain in tokens) BEFORE the
+// governance checks, so refusals by governance are attributable too. The label is
+// not an integrity value; the full digest is recorded in the receipt.
+int stack_supervised_run_authorized(
+    const uint8_t* capability_digest,
+    uint64_t context_id,
+    uint64_t required_capability_m0,
+    uint32_t required_tokens,
+    uint32_t payload_kind,
+    const char* worker_path,
+    const uint8_t* worker_sha256,
+    const stack_supervised_limits* limits,
+    uint64_t reap_timeout_ns,
+    uint8_t* out,
+    size_t out_capacity,
+    stack_supervised_report* report)
+{
+    if (report) std::memset(report, 0, sizeof *report);
+    if (!DigestIsPresent(capability_digest)) return kAuthorizationRequired;
+    return SupervisedRunGovernedImpl(capability_digest, 0, context_id, required_capability_m0, required_tokens,
+                                     payload_kind, worker_path, worker_sha256, limits, reap_timeout_ns, out,
+                                     out_capacity, report);
+}
+
+// R-5. As stack_supervised_run_authorized, and the run can be stopped by id with
+// stack_supervised_cancel(run_id). run_id is chosen by the caller and must be
+// non-zero and not in flight; the table holds 64 runs. Added return code:
+//  -19  run_id is 0, is already in flight, or the table is full. Nothing was
+//       spawned or consumed. (The authorization event, if any, is already written.)
+// A stopped run ends with outcome Terminated (13) and exit_observed 3 (killed by
+// the supervisor), is audited as SupervisedTerminated with its tokens spent, and is
+// never a success: the same path as a capability-mask revocation (R2-K-24).
+int stack_supervised_run_authorized_cancellable(
+    const uint8_t* capability_digest,
+    uint64_t run_id,
+    uint64_t context_id,
+    uint64_t required_capability_m0,
+    uint32_t required_tokens,
+    uint32_t payload_kind,
+    const char* worker_path,
+    const uint8_t* worker_sha256,
+    const stack_supervised_limits* limits,
+    uint64_t reap_timeout_ns,
+    uint8_t* out,
+    size_t out_capacity,
+    stack_supervised_report* report)
+{
+    if (report) std::memset(report, 0, sizeof *report);
+    if (!DigestIsPresent(capability_digest)) return kAuthorizationRequired;
+    if (run_id == 0) return kRunIdUnavailable;
+    return SupervisedRunGovernedImpl(capability_digest, run_id, context_id, required_capability_m0, required_tokens,
+                                     payload_kind, worker_path, worker_sha256, limits, reap_timeout_ns, out,
+                                     out_capacity, report);
+}
+
+// R-5. How many runs started with stack_supervised_run_authorized_cancellable are in
+// flight past governance: their handle is attached and their worker is being spawned
+// or is running. For tests and operators.
+uint64_t stack_supervised_in_flight_count() {
+    RunsLock lock;
+    uint64_t n = 0;
+    for (const RunSlot& slot : g_runs) {
+        if (slot.run_id != 0 && slot.handle != nullptr) ++n;
+    }
+    return n;
+}
+
+// R-5. Asks the run named run_id to stop. Returns 1 when a run with that id is in
+// flight (the kill is sent now, or at once when its worker is spawned), 0 when no
+// run has that id (never started, already finished, or id 0): a harmless no-op that
+// touches nothing. Callable from any thread.
+int stack_supervised_cancel(uint64_t run_id) {
+    if (run_id == 0) return 0;
+    RunsLock lock;
+    for (RunSlot& slot : g_runs) {
+        if (slot.run_id == run_id) {
+            if (slot.handle != nullptr) slot.handle->Request();
+            else slot.cancel_pending = true;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Number of supervised worker processes this host has spawned, by any entry point.
+uint64_t stack_host_worker_spawn_count() {
+    return g_worker_spawns.load(std::memory_order_acquire);
 }
 
 // Computes the SHA-256 of the file at `path` into out[32], for provisioning

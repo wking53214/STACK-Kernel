@@ -37,13 +37,15 @@
 //! authorizes nothing: every field in it is compared against a field the
 //! issuer signed, and the two must agree.
 
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use crate::capability::{Field, ParseError, SignedCapability, MAX_ID_BYTES, MAX_WIRE_BYTES, MIN_WIRE_BYTES};
 use crate::clock::Clock;
 use crate::digest::Digest32;
 use crate::scope::is_control;
-use crate::store::{UseError, UseKey, UseStore};
+use crate::store::{UseError, UseEvidence, UseKey, UseStore};
 use crate::trust::{KeyId, ResolveError, RevocationList, TrustSet};
 use crate::CapabilityDigest;
 
@@ -258,6 +260,7 @@ pub struct AuthorizedAction {
     decision_root: Digest32,
     one_time: bool,
     authorized_at_ms: u64,
+    use_evidence: UseEvidence,
 }
 
 impl AuthorizedAction {
@@ -320,6 +323,25 @@ impl AuthorizedAction {
     pub const fn authorized_at_ms(&self) -> u64 {
         self.authorized_at_ms
     }
+
+    /// What the use store returned when it recorded this use: a durable
+    /// record hash and position, a labeled non-durable marker, or nothing.
+    pub const fn use_evidence(&self) -> &UseEvidence {
+        &self.use_evidence
+    }
+}
+
+/// Callback run after the revocation list or trust set was handed out
+/// for writing. It receives the authority so it can re-check holders of
+/// earlier permissions.
+type ChangeHook = Box<dyn Fn(&Authority) + Send + Sync>;
+
+struct ChangeHookCell(std::sync::OnceLock<ChangeHook>);
+
+impl fmt::Debug for ChangeHookCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.get().is_some() { "ChangeHook(set)" } else { "ChangeHook(unset)" })
+    }
 }
 
 /// The verifier. Holds the trust set and the revocation list; never a
@@ -329,6 +351,8 @@ pub struct Authority {
     config: AuthorityConfig,
     trust: RwLock<TrustSet>,
     revocations: RwLock<RevocationList>,
+    epoch: AtomicU64,
+    hook: ChangeHookCell,
 }
 
 impl Authority {
@@ -339,7 +363,55 @@ impl Authority {
             config,
             trust: RwLock::new(trust),
             revocations: RwLock::new(revocations),
+            epoch: AtomicU64::new(0),
+            hook: ChangeHookCell(std::sync::OnceLock::new()),
         })
+    }
+
+    /// The revocation epoch: a monotonic counter, 0 at construction, that
+    /// goes up each time the revocation list or the trust set is handed out
+    /// for writing ([`Authority::with_revocations`], [`Authority::with_trust`]).
+    /// It counts write accesses, not proven changes: a closure that changed
+    /// nothing still advances it, which can only cause an extra re-check,
+    /// never a missed one. A holder of an older [`AuthorizedAction`] that
+    /// sees the epoch move calls [`Authority::recheck`].
+    pub fn revocation_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    /// Registers the one callback run after every write access to the
+    /// revocation list or trust set, once the lock is released and the
+    /// epoch has advanced. Returns false if a callback was already set (the
+    /// first stays). The callback must not call `with_trust` or
+    /// `with_revocations`.
+    pub fn set_change_hook(&self, hook: impl Fn(&Authority) + Send + Sync + 'static) -> bool {
+        self.hook.0.set(Box::new(hook)).is_ok()
+    }
+
+    fn run_hook(&self) {
+        if let Some(hook) = self.hook.0.get() {
+            hook(self);
+        }
+    }
+
+    /// Re-checks, now, whether an earlier permission still stands: its
+    /// capability is not revoked (by id or digest) and its issuer key is
+    /// still in the trust set and not revoked. The key's validity window
+    /// is deliberately not re-applied: a window that closes does not
+    /// withdraw an already-minted permission. An unreadable (poisoned)
+    /// state is an error, never a pass.
+    pub fn recheck(&self, action: &AuthorizedAction) -> Result<(), AuthzError> {
+        {
+            let revocations = self.revocations.read().map_err(|_| AuthzError::TrustUnavailable)?;
+            if revocations.is_revoked(action.cap_id(), action.cap_digest()) {
+                return Err(AuthzError::Revoked);
+            }
+        }
+        let trust = self.trust.read().map_err(|_| AuthzError::TrustUnavailable)?;
+        match trust.resolve(action.issuer_id(), action.key_id(), action.authorized_at_ms()) {
+            Ok(_) | Err(ResolveError::IssuerKeyNotYetValid | ResolveError::IssuerKeyExpired) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// The configuration.
@@ -351,13 +423,21 @@ impl Authority {
     /// add, revoke or remove anchors while the verifier runs.
     pub fn with_trust<R>(&self, f: impl FnOnce(&mut TrustSet) -> R) -> Result<R, AuthzError> {
         let mut guard = self.trust.write().map_err(|_| AuthzError::TrustUnavailable)?;
-        Ok(f(&mut guard))
+        let r = f(&mut guard);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        drop(guard);
+        self.run_hook();
+        Ok(r)
     }
 
     /// Runs `f` on the revocation list under its write lock.
     pub fn with_revocations<R>(&self, f: impl FnOnce(&mut RevocationList) -> R) -> Result<R, AuthzError> {
         let mut guard = self.revocations.write().map_err(|_| AuthzError::TrustUnavailable)?;
-        Ok(f(&mut guard))
+        let r = f(&mut guard);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        drop(guard);
+        self.run_hook();
+        Ok(r)
     }
 
     /// Decides whether `capability_bytes` authorizes `request` now. See
@@ -429,7 +509,7 @@ impl Authority {
             return Err(AuthzError::ResourceDenied);
         }
         // 13. Record the use, last.
-        store.record_use(
+        let use_evidence = store.record_use_evidenced(
             &UseKey {
                 cap_id: &cap.cap_id,
                 digest: signed.digest(),
@@ -451,6 +531,7 @@ impl Authority {
             decision_root: cap.decision_root,
             one_time: cap.one_time,
             authorized_at_ms: now,
+            use_evidence,
         })
     }
 }

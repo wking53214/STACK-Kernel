@@ -63,13 +63,14 @@ pub use sign::{
     RECEIPT_KEY_ID_DOMAIN, SIGNATURE_BYTES, SIGNATURE_DOMAIN,
 };
 pub use encode::{
-    canonical_bytes, decode_record, genesis_hash, record_hash, DecodeError, DOMAIN_TAG, GENESIS_DOMAIN,
-    MAX_RECORD_BYTES, RECORD_HASH_DOMAIN,
+    canonical_bytes, decode_record, genesis_hash, record_hash, DecodeError, DOMAIN_TAG, DOMAIN_TAG_V2,
+    GENESIS_DOMAIN, MAX_RECORD_BYTES, RECORD_HASH_DOMAIN,
 };
 pub use record::{
     Action, ActualAction, Assurance, Attempted, Authorized, CapabilityBinding, DecisionEvidence, Event, ExecutionId,
-    GateOutcome, GatePosition, Handoff, NativeDigest, Outcome, OutcomeKind, Problem, Proposed, Provenance,
-    ReceiptKeyId, Record, Rejected, Stage, Subject, Terminal, ValidationError, Verdict, EXECUTION_ID_BYTES,
-    MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES,
+    ExitObserved, FrameStatus, GateOutcome, GatePosition, Handoff, NativeDigest, Observed, Outcome, OutcomeKind,
+    Problem, Proposed, Provenance, ReceiptKeyId, Record, Rejected, Stage, Subject, Terminal, TerminalObserved,
+    ValidationError, Verdict, EXECUTION_ID_BYTES, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES,
 };
-pub use stack_authority::Digest32;
+pub use record::{AppliedLimits, WorkerBinding};
+pub use stack_authority::{Digest32, UseEvidence};

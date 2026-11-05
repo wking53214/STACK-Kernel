@@ -66,3 +66,161 @@ fn the_governed_entry_is_the_one_safe_supervised_run() {
     // Exactly one place calls the governed C symbol from a safe function.
     assert_eq!(src.matches("stack_supervised_run_governed(").count(), 2, "declaration plus one call");
 }
+
+/// The public functions of the source with their full signature text (up to the
+/// opening brace) and body (to the next top-level item), split into safe and unsafe.
+fn pub_functions(src: &str) -> Vec<(String, bool, String, String)> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(at) = rest.find("\npub ") {
+        let after = &rest[at + 1..];
+        let line_end = after.find('\n').unwrap_or(after.len());
+        let head = &after[..line_end];
+        let (is_fn, is_unsafe) = (head.starts_with("pub fn "), head.starts_with("pub unsafe fn "));
+        let body_end = after[1..].find("\npub ").map_or(after.len(), |i| i + 1);
+        let body_end = after[..body_end].rfind("\n}\n").map_or(body_end, |i| i + 3);
+        if is_fn || is_unsafe {
+            let name_start = head.find("fn ").expect("fn") + 3;
+            let name: String = head[name_start..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let signature_end = after.find(" {\n").unwrap_or(line_end);
+            out.push((name, is_unsafe, after[..signature_end].to_owned(), after[..body_end].to_owned()));
+        }
+        rest = &after[1..];
+    }
+    out
+}
+
+/// D2-A: the safe governed entry points take the authorization; the raw ones are `unsafe fn`;
+/// and no safe public function reaches a C symbol that takes no authorization.
+#[test]
+fn the_safe_governed_entry_points_take_an_authorized_action_and_the_raw_ones_are_unsafe() {
+    let src = non_test_source();
+    let fns = pub_functions(src);
+    let find = |n: &str| fns.iter().find(|f| f.0 == n).unwrap_or_else(|| panic!("no pub fn {n}: {:?}", fns.iter().map(|f| &f.0).collect::<Vec<_>>()));
+
+    for name in ["supervised_run_governed", "supervised_run_governed_cancellable", "execute_governed_transaction"] {
+        let (_, is_unsafe, signature, _) = find(name);
+        assert!(!is_unsafe, "{name} must be safe");
+        assert!(
+            signature.contains("authorization: &AuthorizedAction"),
+            "{name} must take `authorization: &AuthorizedAction`: {signature}"
+        );
+    }
+    for name in ["supervised_run_governed_unauthorized", "execute_governed_transaction_unauthorized", "supervised_run"] {
+        let (_, is_unsafe, signature, _) = find(name);
+        assert!(*is_unsafe, "{name} must be an unsafe fn: {signature}");
+        assert!(!signature.contains("AuthorizedAction"), "{name} is the raw path");
+    }
+
+    // Safe functions reach only the authorized C symbols for governed execution.
+    let raw_symbols = [
+        "stack_supervised_run(",
+        "stack_supervised_run_governed(",
+        "stack_execute_governed_transaction(",
+    ];
+    let mut offenders = Vec::new();
+    for (name, is_unsafe, _, body) in &fns {
+        if *is_unsafe {
+            continue;
+        }
+        // The text of a safe function that is not an extern declaration.
+        for sym in raw_symbols {
+            if body.contains(sym) && !body.contains("extern \"C\"") {
+                offenders.push(format!("{name} -> {sym}"));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "safe public functions reach a C symbol that takes no authorization: {offenders:?}");
+
+    // The authorized symbols are called exactly once each from safe code, with the digest.
+    for (name, sym) in [
+        ("supervised_run_governed", "stack_supervised_run_authorized("),
+        ("supervised_run_governed_cancellable", "stack_supervised_run_authorized_cancellable("),
+        ("execute_governed_transaction", "stack_execute_governed_transaction_authorized("),
+    ] {
+        let (_, _, _, body) = find(name);
+        assert!(body.contains(sym), "{name} must call {sym}");
+        assert!(body.contains("cap_digest()"), "{name} must pass the capability digest");
+    }
+}
+
+/// No safe public function takes a bare capability mask and runs a worker or a transaction:
+/// the only items in the public surface that can start governed execution are the four above.
+#[test]
+fn only_the_named_functions_can_start_governed_execution() {
+    let src = non_test_source();
+    let mut starts = Vec::new();
+    for (name, is_unsafe, _, body) in pub_functions(src) {
+        let calls_c = ["stack_supervised_run", "stack_execute_governed_transaction"]
+            .iter()
+            .any(|s| {
+                [
+                    "(",
+                    "_governed(",
+                    "_authorized(",
+                    "_authorized_cancellable(",
+                ]
+                .iter()
+                .any(|suffix| body.contains(&format!("{s}{suffix}")))
+            });
+        if calls_c {
+            starts.push((name, is_unsafe));
+        }
+    }
+    starts.sort();
+    assert_eq!(
+        starts,
+        vec![
+            ("execute_governed_transaction".to_owned(), false),
+            ("execute_governed_transaction_unauthorized".to_owned(), true),
+            ("supervised_run".to_owned(), true),
+            ("supervised_run_governed".to_owned(), false),
+            ("supervised_run_governed_cancellable".to_owned(), false),
+            ("supervised_run_governed_unauthorized".to_owned(), true),
+        ]
+    );
+}
+
+/// R-1, lifetime: the host is constructed once and lives for the process. There is no
+/// teardown, so there is no exported symbol and no public Rust function whose name says
+/// shutdown, teardown, destroy, finalize, deinit, uninit, reset, free, release or close.
+/// If one is ever added, this test fails and ABI.md section 3 ("Lifetime") must change with it.
+/// Behaviour that goes with the statement (a repeated init is idempotent and keeps the state)
+/// is tested by cpp/tests/ffi_c_caller.c (ctest STACKFfiCCaller) and
+/// cpp/tests/ffi_init_redteam.cpp (ctest STACKRedteam_ffi_init).
+#[test]
+fn the_host_has_no_teardown_entry_point() {
+    const WRAPPER: &str = include_str!("../src/ffi_wrapper.cpp");
+    const TEARDOWN_WORDS: [&str; 10] = [
+        "shutdown", "teardown", "destroy", "finalize", "deinit", "uninit", "reset", "free", "release", "close",
+    ];
+    // Exported C symbols: definitions at column 0 inside the extern "C" block.
+    let mut exported = Vec::new();
+    for line in WRAPPER.lines() {
+        for prefix in ["int ", "uint64_t ", "void "] {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                if let Some(name) = rest.split('(').next() {
+                    if name.starts_with("stack_") && rest.contains('(') {
+                        exported.push(name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    assert!(exported.iter().any(|n| n == "stack_host_initialize"), "parsed the wrong thing: {exported:?}");
+    assert!(exported.len() >= 15, "parsed too few symbols: {exported:?}");
+    let src = non_test_source();
+    let mut rust_names = Vec::new();
+    for line in src.lines() {
+        if let Some(rest) = line.strip_prefix("pub fn ") {
+            if let Some(name) = rest.split(['(', '<']).next() {
+                rust_names.push(name.to_owned());
+            }
+        }
+    }
+    for name in exported.iter().chain(rust_names.iter()) {
+        for word in TEARDOWN_WORDS {
+            assert!(!name.contains(word), "`{name}` looks like a teardown entry point (`{word}`): the host has none");
+        }
+    }
+}

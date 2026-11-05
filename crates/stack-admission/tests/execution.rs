@@ -96,8 +96,8 @@ fn a_valid_authorized_request_runs_and_verifies_with_stated_limitations() {
     assert_eq!(digest, s.result_digest);
     let terminal = parsed.records.last().unwrap();
     match &terminal.record().event {
-        stack_receipt::Event::Terminal(t) => assert_eq!(
-            t.outcome,
+        stack_receipt::Event::TerminalObserved(t) => assert_eq!(
+            t.terminal.outcome,
             Outcome::Completed {
                 exit_code: 0,
                 result_digest: digest
@@ -178,6 +178,9 @@ fn the_verifier_lists_every_item_it_did_not_check() {
             "subject_content_not_supplied",
             "roster_policy_not_supplied",
             "result_bytes_not_supplied",
+            // Step 2: the Attempted record now binds the worker image and limits, and an
+            // auditor that supplies no expectation is told so.
+            "worker_expectation_not_supplied",
         ]),
         "{}",
         bare.to_json()
@@ -239,6 +242,7 @@ fn an_auditor_with_other_expectations_rejects_the_same_log() {
             audience: Some(KERNEL),
             kernel_id: Some(KERNEL),
             result_bytes: Some(RESULT),
+            ..Expectations::default()
         },
     );
     reject(v, FindingCode::Decision(stack_receipt::DecisionFinding::RequiredSeatMissing("HERALD:confidence".into())));

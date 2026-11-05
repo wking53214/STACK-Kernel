@@ -21,6 +21,9 @@ thiserror.workspace = true
 # TEST FIXTURE issuer only: tests stand in for the capability issuer that
 # lives outside the kernel. Nothing in src/ signs.
 ed25519-dalek.workspace = true
+# TEST-ONLY edge (R-9): the cross-repo vector test runs the same corpus
+# through the Sentinel's full-domain digest. Nothing in src/ uses it.
+stack-sentinel = { path = "../stack-sentinel" }
 
 [lints]
 workspace = true

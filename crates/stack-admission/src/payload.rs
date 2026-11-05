@@ -14,7 +14,12 @@
 //! }
 //! ```
 //!
-//! Exactly these six fields, each of the right shape, within the bounds a
+//! Exactly these six fields, plus one optional seventh, `native_digest`
+//! (`{ "label": "...", "digest": "<64 lowercase hex>" }`): the sender's own
+//! digest of its native record, such as a Sentinel ledger row hash. It is
+//! authenticated by the Trident MAC with the rest of the payload, is recorded
+//! beside the CNS subject digest and never in place of it, and the kernel does
+//! not recompute it. Each field is of the right shape, within the bounds a
 //! receipt record can carry (`stack_receipt::record`) and a capability
 //! can express (`stack_authority`). The Trident has already refused
 //! floats, out-of-range integers, duplicate keys and excess depth, so a
@@ -23,7 +28,7 @@
 use serde_json::{Map, Value};
 use stack_authority::{validate_path, Digest32, PathError, MAX_WIRE_BYTES};
 use stack_receipt::record::check_text;
-use stack_receipt::{GateOutcome, GatePosition, ValidationError, Verdict, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES};
+use stack_receipt::{GateOutcome, GatePosition, NativeDigest, ValidationError, Verdict, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES};
 
 /// Why the payload was not accepted as a request. Every variant is a
 /// refusal before anything is recorded or authorized.
@@ -64,6 +69,9 @@ pub enum PayloadError {
     /// more bytes than any capability can be.
     #[error("capability is not lowercase hex of a capability-sized byte string")]
     BadCapabilityHex,
+    /// `native_digest.digest` is not 64 lowercase hex characters.
+    #[error("native_digest.digest is not a 64-character lowercase hex digest")]
+    BadNativeDigest,
     /// `resource` breaks the resource path rules.
     #[error("resource refused: {0}")]
     Resource(PathError),
@@ -102,15 +110,31 @@ pub struct Request {
     pub resource: String,
     /// The argument value for the worker.
     pub args: Value,
+    /// The sender's native digest, when it sent one. Recorded as given.
+    pub native_digest: Option<NativeDigest>,
 }
 
 const FIELDS: [&str; 6] = ["args", "capability", "decision", "operation", "resource", "subject"];
 const DECISION_FIELDS: [&str; 3] = ["root", "seats", "verdicts"];
 const VERDICT_FIELDS: [&str; 5] = ["digest", "gate", "outcome", "position", "subject"];
+const NATIVE_FIELDS: [&str; 2] = ["digest", "label"];
 
 fn object<'a>(v: &'a Value, what: &'static str, fields: &[&'static str]) -> Result<&'a Map<String, Value>, PayloadError> {
+    object_with(v, what, fields, &[])
+}
+
+/// As [`object`], also allowing the `optional` fields to be absent.
+fn object_with<'a>(
+    v: &'a Value,
+    what: &'static str,
+    fields: &[&'static str],
+    optional: &[&'static str],
+) -> Result<&'a Map<String, Value>, PayloadError> {
     let map = v.as_object().ok_or(PayloadError::NotAnObject(what))?;
-    if let Some(extra) = map.keys().find(|k| !fields.contains(&k.as_str())) {
+    if let Some(extra) = map
+        .keys()
+        .find(|k| !fields.contains(&k.as_str()) && !optional.contains(&k.as_str()))
+    {
         return Err(PayloadError::UnexpectedField(extra.clone()));
     }
     for f in fields {
@@ -155,7 +179,7 @@ fn verdict(v: &Value) -> Result<Verdict, PayloadError> {
 
 /// Parses a verified Trident payload into a [`Request`].
 pub fn parse(payload: &Value) -> Result<Request, PayloadError> {
-    let map = object(payload, "payload", &FIELDS)?;
+    let map = object_with(payload, "payload", &FIELDS, &["native_digest"])?;
 
     let subject = map.get("subject").ok_or(PayloadError::MissingField("subject"))?;
     if !subject.is_object() {
@@ -196,6 +220,23 @@ pub fn parse(payload: &Value) -> Result<Request, PayloadError> {
 
     let args = map.get("args").ok_or(PayloadError::MissingField("args"))?.clone();
 
+    let native_digest = match map.get("native_digest") {
+        None => None,
+        Some(v) => {
+            let m = object(v, "native_digest", &NATIVE_FIELDS)?;
+            let hex_digest = string(m, "digest")?;
+            if hex_digest.len() != 64 || !is_lower_hex(hex_digest) {
+                return Err(PayloadError::BadNativeDigest);
+            }
+            let native = NativeDigest {
+                label: string(m, "label")?.to_owned(),
+                digest: Digest32::from_hex(hex_digest).ok_or(PayloadError::BadNativeDigest)?,
+            };
+            native.validate()?;
+            Some(native)
+        }
+    };
+
     Ok(Request {
         subject: subject.clone(),
         decision: DecisionClaim { seats, verdicts, root },
@@ -203,6 +244,7 @@ pub fn parse(payload: &Value) -> Result<Request, PayloadError> {
         operation: operation.to_owned(),
         resource: resource.to_owned(),
         args,
+        native_digest,
     })
 }
 

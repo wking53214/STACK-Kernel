@@ -139,7 +139,14 @@ enum class AuditEventType : uint8_t {
     SupervisedTimedOut,               // wall-clock deadline passed; worker killed
     SupervisedFailed,                 // spawned and ended any other way, or never spawned
     SupervisedTerminationUnconfirmed, // killed, not reaped within the bound; may still be running
-    SupervisedTerminated              // killed because a pending capability revocation asked for it (R2-K-24); tokens spent
+    SupervisedTerminated,             // killed because a pending capability revocation asked for it (R2-K-24); tokens spent
+    // D2-A. An authorized entry point (stack_*_authorized) was reached with a
+    // non-zero capability digest. context_id carries a 64-bit LABEL derived from
+    // the digest (its first 8 bytes, big endian) and tokens_consumed carries the
+    // rate-limit domain. The label is NOT an integrity value: 64 bits identify
+    // an entry in a trail, they do not authenticate anything. The full 32-byte
+    // digest lives in the receipt, not in this ring.
+    AuthorizationBound
 };
 
 /**

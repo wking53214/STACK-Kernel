@@ -44,9 +44,20 @@ that existed before are unchanged. Additions and changes of meaning:
 | R2-K-24 | host audit ring, `AuditEventType` | NEW value 9 `SupervisedTerminated`, appended. |
 | A3 | `uint64_t stack_supervised_unconfirmed_count(void)`, `uint64_t stack_supervised_reap_unconfirmed(void)` | NEW. Workers sent SIGKILL and not confirmed reaped; re-kill and reap them. |
 | A2 | `stack_supervised_report` | Same size and layout. `reserved[3]` became `result_self_reported` (u8) and `reserved[2]`. Old callers read it as before; it is 1 on `Completed`. |
+| D1-C | `stack_supervised_report` | Same size (40) and layout, asserted at compile time on both sides. `reserved[0]` became `exit_observed` (u8: 0 none, 1 exited, 2 signaled, 3 killed by the supervisor, 4 unreaped) and `reserved[1]` became `frame_status` (u8: 0 not read, 1 valid, 2 missing, 3 malformed, 4 oversized, 5 trailing, 6 conflicting). Both are facts the supervisor observed; neither is read from payload bytes. The number that goes with `exit_observed` is `exit_code` (exited) or `signal_number` (signaled, killed). An old caller never read the two bytes (they were written as 0). No outcome value is renamed or added; `Completed` still means exit 0 inside the deadline and a well-formed frame, and now additionally implies `exit_observed` 1 with `exit_code` 0 and `frame_status` 1. Rust: `SupervisedReport::{exit_observed, frame_status}`, `ExitObserved`, `FrameStatus`, `SupervisedOutcome::campaign_name`. Status: implemented, tested (`worker_exec_tests.cpp` "exit_observed and frame_status", `lib.rs` `test_d1c_*`). |
 | A2 | `stack_supervised_report.outcome` | NEW value 12 `TerminationUnconfirmed`. A caller that switched over the outcome and had a default arm now sees it there. |
 | A3 | `stack_supervised_run` | Unchanged signature and behaviour. Now documented LEGACY: its child is a fork of the caller, it makes no capability or rate-limit check and writes no audit event. Not for untrusted payloads. Nothing in this repository calls it except its own tests. R2-K-22: the C symbol is kept unchanged for ABI compatibility; the Rust wrapper `supervised_run` is now `pub unsafe fn` (with a `# Safety` section), so safe Rust can no longer reach it. Tested: `tests/api_surface.rs` (source guard: no safe public function reaches the symbol; `supervised_run` is `unsafe`) and a `compile_fail,E0133` doc test on `supervised_run`. |
 | A3 | host audit ring, `AuditEventType` | NEW values 5 `SupervisedCompleted`, 6 `SupervisedTimedOut`, 7 `SupervisedFailed`, 8 `SupervisedTerminationUnconfirmed`, appended so 0 to 4 keep their numbers. `stack_host_audit_read_slot` returns them. |
+| D2-A | `int stack_supervised_run_authorized(const uint8_t* capability_digest, <the arguments of stack_supervised_run_governed>)` | NEW. The digest (32 bytes) of the capability that authorized the run comes first. NULL or all zero is -18, checked before anything else: nothing is checked, spawned, consumed or audited and the report is zeroed. Every other code keeps its meaning. A call that reaches governance adds one `AuthorizationBound` audit event (below). Status: implemented, tested (`cpp/tests/ffi_authorized_caller.c`, ctest `STACKFfiAuthorizedCaller`; `tests/authorized_run.rs`). |
+| D2-A | `int stack_execute_governed_transaction_authorized(const uint8_t* capability_digest, <the arguments of stack_execute_governed_transaction>)` | NEW. As above for the in-process path; -18 for a NULL or all-zero digest. Status: implemented, tested (`ffi_authorized_caller.c`, on a sealed thread). |
+| D2-A | `uint64_t stack_host_worker_spawn_count(void)` | NEW. Supervised worker processes this host has spawned, by any entry point; the "worker never invoked" counter of the refusal tests. |
+| D2-A | host audit ring, `AuditEventType` | NEW value 10 `AuthorizationBound`, appended. `context_id` carries the capability LABEL (first 8 bytes of the digest, big endian), `tokens` the rate-limit domain. Recorded before the governance checks. The label is NOT an integrity value; the full digest lives in the receipt. |
+| D2-A | `stack_execute_governed_transaction`, `stack_supervised_run_governed` | Unchanged signatures and behaviour. They name no authorization: they are the RAW entry points, and the host cannot tell who asked. |
+| D2-A | Rust `execute_governed_transaction`, `supervised_run_governed` | BREAKING for Rust callers: the safe functions now take `authorization: &AuthorizedAction` (`stack-authority`) first and call the `_authorized` symbols. The old behaviour is `unsafe fn execute_governed_transaction_unauthorized` and `unsafe fn supervised_run_governed_unauthorized`. New: `capability_label`, `host_worker_spawn_count`, `HostAuditEvent::AuthorizationBound`, `TransactionError::AuthorizationRequired`, `GovernedSupervisedError::AuthorizationRequired`. New dependency edge `stack-ffi -> stack-authority` (stack-authority depends on no workspace crate: no cycle). Tested: `tests/api_surface.rs`, the `compile_fail` doc tests. |
+| R-5 | `int stack_supervised_run_authorized_cancellable(const uint8_t* capability_digest, uint64_t run_id, <the arguments of stack_supervised_run_authorized after the digest>)` | NEW. As `stack_supervised_run_authorized`, and the run can be stopped by `run_id`: caller-chosen, non-zero, not already in flight, 64 runs at a time. New code -19: the id is 0, in flight, or the table is full; nothing spawned or consumed. Status: implemented, tested (`ffi_authorized_caller.c`; `tests/authorized_run.rs`). |
+| R-5 | `int stack_supervised_cancel(uint64_t run_id)` | NEW. 1 when a run with that id is in flight (its worker is SIGKILLed through the pidfd now, or the moment it is spawned), 0 for an unknown, finished or zero id: a no-op that touches nothing. The run ends with outcome 13 `Terminated` and `exit_observed` 3, audited as `SupervisedTerminated`, tokens spent: the same path as a capability-mask revocation (R2-K-24). |
+| R-5 | `uint64_t stack_supervised_in_flight_count(void)` | NEW. Runs started with the cancellable entry that are past governance with a worker spawning or running. For tests and operators. |
+| R-5 | Rust | NEW `supervised_run_governed_cancellable`, `supervised_cancel`, `supervised_in_flight_count`, `GovernedSupervisedError::RunIdUnavailable`. `stack-admission`: `SupervisedExecutor` implements `CancellableExecutor` (`tests/revocation_real_worker.rs`). |
 
 Test-only, present only when compiled with `-DSTACK_FFI_TESTING` (CMake
 `ffi_init_redteam`; never defined by `build.rs`):
@@ -100,6 +111,7 @@ Rust additions in `src/lib.rs`: `host_initialize`, `host_seal_current_thread`,
 | -11 | Calling thread not sealed. Nothing ran; the thread is untouched. |
 | -12 | Initialization failed (latched). Nothing ran. |
 | -13 | A capability change is pending. Nothing ran, nothing consumed. |
+| -18 | `stack_execute_governed_transaction_authorized` only: the capability digest is NULL or all zero (D2-A). Nothing ran, nothing consumed, nothing audited. |
 
 ## 2. Governance policy of the FFI host
 
@@ -168,6 +180,31 @@ concurrent `host_initialize` calls agree.
 
 Not tested: failure of the signal handler registration (only `timer_create`
 failure is injected); initialization racing `fork`.
+
+### Lifetime (R-1)
+
+Status: implemented, tested. A limitation, stated plainly.
+
+- There is no teardown. The host is constructed once, on the first successful
+  `stack_host_initialize` (or `host_initialize`), and lives until the process
+  exits. No exported symbol and no public Rust function destroys, resets,
+  re-creates or re-calibrates it, and none revokes the process-wide signal
+  handler or the thread deadline timer that initialization registered.
+- A repeated initialization is idempotent. It returns the latched result of the
+  first one (0, or -1 if that failed) and does not construct a second host
+  (tested with 64 concurrent initializations). The tests show that the
+  capability mask and the payload counter survive a repeated init; the
+  rate-limit buckets and the audit ring are not asserted by a repeated-init test.
+- A caller that wants a clean host starts a new process. A host whose
+  initialization failed stays failed for the life of the process (above).
+- A thread seal is separate and per thread; it ends with the thread.
+
+Pinned by: `tests/api_surface.rs::the_host_has_no_teardown_entry_point` (no
+exported symbol or public function with a teardown-like name; adding one fails
+the test and requires this section to change), `cpp/tests/ffi_c_caller.c` (ctest
+`STACKFfiCCaller`: a repeated init after use returns 0, rewinds nothing, and the
+granted capability still admits a run) and `cpp/tests/ffi_init_redteam.cpp`
+(64 concurrent initializations construct one host).
 
 ## 4. Accounting rules
 
@@ -467,6 +504,8 @@ What is now done (each statement names its test):
 | -15 | Other limits invalid (deadline above one hour, output above the buffer or 1 MiB, reap bound above a minute). |
 | -16 | `worker_sha256` is NULL. The digest of the worker image is required. Nothing spawned, nothing consumed. |
 | -17 | The image does not hash to `worker_sha256`. Nothing spawned; tokens taken for the call are refunded and one `SupervisedFailed` event with 0 tokens is written. |
+| -18 | `stack_supervised_run_authorized` only: the capability digest is NULL or all zero (D2-A). Nothing checked, spawned, consumed or audited. |
+| -19 | `stack_supervised_run_authorized_cancellable` only: `run_id` is 0, already in flight, or the table is full (R-5). Nothing spawned or consumed. |
 
   While a worker runs the call counts as in flight. A capability change that
   is waiting TERMINATES it (R2-K-24, below) instead of waiting for it.
@@ -505,3 +544,43 @@ Not done, and why:
   without a kernel fault, so only the simulated ineffective kill is tested.
 - aarch64: the helper and the filter compile for it by their `#if`s but only
   x86_64 was built and run; the x32 test exists for x86_64 only.
+
+## 9. Authorized entry points and run cancellation (D2-A, R-5)
+
+Implemented and tested: the safe Rust governed entry points take `&AuthorizedAction`; the
+raw ones are `unsafe fn` (`tests/api_surface.rs`, `compile_fail` doc tests); the C symbols
+`stack_supervised_run_authorized`, `stack_execute_governed_transaction_authorized` and
+`stack_supervised_run_authorized_cancellable` refuse a NULL or all-zero digest with -18 and
+spawn nothing (`cpp/tests/ffi_authorized_caller.c`, ctest `STACKFfiAuthorizedCaller`;
+`tests/authorized_run.rs`). A run started with a run id is stopped by
+`stack_supervised_cancel`, with the same pidfd SIGKILL as a mask revocation; a stopped run
+is `Terminated`, never a success.
+
+Non-guarantees, stated plainly:
+
+- The host holds no trust set. ANY 32 non-zero bytes are accepted at the C layer, and a test
+  pins that. Code in the same process can call the raw C symbols, authorized or not, with any
+  digest. This is an anti-misuse boundary, not protection from malicious in-process code.
+- The audit ring entry (`AuthorizationBound`) carries only a LABEL, the first 8 bytes of the
+  digest. It is not a MAC and not an integrity value. The full 32-byte digest is recorded in
+  the receipt (`Authorized.capability.cap_digest`).
+- `stack_supervised_cancel` needs no authorization; it can only end a run early.
+- The in-flight table holds 64 cancellable runs; a 65th is -19.
+- Remaining: the legacy symbols `stack_supervised_run`, `stack_supervised_run_governed` and
+  `stack_execute_governed_transaction` still exist and take no authorization.
+
+## D2-C follow-up (deferred): a separate kernel process owning execution
+
+Status: NOT implemented. Nothing in this repository is a daemon, an IPC client or a
+process boundary between a caller and the kernel.
+
+D2-A (this wave) is an anti-misuse boundary. In Rust, the governed run needs an
+`AuthorizedAction`, which only `Authority::authorize` can mint. In C++, the host refuses an
+all-zero capability digest and records a label of the digest in its audit trail. It is not a
+defence against hostile code in the calling process: that code can call the raw C symbols
+with any 32 non-zero bytes, and a test pins that
+(`cpp/tests/ffi_authorized_caller.c`, "NON-GUARANTEE"). The only design that gives a real
+boundary is a separate kernel process (a daemon) that alone owns the host, the worker
+supervisor, the authority checks and the receipt log, reached over IPC through a thin client
+crate; it would live as new crates in this repository. Priority P2. Revisit when hostile
+code inside the calling process enters the threat model.
