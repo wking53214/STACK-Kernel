@@ -119,7 +119,10 @@ What it cannot give, and why it is not isolation:
   signal because the host needs them, so the payload can disarm the timer
   or ignore its signal (the Phase 0 probe did both);
 - the timer has scheduler-tick granularity: a tiny budget can expire after
-  the payload already finished and the result is success.
+  the payload already finished and the result is success; and under CPU
+  contention its signal can arrive well after the budget (R2-K-16, measured:
+  up to 182 ms of CPU time into a 50 ms budget with six busy loops on four
+  cores).
 
 Fixed in this phase on that path: the deadline signal handler can return
 (`rt_sigreturn` was missing from the allowlist and the first expiry killed
@@ -134,27 +137,63 @@ forked child while the thread-local "initialized" flag is. A transaction
 on such a thread fails closed with `TimerArmFailed`; run transactions on a
 fresh thread in a forked process.
 
-## Known test-level issues
+## The FFI host (`crates/stack-ffi`)
 
-`layer2_redteam.cpp`, Test 3 "Repeated arm/disarm cycles": arms a 50 ms
-CPU-time budget and burns for 60 ms of wall-clock time, then requires the
-timer to have fired. Whenever the thread is descheduled for more than
-10 ms during the burn, less than 50 ms of CPU time passes and the timer
-correctly does not fire; the test counts that as "poison". On an
-unchanged tree it failed 9 of 40 runs (2 of 40 here). The timer is
-behaving as specified; the test assumes CPU time equals wall time. Not
-edited (no step changes the behaviour it asserts); reported.
+The exported C symbols, their return codes, the initialization state machine,
+the accounting rules, the revocation semantics, what each test proves and the
+ThreadSanitizer status are in `crates/stack-ffi/ABI.md`, with every statement
+labelled tested, implemented, experimental or planned. New exported symbols
+(steps 1 and 2): `stack_host_payload_count`, `stack_host_audit_read_slot`,
+`stack_host_initialize`, `stack_host_seal_current_thread`; new return codes:
+`stack_host_set_capabilities` -3, `stack_execute_governed_transaction` -11,
+-12, -13. In short, for the
+in-process path that the FFI exposes:
+
+- tested: the host can serve (it rejected every transaction until the
+  governor policy was fixed); initialization happens once, a failure is latched
+  and reported by every entry point, and a transaction never seals its caller;
+  a transaction that ran keeps its tokens and is charged its ticks, one
+  rejected before it ran costs nothing; a revocation applies under sustained
+  load within a bound and no transaction that begins after it runs.
+- not isolation, still: the deadline stays cooperative (section above).
+- the direct C++ call `GovernedMinotaurHost::ExecuteGovernedTransaction` still
+  seals an unsealed calling thread, as before; only the FFI entry point stopped
+  doing that (decision B).
+
+## Test-level issues found, and how they were fixed
+
+Both were scheduling-dependent tests whose host behaviour was correct. Neither
+was weakened; each now makes the condition it needs hold instead of hoping
+for it, the way PR #44 did for layer4.
 
 `tests_all_components.cpp`, case "Capability Mutation Race Fix", Test 2
-("Snapshot consistency during validation"): the changer thread waits for
-the payload to start and then asks for a capability change, expecting a
-refusal because the transaction is in flight. The payload is a single
-store, so the transaction often returns before the changer runs and the
-change is applied; the assertion `capabilities_changed` then fails. On an
-unchanged tree it failed 11 of 40 runs; an instrumented replica shows
-that in 162 of 171 failing iterations the transaction had already
-returned when the change was requested. The host behaves correctly: the
-latch-based case "Capability change refused while a payload runs" tests
-the same property deterministically and passes every run. The flaky case
-is not edited here (no step changes the behaviour it asserts); it is
-reported for a separate fix.
+("Snapshot consistency during validation"): the changer asked for a
+capability change after the payload started and expected a refusal because the
+transaction was in flight, but nothing kept the transaction in flight. On an
+unchanged tree it failed 14 of 100 runs. The payload now blocks on a condition
+variable until the changer has made its attempt (bounded at 5 s), so the
+attempt is made while the transaction is provably in flight. The assertions are
+unchanged; the transaction's deadline budgets were widened to those of the
+neighbouring latch test because a payload that waits would exceed the old
+50 microseconds of CPU. After: 0 of 100 failed. With the in-flight check in
+`SetActiveCapabilities` removed, the case fails.
+
+`layer2_redteam.cpp`, Test 3 "Repeated arm/disarm cycles" (and Test 1, same
+shape): a 50 ms CPU-time timer against a 60 ms burn of wall-clock time. When
+the thread is descheduled the timer correctly does not fire. On an unchanged
+tree Test 3 failed 9 of 100 runs idle, and under six competing busy loops on
+four cores 48 of 50 runs failed. The tests now burn the thread's own CPU time
+(`CLOCK_THREAD_CPUTIME_ID`, the clock the timer measures) for at least the
+same margin over the budget, then keep burning until the timer's signal is
+seen or 2000 ms of CPU time (forty times the budget) have passed. After: 0 of
+100 failed idle, 0 of 50 under the busy loops. With the arm budget raised to
+5 s the test fails.
+
+What the second fix cost, stated plainly: the tests no longer require the
+signal to have arrived by 60 ms of CPU time. They require that it arrives
+within 2000 ms. The reason is a measurement, not a convenience: with six busy
+loops on four cores the signal was first seen between 50 and 182 ms of CPU
+time into a 50 ms budget (idle: 50 to 54 ms). R2-K-16: the cooperative
+deadline is therefore a lower bound on how long a payload may run, not a tight
+one. The cause inside the kernel's CPU-timer delivery was not investigated.
+The supervised executor's wall-clock kill is the bounded path.

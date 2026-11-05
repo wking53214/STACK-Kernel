@@ -202,13 +202,13 @@ jobs:
     # supervised-executor tests (hostile payloads killed at a deadline in a
     # child process), the FFI host tests (the shipped crates/stack-ffi wrapper
     # compiled in), the nine red-team programs, and the ThreadSanitizer run of
-    # the FFI initialization red team (ctest STACKTsan_ffi_init; libtsan comes
-    # with g++), built with the project's own flags (-Werror) and run under
-    # ctest. Ubuntu 24.04 ships g++ 13, cmake 3.28 and Catch2 3.4, the
-    # versions this was developed on.
-    # Known: the pre-existing stack_tests case "Capability Mutation Race
-    # Fix" (tests_all_components.cpp) is scheduling dependent and fails on
-    # an unchanged tree in roughly one run in five; see cpp/CONTAINMENT.md.
+    # the FFI initialization red team and the capability-change protocol
+    # (ctest STACKTsan_*; libtsan comes with g++), built with the project's
+    # own flags (-Werror) and run under ctest. Ubuntu 24.04 ships g++ 13,
+    # cmake 3.28 and Catch2 3.4, the versions this was developed on.
+    # The two scheduling-dependent cases (stack_tests "Capability Mutation
+    # Race Fix" Test 2 and layer2_redteam Tests 1 and 3) were made
+    # deterministic in RACE-02 step 5b; see cpp/CONTAINMENT.md.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
