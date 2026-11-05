@@ -170,6 +170,31 @@ concurrent `host_initialize` calls agree.
 Not tested: failure of the signal handler registration (only `timer_create`
 failure is injected); initialization racing `fork`.
 
+### Lifetime (R-1)
+
+Status: implemented, tested. A limitation, stated plainly.
+
+- There is no teardown. The host is constructed once, on the first successful
+  `stack_host_initialize` (or `host_initialize`), and lives until the process
+  exits. No exported symbol and no public Rust function destroys, resets,
+  re-creates or re-calibrates it, and none revokes the process-wide signal
+  handler or the thread deadline timer that initialization registered.
+- A repeated initialization is idempotent. It returns the latched result of the
+  first one (0, or -1 if that failed) and does not construct a second host
+  (tested with 64 concurrent initializations). The tests show that the
+  capability mask and the payload counter survive a repeated init; the
+  rate-limit buckets and the audit ring are not asserted by a repeated-init test.
+- A caller that wants a clean host starts a new process. A host whose
+  initialization failed stays failed for the life of the process (above).
+- A thread seal is separate and per thread; it ends with the thread.
+
+Pinned by: `tests/api_surface.rs::the_host_has_no_teardown_entry_point` (no
+exported symbol or public function with a teardown-like name; adding one fails
+the test and requires this section to change), `cpp/tests/ffi_c_caller.c` (ctest
+`STACKFfiCCaller`: a repeated init after use returns 0, rewinds nothing, and the
+granted capability still admits a run) and `cpp/tests/ffi_init_redteam.cpp`
+(64 concurrent initializations construct one host).
+
 ## 4. Accounting rules
 
 Stated at the point they apply in `stack_host_binding.hpp`:
