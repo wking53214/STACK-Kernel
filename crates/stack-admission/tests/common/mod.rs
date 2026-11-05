@@ -16,7 +16,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stack_admission::{
-    Admission, AdmissionResult, BuildError, ExecutionLimits, Executor, ExecutorError, KernelPolicy, Parts, Refused, RunReport,
+    Admission, AdmissionResult, BuildError, ExecutionLimits, Executor, ExecutorError, KernelPolicy, ObservedRun, Parts, Refused, RunReport,
     SupervisedExecutor, WorkerConfig, WorkerKind,
 };
 use stack_authority::{
@@ -215,8 +215,8 @@ pub struct CountingExecutor {
     pub seen: Arc<Mutex<Vec<Vec<ReceiptStage>>>>,
 }
 
-impl Executor for CountingExecutor {
-    fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError> {
+impl CountingExecutor {
+    fn note_run(&self) {
         self.runs.fetch_add(1, Ordering::SeqCst);
         let stages = std::fs::read(&self.receipts)
             .ok()
@@ -226,7 +226,18 @@ impl Executor for CountingExecutor {
         if let Ok(mut seen) = self.seen.lock() {
             seen.push(stages);
         }
+    }
+}
+
+impl Executor for CountingExecutor {
+    fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError> {
+        self.note_run();
         self.inner.run(kind, limits, args)
+    }
+
+    fn run_observed(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<ObservedRun, ExecutorError> {
+        self.note_run();
+        self.inner.run_observed(kind, limits, args)
     }
 }
 

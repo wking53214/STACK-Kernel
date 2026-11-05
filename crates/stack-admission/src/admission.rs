@@ -40,7 +40,7 @@ use stack_trident::{
 use crate::binding::{self, BindingFinding};
 use crate::clock::KernelClock;
 use crate::config::{ConfigError, KernelPolicy};
-use crate::executor::{ExecutionLimits, Executor, ExecutorError, RunOutcome, RunReport, WorkerKind};
+use crate::executor::{ExecutionLimits, Executor, ExecutorError, ObservedRun, RunOutcome, RunReport, WorkerKind};
 use crate::payload::{self, PayloadError};
 
 /// What the operator hands the kernel to build its boundaries from. Every
@@ -391,6 +391,21 @@ pub trait CancellableExecutor: Executor {
     ) -> Result<RunReport, ExecutorError> {
         let _ = cancel;
         self.run(kind, limits, args)
+    }
+
+    /// [`Self::run_cancellable`] plus the facts the supervisor observed
+    /// (D1-C). The default observes nothing.
+    fn run_cancellable_observed(
+        &self,
+        kind: WorkerKind,
+        limits: &ExecutionLimits,
+        args: &[u8],
+        cancel: &CancelToken,
+    ) -> Result<ObservedRun, ExecutorError> {
+        Ok(ObservedRun {
+            report: self.run_cancellable(kind, limits, args, cancel)?,
+            observed: None,
+        })
     }
 }
 
@@ -793,12 +808,12 @@ impl Admission {
 
         // ---- 6. Execution through the seam, under the kernel's limits.
         let wall = std::time::Instant::now();
-        let report = if refused_before_spawn.is_some() {
+        let run = if refused_before_spawn.is_some() {
             None
         } else if let Some(c) = &self.cancellable {
-            Some(c.run_cancellable(kind, &self.policy.limits, &args, &cancel))
+            Some(c.run_cancellable_observed(kind, &self.policy.limits, &args, &cancel))
         } else {
-            Some(self.executor.run(kind, &self.policy.limits, &args))
+            Some(self.executor.run_observed(kind, &self.policy.limits, &args))
         };
         drop(in_flight);
         let measured_ns = u64::try_from(wall.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -807,7 +822,7 @@ impl Admission {
         // executor could not report is Unknown; an executor that claims a
         // completion after its own deadline fired, or a result longer than
         // the cap, is not believed.
-        let (outcome, result, elapsed_ns) = match report {
+        let (outcome, result, elapsed_ns, supervisor_facts) = match run {
             None => (
                 Outcome::Interrupted {
                     reason: clean_text(&format!(
@@ -817,11 +832,12 @@ impl Admission {
                 },
                 None,
                 0,
+                None,
             ),
-            Some(Ok(report)) => {
+            Some(Ok(ObservedRun { report, observed })) => {
                 let elapsed = report.elapsed_ns;
                 let (outcome, result) = self.observed(report.outcome, report.deadline_fired);
-                (outcome, result, elapsed)
+                (outcome, result, elapsed, observed)
             }
             Some(Err(e)) => (
                 Outcome::Unknown {
@@ -829,6 +845,7 @@ impl Admission {
                 },
                 None,
                 measured_ns,
+                None,
             ),
         };
         let terminal = Terminal {
@@ -836,7 +853,15 @@ impl Admission {
             completed_at_ms: self.clock.now_unix_ms(),
             elapsed_ns,
         };
-        match running.finish(terminal) {
+        // A supervisor that observed the process and the result pipe gets a
+        // version 2 terminal carrying those facts (D1-C); an executor that
+        // observed nothing keeps the version 1 terminal and the verifier says
+        // so as a limitation.
+        let finished = match supervisor_facts {
+            Some(facts) => running.finish_observed(terminal, facts),
+            None => running.finish(terminal),
+        };
+        match finished {
             Ok(closed) => match (&outcome, result) {
                 (Outcome::Completed { exit_code, result_digest }, Some(result)) => {
                     // ---- 8. Success: a recorded Completed.
