@@ -75,6 +75,18 @@ is refused at every instant of its window (`adversarial::revoked_capability`).
 Distributing the trust set and the revocation list to every verifier is
 the operator's job. This crate consults only the copies it is given.
 
+Revocation after authorization (implemented, tested). `authorize` is a
+point-in-time decision. `Authority::revocation_epoch` is a monotonic
+counter that advances on every write access to the revocation list or the
+trust set; `Authority::recheck(&AuthorizedAction)` re-evaluates revocation
+by id and digest and the issuer key's presence and revocation, failing
+closed when either lock is poisoned; `Authority::set_change_hook` lets the
+enforcement layer run a re-check after each change
+(`revocation_epoch::*`). The key's validity window is not re-applied by
+`recheck`. Acting on a failed re-check (refusing before spawn, asking a
+running worker to stop) is the admission layer's job, see the
+`stack-admission` README.
+
 ## 3. Wire format, `stack-capability/1`
 
 Big-endian integers; `u16`-length-prefixed UTF-8 strings with no control
