@@ -69,6 +69,38 @@ refuses it (`production_refuses_a_memory_store`).
   verifier's lock to be released, and then takes over everything the active
   one accepted (the second half of the two-verifier test above).
 
+### Summary: single process, one host, never multi-host
+
+[tested] unless marked.
+
+* **Single process.** Many threads, one verifier: an envelope is accepted
+  exactly once (`concurrent_acceptance_of_the_same_envelope_is_accepted_exactly_once_across_the_store`).
+* **Several processes on ONE host, one active at a time.** The exclusive
+  advisory lock admits one verifier per store file; the other process fails at
+  open with `StoreError::Locked` and so cannot verify. Two real processes
+  racing one envelope yield exactly one acceptance, and a later process
+  refuses it as a replay
+  (`store_failure_modes::two_processes_race_one_envelope_exactly_one_accepts`).
+  A process that dies after the commit has still consumed the envelope
+  (`store_failure_modes::lost_ack_real_process_aborts_after_the_commit_and_the_replay_is_refused`).
+  This is a local operating-system lock, mutual exclusion on one machine, not
+  concurrent sharing and not distributed consensus.
+* **Multiple hosts** [not supported]. No replication, no shared store, no
+  consensus. [BLOCKED: no multi-host environment to test in.]
+
+A record present twice in the committed region fails closed at start
+(`store_failure_modes::a_record_overwriting_its_neighbour_byte_for_byte_fails_closed_at_startup`);
+one appended past the committed length is never counted
+(`a_record_appended_twice_past_the_committed_length_is_never_counted`).
+Rollback to an older valid copy is not detected from the file; it is refused
+when the operator supplies `restored_high_water_ms` at or above the true
+high-water, and the boundary is exact
+(`rollback_is_not_detected_from_the_file_and_the_external_mark_boundary_is_exact`,
+`an_older_copy_of_the_store_is_refused_when_an_external_mark_is_supplied`).
+Storage lost while running refuses the envelope
+(`a_storage_write_failure_refuses_and_leaves_state_unchanged_so_a_later_retry_is_accepted_once`;
+at the admission boundary `stack-admission` `storage_unavailable::the_replay_store_lost_mid_run_denies_at_the_handoff_and_executes_nothing`).
+
 ## 1a. The replay store contract: check-and-commit
 
 Decision D (RACE-02, R2-E-04). The Trident decides acceptance; the store
