@@ -636,6 +636,25 @@ impl OutcomeKind {
     }
 }
 
+impl OutcomeKind {
+    /// The campaign vocabulary name (D1-C). Additive: no existing name changes
+    /// (`as_str` is untouched). Several existing outcomes share a campaign
+    /// name, and `RUNNING`, `PROPOSED`, `AUTHORIZED`, `REJECTED` and `ATTEMPTED`
+    /// are stages or in-memory states, not terminal outcomes (RECEIPT.md).
+    pub const fn campaign_name(self) -> &'static str {
+        match self {
+            Self::Completed => "COMPLETED",
+            Self::Terminated => "TERMINATED",
+            Self::TerminationUnconfirmed => "TERMINATION_UNCONFIRMED",
+            Self::TimedOut => "TIMED_OUT",
+            Self::Crashed | Self::SeccompViolation | Self::ResourceLimit | Self::ExitedNonZero => "CRASHED",
+            Self::ResultMissing | Self::ResultOversized => "RESULT_INVALID",
+            Self::Interrupted => "INTERRUPTED",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
 impl Outcome {
     /// The kind.
     pub const fn kind(&self) -> OutcomeKind {
@@ -718,6 +737,83 @@ pub struct Terminal {
     pub elapsed_ns: u64,
 }
 
+/// How the supervisor saw the worker process end (receipt format version 2).
+/// Observed from the wait status and from the supervisor's own kill; no byte
+/// the worker wrote can set it. The values mirror `stack_ffi::ExitObserved`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitObserved {
+    /// No process was started, or its end was not observed.
+    NotObserved,
+    /// The worker called exit with this status.
+    Exited {
+        /// The exit status.
+        code: i32,
+    },
+    /// The worker was ended by this signal and the supervisor did not send it.
+    Signaled {
+        /// The signal.
+        signal: i32,
+    },
+    /// The supervisor sent SIGKILL (deadline, oversized result, cancel) and
+    /// the worker ended by it.
+    KilledBySupervisor {
+        /// The signal, 9.
+        signal: i32,
+    },
+    /// SIGKILL was sent and the worker was not reaped in time.
+    Unreaped,
+}
+
+/// What the supervisor made of the worker's result pipe (receipt format
+/// version 2). Well-formedness only; the result bytes are never interpreted.
+/// `Valid` says one well-formed frame arrived, not that the run succeeded and
+/// not that the result is true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameStatus {
+    /// The pipe was not evaluated.
+    NotRead,
+    /// Exactly one complete, well-formed frame and nothing after it.
+    Valid,
+    /// No byte arrived.
+    Missing,
+    /// Bytes arrived but no complete well-formed frame.
+    Malformed,
+    /// The header announced more than the result cap.
+    Oversized,
+    /// One good frame, then bytes that are not a second complete frame.
+    Trailing,
+    /// Two or more complete frames.
+    Conflicting,
+}
+
+/// The two supervisor-observed facts a version 2 terminal event carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Observed {
+    /// How the process ended, as the supervisor saw it.
+    pub exit: ExitObserved,
+    /// What the supervisor made of the result pipe.
+    pub frame: FrameStatus,
+}
+
+impl Observed {
+    /// True exactly when these facts are the ones `Completed` requires: the
+    /// supervisor saw the worker exit 0 and held one well-formed frame.
+    pub const fn supports_completed(&self) -> bool {
+        matches!(self.exit, ExitObserved::Exited { code: 0 }) && matches!(self.frame, FrameStatus::Valid)
+    }
+}
+
+/// A terminal event with the supervisor-observed facts (receipt format
+/// version 2, record tag `stack-receipt/2`). A terminal event without them is
+/// [`Event::Terminal`], format version 1, and stays byte-for-byte what it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalObserved {
+    /// The terminal event, exactly as in version 1.
+    pub terminal: Terminal,
+    /// What the supervisor observed.
+    pub observed: Observed,
+}
+
 /// One event in an execution's life.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -729,8 +825,21 @@ pub enum Event {
     Rejected(Rejected),
     /// See [`Attempted`].
     Attempted(Attempted),
-    /// See [`Terminal`].
+    /// See [`Terminal`]. Format version 1.
     Terminal(Terminal),
+    /// See [`TerminalObserved`]. Format version 2; stage [`Stage::Terminal`].
+    TerminalObserved(TerminalObserved),
+}
+
+impl Event {
+    /// The terminal event and, for format version 2, the observed facts.
+    pub const fn terminal_parts(&self) -> Option<(&Terminal, Option<&Observed>)> {
+        match self {
+            Self::Terminal(t) => Some((t, None)),
+            Self::TerminalObserved(t) => Some((&t.terminal, Some(&t.observed))),
+            _ => None,
+        }
+    }
 }
 
 /// The stage an event belongs to.
@@ -769,7 +878,7 @@ impl Event {
             Self::Authorized(_) => Stage::Authorized,
             Self::Rejected(_) => Stage::Rejected,
             Self::Attempted(_) => Stage::Attempted,
-            Self::Terminal(_) => Stage::Terminal,
+            Self::Terminal(_) | Self::TerminalObserved(_) => Stage::Terminal,
         }
     }
 
@@ -795,6 +904,7 @@ impl Event {
             Self::Rejected(r) => check_text("rejected.reason", &r.reason, 1, MAX_TEXT_BYTES),
             Self::Attempted(a) => a.action.validate(),
             Self::Terminal(t) => t.outcome.validate(),
+            Self::TerminalObserved(t) => t.terminal.outcome.validate(),
         }
     }
 }

@@ -37,7 +37,7 @@ use crate::cns::{subject_digest, CnsValue};
 use crate::decision::{check_authorized_decision, DecisionFinding, RosterPolicy};
 use crate::encode::genesis_hash;
 use crate::log::{parse_log, LogError};
-use crate::record::{Event, ExecutionId, Outcome, OutcomeKind, Stage};
+use crate::record::{Event, ExecutionId, Observed, Outcome, OutcomeKind, Stage};
 use crate::sign::{ResolveError, SignedRecord, TrustedReceiptKeys};
 
 /// The verdict on a receipt as evidence. See the module documentation.
@@ -105,6 +105,9 @@ pub enum Check {
     OutcomeConsistentWithStageOrder,
     /// The result digest is the digest of the supplied result bytes.
     ResultDigestRecomputed,
+    /// The supervisor-observed facts of a version 2 terminal agree with its
+    /// outcome (Completed only on a clean exit 0 with one valid frame).
+    ObservedFactsConsistentWithOutcome,
 }
 
 impl Check {
@@ -125,6 +128,7 @@ impl Check {
             Self::Audience => "audience",
             Self::OutcomeConsistentWithStageOrder => "outcome_consistent_with_stage_order",
             Self::ResultDigestRecomputed => "result_digest_recomputed",
+            Self::ObservedFactsConsistentWithOutcome => "observed_facts_consistent_with_outcome",
         }
     }
 }
@@ -163,6 +167,10 @@ pub enum Limitation {
     LogRollbackNotDetectableWithoutAnchor,
     /// Bytes past the committed length were a torn frame and were ignored.
     TornTailIgnored,
+    /// A terminal event of receipt format version 1 does not carry the
+    /// supervisor-observed exit and frame facts, so they cannot be checked
+    /// against the outcome. A limitation of the old receipt, not a failure.
+    SupervisorObservedFactsNotRecorded,
 }
 
 impl Limitation {
@@ -182,6 +190,7 @@ impl Limitation {
             Self::TimestampsAreWriterClaims => "timestamps_are_writer_claims",
             Self::LogRollbackNotDetectableWithoutAnchor => "log_rollback_not_detectable_without_anchor",
             Self::TornTailIgnored => "torn_tail_ignored",
+            Self::SupervisorObservedFactsNotRecorded => "supervisor_observed_facts_not_recorded",
         }
     }
 }
@@ -295,6 +304,11 @@ pub enum FindingCode {
     /// not confirm the worker dead, so the action may still be in
     /// progress (informational; the outcome already says so).
     WorkerMayStillBeRunning,
+    /// A version 2 terminal event records a Completed outcome whose observed
+    /// facts are not a clean exit 0 with one valid frame, or an observed fact
+    /// that the outcome contradicts (Unreaped without TerminationUnconfirmed,
+    /// a valid frame under ResultMissing).
+    ObservedFactsContradictOutcome,
     /// A torn frame was discarded (informational).
     TornTailDiscarded,
     /// A complete unacknowledged frame was adopted (informational).
@@ -362,6 +376,7 @@ impl FindingCode {
             Self::NotAttempted => "not_attempted",
             Self::NotAuthorized => "not_authorized",
             Self::WorkerMayStillBeRunning => "worker_may_still_be_running",
+            Self::ObservedFactsContradictOutcome => "observed_facts_contradict_outcome",
             Self::TornTailDiscarded => "torn_tail_discarded",
             Self::TrailingFrameAdopted => "trailing_frame_adopted",
         }
@@ -539,6 +554,40 @@ const fn stage_rank(s: Stage) -> u8 {
     }
 }
 
+/// Why the observed facts of a version 2 terminal cannot go with its outcome,
+/// or `None` when they can. `Completed` is exactly: the supervisor saw the
+/// worker exit 0 and held one well-formed frame. The converse is checked where
+/// it is unambiguous: an unreaped worker is `TerminationUnconfirmed`, and
+/// `ResultMissing` is an exit 0 whose frame was not valid.
+fn observed_contradiction(outcome: &Outcome, o: &Observed) -> Option<&'static str> {
+    use crate::record::{ExitObserved, FrameStatus};
+    match outcome {
+        Outcome::Completed { exit_code, .. } => {
+            if !o.supports_completed() || *exit_code != 0 {
+                Some("Completed, but the supervisor did not observe an exit 0 with one valid frame")
+            } else {
+                None
+            }
+        }
+        Outcome::ResultMissing { .. } => {
+            if matches!(o.exit, ExitObserved::Exited { code: 0 }) && o.frame != FrameStatus::Valid {
+                None
+            } else {
+                Some("ResultMissing, but the supervisor did not observe an exit 0 with a frame that was not valid")
+            }
+        }
+        Outcome::TerminationUnconfirmed { .. } => {
+            if o.exit == ExitObserved::Unreaped {
+                None
+            } else {
+                Some("TerminationUnconfirmed, but the supervisor did not observe an unreaped worker")
+            }
+        }
+        _ if o.exit == ExitObserved::Unreaped => Some("an unreaped worker under an outcome other than TerminationUnconfirmed"),
+        _ => None,
+    }
+}
+
 /// Execution-level checks over one execution's records, in order.
 fn verify_execution(
     execution_id: ExecutionId,
@@ -572,6 +621,7 @@ fn verify_execution(
     }
     let mut at = At::Start;
     let (mut proposed, mut authorized, mut attempted, mut terminal) = (None, None, None, None);
+    let mut observed: Option<&Observed> = None;
     for s in records {
         let r = s.record();
         let seq = Some(r.sequence);
@@ -606,16 +656,19 @@ fn verify_execution(
                         attempted = Some(a);
                         at = At::Attempted;
                     }
-                    Event::Terminal(t) => {
+                    Event::Terminal(_) | Event::TerminalObserved(_) => {
                         findings.push(Finding::new(FindingCode::TerminalWithoutAttempted, seq, "no Attempted"));
-                        terminal = Some(t);
+                        if let Some((t, o)) = r.event.terminal_parts() {
+                            terminal = Some(t);
+                            observed = o;
+                        }
                         at = At::Closed;
                     }
                     Event::Proposed(_) => {}
                 }
             }
             (_, At::Closed) => {
-                let code = if matches!(r.event, Event::Terminal(_) | Event::Rejected(_)) {
+                let code = if matches!(r.event, Event::Terminal(_) | Event::TerminalObserved(_) | Event::Rejected(_)) {
                     FindingCode::DuplicateTerminal
                 } else {
                     FindingCode::EventAfterTerminal
@@ -638,13 +691,19 @@ fn verify_execution(
                 attempted = Some(a);
                 at = At::Attempted;
             }
-            (Event::Terminal(t), At::Attempted) => {
-                terminal = Some(t);
+            (Event::Terminal(_) | Event::TerminalObserved(_), At::Attempted) => {
+                if let Some((t, o)) = r.event.terminal_parts() {
+                    terminal = Some(t);
+                    observed = o;
+                }
                 at = At::Closed;
             }
-            (Event::Terminal(t), At::Proposed | At::Authorized) => {
+            (Event::Terminal(_) | Event::TerminalObserved(_), At::Proposed | At::Authorized) => {
                 findings.push(Finding::new(FindingCode::TerminalWithoutAttempted, seq, "no Attempted"));
-                terminal = Some(t);
+                if let Some((t, o)) = r.event.terminal_parts() {
+                    terminal = Some(t);
+                    observed = o;
+                }
                 at = At::Closed;
             }
             (Event::Authorized(_) | Event::Rejected(_), At::Authorized | At::Attempted) => {
@@ -782,6 +841,17 @@ fn verify_execution(
                 None,
                 "termination was not confirmed; the worker may still be acting",
             ));
+        }
+        // The supervisor-observed facts (receipt format version 2). A version 1
+        // terminal cannot show them: that is a limitation of the old receipt.
+        match observed {
+            None => scope.limit(Limitation::SupervisorObservedFactsNotRecorded),
+            Some(o) => {
+                scope.check(Check::ObservedFactsConsistentWithOutcome);
+                if let Some(why) = observed_contradiction(&t.outcome, o) {
+                    findings.push(Finding::new(FindingCode::ObservedFactsContradictOutcome, None, why));
+                }
+            }
         }
         if let Outcome::Completed { result_digest, .. } = &t.outcome {
             scope.limit(Limitation::ResultIsSelfReported);

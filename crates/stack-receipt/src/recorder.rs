@@ -28,8 +28,8 @@ use stack_authority::{AuthorizedAction, Clock};
 
 use crate::log::{Head, LogError, ReceiptLog};
 use crate::record::{
-    Action, ActualAction, Attempted, Authorized, CapabilityBinding, Event, ExecutionId, Outcome, Proposed,
-    Provenance, Record, Rejected, Terminal, ValidationError,
+    Action, ActualAction, Attempted, Authorized, CapabilityBinding, Event, ExecutionId, Observed, Outcome, Proposed,
+    Provenance, Record, Rejected, Terminal, TerminalObserved, ValidationError,
 };
 use crate::sign::{ReceiptSigner, SignError, SignedRecord};
 
@@ -278,7 +278,21 @@ impl Execution<AttemptedStage> {
     /// in the error and the attempt stays open in the log.
     pub fn finish(self, terminal: Terminal) -> Result<Closed, TerminalUnrecorded> {
         let observed = terminal.outcome.clone();
-        match self.append(Event::Terminal(terminal)) {
+        self.close(Event::Terminal(terminal), observed)
+    }
+
+    /// [`Self::finish`] for a kernel that has the supervisor-observed facts:
+    /// records a format version 2 terminal event (`stack-receipt/2`) that
+    /// carries them beside the outcome. The facts are the supervisor's
+    /// observation of the process and of the result pipe, never the worker's
+    /// claim.
+    pub fn finish_observed(self, terminal: Terminal, observed: Observed) -> Result<Closed, TerminalUnrecorded> {
+        let outcome = terminal.outcome.clone();
+        self.close(Event::TerminalObserved(TerminalObserved { terminal, observed }), outcome)
+    }
+
+    fn close(self, event: Event, observed: Outcome) -> Result<Closed, TerminalUnrecorded> {
+        match self.append(event) {
             Ok(s) => Ok(Closed {
                 id: self.id,
                 terminal_sequence: s.record().sequence,
