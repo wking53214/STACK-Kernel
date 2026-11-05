@@ -4,11 +4,42 @@
 #include <atomic>
 #include <string>
 #include <chrono>
+#include <ctime>
 #include <cassert>
 
 #include "../include/posix_deadline_timer_hardened.hpp"
 
 using namespace stack::governor;
+
+// Burns the calling thread's CPU time, measured on CLOCK_THREAD_CPUTIME_ID,
+// the clock the deadline timer measures (R2-K-14). Two things made the old
+// wall-clock burn nondeterministic:
+//  - 60 ms of WALL time can hold less than the 50 ms of CPU time the budget
+//    allows when the thread is descheduled, and the timer then correctly does
+//    not fire. This burns at least `min_ms` of the thread's own CPU time.
+//  - The kernel delivers the expiry as a signal on a scheduler tick, which can
+//    be late when the machine is oversubscribed. Measured here with six
+//    competing busy loops on four cores: the flag was first seen between 50
+//    and 182 ms of CPU time into a 50 ms budget (idle machine: 50 to 54 ms).
+//    So after `min_ms` the burn continues, still consuming CPU, until
+//    `done()` or `cap_ms` of CPU time, so a late delivery is waited for
+//    instead of being mistaken for "the timer did not fire".
+// A timer that never fires still fails: the cap is 2000 ms of CPU time, at
+// least forty times any budget used below.
+template <typename Done>
+static void BurnThreadCpuUntil(long min_ms, long cap_ms, Done done) {
+    timespec start{};
+    ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &start);
+    for (;;) {
+        timespec now{};
+        ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+        const long used_ms = (now.tv_sec - start.tv_sec) * 1000L + (now.tv_nsec - start.tv_nsec) / 1'000'000L;
+        if (used_ms >= cap_ms) return;
+        if (used_ms >= min_ms && done()) return;
+        [[maybe_unused]] volatile int x = 0;
+        for (int i = 0; i < 1000; ++i) x = i;
+    }
+}
 
 int test_count = 0;
 int test_passed = 0;
@@ -58,16 +89,9 @@ void test_signal_fire_basic() {
         return;
     }
 
-    // Burn CPU for ~20ms (intentionally exceed the 10ms budget)
-    auto start = std::chrono::high_resolution_clock::now();
-    while (true) {
-        auto now = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-        if (elapsed > 20) break;
-        // Busy loop to consume CPU time
-        [[maybe_unused]] volatile int x = 0;
-        for (int i = 0; i < 10000; ++i) x = i;
-    }
+    // Burn CPU time (not wall time) for at least 20 ms, intentionally
+    // exceeding the 10 ms budget, then until the timer's signal is seen.
+    BurnThreadCpuUntil(20, 2000, [&guard] { return guard.WasPreempted(); });
 
     // Scope ends, destructor disarms
     bool was_preempted = guard.WasPreempted();
@@ -174,15 +198,9 @@ void test_repeated_arm_disarm_cycles() {
             return;
         }
 
-        // Burn CPU to exceed deadline
-        auto start = std::chrono::high_resolution_clock::now();
-        while (true) {
-            auto now = std::chrono::high_resolution_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-            if (elapsed > 60) break;
-            [[maybe_unused]] volatile int x = 0;
-            for (int i = 0; i < 10000; ++i) x = i;
-        }
+        // Burn CPU time (not wall time) past the 50 ms budget: at least 60 ms
+        // of this thread's CPU time, then until the timer's signal is seen.
+        BurnThreadCpuUntil(60, 2000, [&guard] { return guard.WasPreempted(); });
 
         bool was_preempted = guard.WasPreempted();
         if (!was_preempted) {
