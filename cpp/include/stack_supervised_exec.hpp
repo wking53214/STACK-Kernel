@@ -66,10 +66,17 @@
  *     forever. glibc protects malloc, but a payload that touches another
  *     lock can deadlock. The deadline is the backstop: a deadlocked
  *     child is killed and reported TimedOut, never Completed.
- *   - Resource limits are best effort: RLIMIT_AS makes allocation fail
- *     inside the child (which usually ends in abort, so Crashed) and
- *     RLIMIT_CPU ends in SIGXCPU (ResourceLimit); neither is observed by
- *     the parent as a limit event in its own right.
+ *   - Resource limits are best effort: RLIMIT_AS (4 GiB unless set; 0 is an
+ *     explicit opt-out) makes allocation fail inside the child (which
+ *     usually ends in abort, so Crashed) and RLIMIT_CPU ends in SIGXCPU
+ *     (ResourceLimit) for a payload that leaves SIGXCPU alone; a payload
+ *     that ignores or catches it is killed with SIGKILL one second later
+ *     and is Crashed with signal 9. Neither is observed by the parent as a
+ *     limit event in its own right.
+ *   - SIGCHLD must not be ignored in the calling process (SIG_IGN or
+ *     SA_NOCLDWAIT): the kernel would reap the child before waitpid and
+ *     the run could not be classified. Run refuses up front with
+ *     Outcome::SigchldIgnored and forks nothing.
  *   - The payload runs on its own stack (makecontext) whose bottom frame
  *     ends the unwind chain. An exception that escapes the payload cannot
  *     reach the frames the child inherited from the parent (a test
@@ -119,21 +126,34 @@ enum class Outcome : uint8_t {
     ResourceLimit = 7,    // child ended by SIGXCPU or SIGXFSZ
     SpawnFailed = 8,      // pipe/fork failed, or the child could not set up its sandbox
     SupervisorError = 9,  // poll/waitpid failure in the parent
-    InvalidLimits = 10    // Limits rejected before anything was spawned
+    InvalidLimits = 10,   // Limits rejected before anything was spawned
+    SigchldIgnored = 11   // SIGCHLD is ignored in this process; refused before anything was spawned
 };
 
 /** Upper bound on a deadline: one hour. Larger values are InvalidLimits. */
 inline constexpr uint64_t kMaxWallClockDeadlineNs = 3'600'000'000'000ULL;
 /** Upper bound on a result: 1 MiB. Larger max_output_bytes is InvalidLimits. */
 inline constexpr std::size_t kMaxOutputBytes = 1u << 20;
+/**
+ * Default RLIMIT_AS for the child: 4 GiB. The limit counts the whole address
+ * space, including the mappings the child inherits from the parent through
+ * fork, so it must sit above what the parent already maps. 4 GiB leaves a
+ * payload room to compute and still ends a runaway allocation in a crash or
+ * a ResourceLimit instead of the host's memory.
+ */
+inline constexpr uint64_t kDefaultAddressSpaceBytes = 4ULL << 30;
 
 struct Limits {
     /** Required, 1 .. kMaxWallClockDeadlineNs. */
     uint64_t wall_clock_deadline_ns = 0;
     /** RLIMIT_CPU soft limit in seconds; 0 derives ceil(deadline) + 1. */
     uint64_t cpu_seconds = 0;
-    /** RLIMIT_AS in bytes; 0 leaves the inherited limit. */
-    uint64_t address_space_bytes = 0;
+    /**
+     * RLIMIT_AS in bytes. Defaults to kDefaultAddressSpaceBytes. 0 leaves
+     * the inherited limit and is an explicit opt-out: the admission layer
+     * (stack-admission) refuses it.
+     */
+    uint64_t address_space_bytes = kDefaultAddressSpaceBytes;
     /** Largest result accepted, <= kMaxOutputBytes and <= the caller's buffer. */
     uint64_t max_output_bytes = 4096;
     /** RLIMIT_FSIZE in bytes; 0 forbids writing to regular files. Pipes are unaffected. */
@@ -194,6 +214,14 @@ public:
         ExecutionReport report{};
         if (!LimitsAreValid(limits, result, result_capacity)) {
             report.outcome = Outcome::InvalidLimits;
+            return report;
+        }
+        if (SigchldIsIgnored()) {
+            // The kernel reaps an ignored SIGCHLD child itself, so waitpid
+            // would fail with ECHILD and the real end of the run (a timeout
+            // included) would be reported as a supervisor error. Fail
+            // closed before forking instead.
+            report.outcome = Outcome::SigchldIgnored;
             return report;
         }
         const uint64_t t0 = MonotonicNs();
@@ -285,7 +313,7 @@ public:
                     }
                     if (parser.state == FrameParser::State::Oversized) {
                         // Nothing more is accepted; stop the child now.
-                        KillChild(pid);
+                        KillChild(pid, pidfd.fd);
                     }
                 } else if (pidfd.fd >= 0 && fds[i].fd == pidfd.fd) {
                     exited = true;
@@ -309,8 +337,10 @@ public:
             }
         }
 
-        if (report.deadline_fired || poll_failed) {
-            KillChild(pid);
+        // Once the waitpid fallback has reaped the child its pid is free to be
+        // reused, so nothing may be signaled by that number any more.
+        if ((report.deadline_fired || poll_failed) && !reaped) {
+            KillChild(pid, pidfd.fd);
         }
         // Always reap. With the waitpid fallback the child may be reaped already.
         if (!reaped) {
@@ -462,9 +492,31 @@ private:
 #endif
     }
 
-    static void KillChild(pid_t pid) noexcept {
+    // Only called while the child is not yet reaped, so its pid (and its
+    // process group, which the child leads) cannot have been reused. With a
+    // pidfd the child itself is signaled through the descriptor, which names
+    // that process and no other.
+    static void KillChild(pid_t pid, int pidfd) noexcept {
         (void)::kill(-pid, SIGKILL);
+        if (pidfd >= 0 && PidfdSendKill(pidfd)) return;
         (void)::kill(pid, SIGKILL);
+    }
+
+    [[nodiscard]] static bool PidfdSendKill(int pidfd) noexcept {
+#ifdef __NR_pidfd_send_signal
+        return ::syscall(__NR_pidfd_send_signal, pidfd, SIGKILL, nullptr, 0) == 0;
+#else
+        (void)pidfd;
+        return false;
+#endif
+    }
+
+    // True when the kernel would reap children on its own: SIGCHLD set to
+    // SIG_IGN, or SA_NOCLDWAIT set.
+    [[nodiscard]] static bool SigchldIsIgnored() noexcept {
+        struct sigaction current{};
+        if (::sigaction(SIGCHLD, nullptr, &current) != 0) return false;
+        return current.sa_handler == SIG_IGN || (current.sa_flags & SA_NOCLDWAIT) != 0;
     }
 
     // Reads what is available now. Returns false on a hard read error.

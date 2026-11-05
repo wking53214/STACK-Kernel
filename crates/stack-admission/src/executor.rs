@@ -94,6 +94,9 @@ pub enum LimitsError {
     /// Zero, or above [`MAX_OUTPUT_BYTES`].
     #[error("max_output_bytes must be 1..={MAX_OUTPUT_BYTES}")]
     Output,
+    /// Zero: the worker would inherit the host's address-space limit.
+    #[error("address_space_bytes must be above 0; 0 would leave RLIMIT_AS inherited")]
+    AddressSpace,
 }
 
 /// Limits every execution runs under. Mirrors the supervisor's limits.
@@ -103,7 +106,8 @@ pub struct ExecutionLimits {
     pub wall_clock_deadline_ns: u64,
     /// `RLIMIT_CPU` seconds; 0 derives one from the deadline.
     pub cpu_seconds: u64,
-    /// `RLIMIT_AS` bytes; 0 keeps the inherited limit.
+    /// `RLIMIT_AS` bytes; must be above 0, because 0 would keep the
+    /// inherited limit ([`LimitsError::AddressSpace`]).
     pub address_space_bytes: u64,
     /// Largest accepted result, at most [`MAX_OUTPUT_BYTES`].
     pub max_output_bytes: u64,
@@ -117,28 +121,37 @@ impl ExecutionLimits {
     /// Default result cap: 4 KiB.
     pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 4096;
 
+    /// Default `RLIMIT_AS`: 4 GiB, the supervisor's own default. The limit
+    /// counts the whole address space the forked worker inherits, so it
+    /// must sit above what the host already maps.
+    pub const DEFAULT_ADDRESS_SPACE_BYTES: u64 = 4 << 30;
+
     /// Limits with this deadline and the defaults for everything else:
-    /// derived CPU limit, inherited address space, 4 KiB of result, no
-    /// file writes, derived descriptor floor.
+    /// derived CPU limit, [`Self::DEFAULT_ADDRESS_SPACE_BYTES`] of address
+    /// space, 4 KiB of result, no file writes, derived descriptor floor.
     pub const fn with_deadline_ns(wall_clock_deadline_ns: u64) -> Self {
         Self {
             wall_clock_deadline_ns,
             cpu_seconds: 0,
-            address_space_bytes: 0,
+            address_space_bytes: Self::DEFAULT_ADDRESS_SPACE_BYTES,
             max_output_bytes: Self::DEFAULT_MAX_OUTPUT_BYTES,
             file_size_bytes: 0,
             nofile: 0,
         }
     }
 
-    /// Checks the deadline and the result cap. The supervisor checks
-    /// again before forking; this refuses a bad policy at build time.
+    /// Checks the deadline, the result cap and the address-space limit. The
+    /// supervisor checks again before forking; this refuses a bad policy at
+    /// build time.
     pub const fn validate(&self) -> Result<(), LimitsError> {
         if self.wall_clock_deadline_ns == 0 || self.wall_clock_deadline_ns > MAX_DEADLINE_NS {
             return Err(LimitsError::Deadline);
         }
         if self.max_output_bytes == 0 || self.max_output_bytes > MAX_OUTPUT_BYTES {
             return Err(LimitsError::Output);
+        }
+        if self.address_space_bytes == 0 {
+            return Err(LimitsError::AddressSpace);
         }
         Ok(())
     }
@@ -309,6 +322,9 @@ impl Executor for SupervisedExecutor {
             O::InvalidLimits => RunOutcome::Unknown {
                 reason: "limits refused by the supervisor".to_owned(),
             },
+            O::SigchldIgnored => RunOutcome::Unknown {
+                reason: "SIGCHLD is ignored in this process; the supervisor refused to run".to_owned(),
+            },
             O::Unrecognized(code) => RunOutcome::Unknown {
                 reason: format!("unrecognized supervisor outcome code {code}"),
             },
@@ -332,6 +348,18 @@ mod tests {
             assert_eq!(format!("{k}"), k.as_str());
         }
         assert_eq!(WorkerKind::parse("rm -rf"), None);
+    }
+
+    #[test]
+    fn a_zero_address_space_is_refused_and_the_default_is_bounded() {
+        let mut l = ExecutionLimits::with_deadline_ns(1);
+        assert_eq!(l.address_space_bytes, ExecutionLimits::DEFAULT_ADDRESS_SPACE_BYTES);
+        assert_eq!(ExecutionLimits::DEFAULT_ADDRESS_SPACE_BYTES, 4 << 30);
+        assert_eq!(l.validate(), Ok(()));
+        l.address_space_bytes = 0;
+        assert_eq!(l.validate(), Err(LimitsError::AddressSpace));
+        l.address_space_bytes = 1;
+        assert_eq!(l.validate(), Ok(()));
     }
 
     #[test]

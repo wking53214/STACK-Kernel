@@ -45,7 +45,7 @@ All of these are registered in `CMakeLists.txt` and run under `ctest`
   expiry on a sealed thread, zero-timeout refusal and fail-closed arming.
   One pre-existing case is scheduling dependent; see `CONTAINMENT.md`.
 - `tests/supervised_exec_tests.cpp` (Catch2, `stack_supervised_exec_tests`):
-  the supervised executor, 12 cases; every hostile payload runs in a child.
+  the supervised executor, 15 cases (plus the waitpid-fallback program); every hostile payload runs in a child.
 - `tests/tests_production_hardened.cpp` (Catch2): five checks in one case;
   its banner covers that case only.
 - Red-team programs (plain `main`, exit non-zero on failure):

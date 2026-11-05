@@ -164,6 +164,14 @@ mod tests {
     }
 
     #[test]
+    fn a_policy_that_leaves_the_address_space_inherited_is_refused() {
+        let mut p = policy();
+        assert_eq!(p.limits.address_space_bytes, ExecutionLimits::DEFAULT_ADDRESS_SPACE_BYTES);
+        p.limits.address_space_bytes = 0;
+        assert_eq!(p.validate(), Err(ConfigError::Limits(LimitsError::AddressSpace)));
+    }
+
+    #[test]
     fn each_field_is_checked() {
         let mut p = policy();
         p.kernel_id = String::new();

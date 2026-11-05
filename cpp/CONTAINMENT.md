@@ -35,8 +35,8 @@ deadline and burns that CPU time.
 ## What the executor guarantees, and the test that proves each
 
 All tests are in `cpp/tests/supervised_exec_tests.cpp` (ctest
-`STACKSupervisedExec`, 12 cases, 1094 assertions) unless noted. Run 20 times
-in a row on the development host: 20 passes, 0 failures.
+`STACKSupervisedExec`, 15 cases, 1116 assertions) unless noted. The first 12
+cases ran 20 times in a row on the development host: 20 passes, 0 failures.
 
 | Guarantee | Test |
 |---|---|
@@ -47,6 +47,9 @@ in a row on the development host: 20 passes, 0 failures.
 | SIGSEGV and `abort()` are `Crashed` with their signal; `_exit(0)` without a result is `ResultMissing`; `_exit(3)` is `ExitedNonZero` with the code. None is `Completed`. | "SIGSEGV, abort() and a frameless exit are never Completed" |
 | A result the child announces beyond `max_output_bytes` is `ResultOversized`; the bytes are not delivered. | "an oversized result is rejected" |
 | Allocation beyond `RLIMIT_AS` ends in `ResourceLimit` or `Crashed`, never `Completed`. | "allocating beyond RLIMIT_AS is ResourceLimit or Crashed" |
+| With `SIGCHLD` ignored (`SIG_IGN` or `SA_NOCLDWAIT`) the executor refuses with `SigchldIgnored` before forking; it never reports a misleading outcome. | "a run is refused while SIGCHLD is ignored" |
+| A default-constructed `Limits` bounds the address space at 4 GiB, so a runaway allocation is `Crashed` or `ResourceLimit`, never `Completed`. | "allocating beyond the default address-space limit is Crashed or ResourceLimit" |
+| On the `waitpid` fallback (no pidfd) a child reaped at the deadline is not signaled by its freed pid; with a pidfd the child is signaled through it. Tested by interposing `kill`, `waitpid` and `syscall` in `cpp/tests/supervised_fallback_tests.cpp` (ctest `STACKSupervisedFallback`). | "no kill after reap" |
 | A zero deadline, a deadline over one hour, an output cap over 1 MiB or over the caller's buffer, and a descriptor below 3 are `InvalidLimits` before anything is forked. | "zero or absurd limits are rejected before forking" |
 | A completing payload's bytes arrive exactly, with `Completed`. | "a payload that returns bytes is Completed with the exact bytes" |
 | 300 sequential runs leave no zombie (`waitpid(-1)` gives `ECHILD`) and no descriptor (`/proc/self/fd` count unchanged). | "300 sequential runs leave no zombies and no descriptors" |
@@ -77,9 +80,14 @@ exit, forbidden-syscall, return-bytes and invalid-limits cases.
   `TimedOut`, never `Completed`.
 - **Wall clock, not CPU.** The deadline is wall-clock time measured in the
   parent on `CLOCK_MONOTONIC`. `RLIMIT_CPU` is also set (derived from the
-  deadline unless given) and ends in SIGXCPU, reported `ResourceLimit`, but
-  the kill at the deadline is what is tested.
-- **Resource limits are best effort.** `RLIMIT_AS` makes allocation fail
+  deadline unless given). A payload that leaves SIGXCPU alone ends in
+  SIGXCPU and is reported `ResourceLimit`. A payload that ignores or
+  catches SIGXCPU is not stopped by it: the hard limit one second later
+  sends SIGKILL, and the run is reported `Crashed` with signal 9, not
+  `ResourceLimit` (test "a payload that ignores SIGXCPU is Crashed with
+  signal 9"). The kill at the deadline is what is tested for timing.
+- **Resource limits are best effort.** `RLIMIT_AS` (4 GiB by default; 0 is
+  an explicit opt-out that `stack-admission` refuses) makes allocation fail
   inside the child; what happens next is the payload's business (usually
   `abort`, so `Crashed`). `RLIMIT_NPROC` is not enforced for a privileged
   uid; the filter's refusal of `clone` is what prevents spawning.
