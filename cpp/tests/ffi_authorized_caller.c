@@ -218,11 +218,16 @@ int main(void) {
     CHECK(r.child_pid == 0);
     CHECK(stack_host_worker_spawn_count() == spawns0 + 2);
     int served = 0, rc = 0;
+    struct timespec s0, s1;
+    clock_gettime(CLOCK_MONOTONIC, &s0);
     for (int i = 0; i < 40 && rc == 0; ++i) {
         rc = run(legit, 5, 0x01, 100, 0, worker_digest, out, sizeof out, &r);
         if (rc == 0) ++served;
     }
-    CHECK(rc == kRateLimited && served >= 1 && served <= 12);
+    clock_gettime(CLOCK_MONOTONIC, &s1);
+    /* 9 from a full bucket, plus one per 100 ms of refill. */
+    long ms = (s1.tv_sec - s0.tv_sec) * 1000 + (s1.tv_nsec - s0.tv_nsec) / 1000000;
+    CHECK(rc == kRateLimited && served >= 9 && served <= 9 + (int)(ms / 100) + 1);
     CHECK(stack_host_worker_spawn_count() == spawns0 + 2 + (uint64_t)served);
 
     /* R-5: stop a run by id. Unknown ids are no-ops; an id in flight cannot be reused. */

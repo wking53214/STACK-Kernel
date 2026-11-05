@@ -184,6 +184,7 @@ fn governance_is_still_enforced_after_authorization_and_the_worker_never_runs() 
     assert_eq!(host_worker_spawn_count(), spawns);
 
     // Tokens: a domain spends its burst and is then rate limited, spawning nothing.
+    let began = std::time::Instant::now();
     let mut served = 0u64;
     let mut last = Ok(());
     for _ in 0..40 {
@@ -196,7 +197,9 @@ fn governance_is_still_enforced_after_authorization_and_the_worker_never_runs() 
         }
     }
     assert_eq!(last, Err(GovernedSupervisedError::RateLimited));
-    assert!((1..=12).contains(&served), "served {served}");
+    // 9 from a full bucket, plus one per 100 ms of refill (a loaded runner is slow).
+    let allowance = u64::try_from(began.elapsed().as_millis() / 100).unwrap() + 1;
+    assert!((9..=9 + allowance).contains(&served), "served {served} in {:?}", began.elapsed());
     assert_eq!(host_worker_spawn_count(), spawns + served, "the refused request spawned nothing");
 
     // Pinned worker image: a wrong digest is refused, spawning nothing.
