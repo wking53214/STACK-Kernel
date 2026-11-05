@@ -273,7 +273,7 @@ int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t 
 //   -3  execution failed for a reason not listed below: seccomp, signal
 //       handler or timer_create setup failed (unchanged meaning, narrower)
 //   -4  capability validation failed
-//   -5  rate limit exceeded
+//   -5  rate limit exceeded (also: required_tokens == 0, R2-K-20)
 //   -6  hard (CPU-time) deadline fired: PreemptionTriggered
 //   -7  software deadline (tick budget) exceeded
 //   -8  compute debt ceiling exceeded
@@ -482,7 +482,8 @@ int stack_supervised_run(
 //   -3  a null pointer argument, or out null with a non-zero capacity
 //   -4  capability validation failed, including a request that names no
 //       capability bit at all (required_capability_m0 == 0)
-//   -5  rate limited (also: more than 100 tokens, domain id 16 or more)
+//   -5  rate limited (also: more than 100 tokens, 0 tokens (R2-K-20: a
+//       governed request consumes at least one), domain id 16 or more)
 //   -9  wall_clock_deadline_ns was 0
 //  -12  initialization failed (latched)
 //  -13  a capability change is pending; retry

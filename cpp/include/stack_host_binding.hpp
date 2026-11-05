@@ -590,6 +590,13 @@ public:
         // Component 2-5 Check: Kinetic Governor
         // LAYER 7 FIX: Consume now reads clock internally (removed caller-supplied time parameter)
         // P3.1 FIX: Consume now accepts domain_id for per-domain rate limiting
+        // R2-K-20: a request must consume at least one token. A zero-token
+        // request passes the governor's floor check for free ("available >=
+        // Reserved + 0" is always true), so it would run without limit.
+        if (required_tokens == 0) [[unlikely]] {
+            audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, 0);
+            return std::unexpected(HostExecutionError::RateLimitExceeded);
+        }
         auto consume_res = governor_.Consume(domain_id, required_tokens, PriorityClass::Standard);
         if (!consume_res.has_value()) [[unlikely]] {
             // LAYER 5 FIX: Record rate limit event
@@ -743,6 +750,13 @@ public:
         if (!token.Validate(snapshot_capabilities)) [[unlikely]] {
             audit_ring_.Push(AuditEventType::CapabilityViolation, domain_id, 0);
             return std::unexpected(HostExecutionError::CapabilityValidationFailed);
+        }
+        // R2-K-20: a request must consume at least one token. A zero-token
+        // request passes the governor's floor check for free ("available >=
+        // Reserved + 0" is always true), so it would run without limit.
+        if (required_tokens == 0) [[unlikely]] {
+            audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, 0);
+            return std::unexpected(HostExecutionError::RateLimitExceeded);
         }
         auto consume_res = governor_.Consume(domain_id, required_tokens, PriorityClass::Standard);
         if (!consume_res.has_value()) [[unlikely]] {

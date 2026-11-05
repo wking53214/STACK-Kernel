@@ -206,6 +206,11 @@ in-process path that the FFI exposes:
   a transaction that ran keeps its tokens and is charged its ticks, one
   rejected before it ran costs nothing; a revocation applies under sustained
   load within a bound and no transaction that begins after it runs.
+- tested (R2-K-20): a governed request consumes at least one token. A request
+  for 0 tokens is refused as rate limited on the transaction path and on the
+  governed supervised path, before anything runs or spawns, and is audited. It
+  used to pass the governor's floor check for free and was accepted without
+  limit.
 - not isolation, still: the deadline stays cooperative (section above).
 - the direct C++ call `GovernedMinotaurHost::ExecuteGovernedTransaction` still
   seals an unsealed calling thread, as before; only the FFI entry point stopped

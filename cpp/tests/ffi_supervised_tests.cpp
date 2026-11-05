@@ -248,6 +248,25 @@ TEST_CASE("Governed supervised: exhausted tokens are refused with no spawn and t
     REQUIRE(Governed(16, kCap, 1, 0).rc == kRateLimited);
 }
 
+// R2-K-20: 2000 of 2000 zero-token governed runs used to be accepted (against
+// 9 of 30 at 100 tokens): "available >= Reserved + 0" is always true. A governed
+// run must consume at least one token.
+TEST_CASE("Governed supervised: a zero-token request is rate limited, spawns nothing and is audited", "[governed][R2-K-20]") {
+    Setup();
+    const uint64_t domain = 13;
+    const int before = g_sigchld.load();
+    for (int i = 0; i < 200; ++i) {
+        const Result r = Governed(domain, kCap, 0, 0);
+        REQUIRE(r.rc == kRateLimited);
+        REQUIRE(r.report.child_pid == 0);
+    }
+    ::usleep(100'000);
+    REQUIRE(g_sigchld.load() == before);
+    REQUIRE(Audit(domain, kAuditRateLimited).count >= 200);
+    REQUIRE(Audit(domain, kAuditSupervisedCompleted).count == 0);
+    ServedRequests(domain);  // the full 9: the refusals took nothing
+}
+
 TEST_CASE("Governed supervised: refusals before governance consume nothing", "[governed]") {
     Setup();
     const uint64_t domain = 6;

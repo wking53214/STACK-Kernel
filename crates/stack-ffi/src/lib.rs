@@ -1112,8 +1112,9 @@ mod tests {
 
     /// I-04 (R2-K-07): a revocation applies under sustained load from eight
     /// sealed executor threads, within a bound, and no transaction that begins
-    /// after it returned runs its payload. Executors ask for zero tokens so the
-    /// load is not ended by the rate limit.
+    /// after it returned runs its payload. Executors ask for one token each (zero
+    /// became a rate limit refusal in R2-K-20); a domain's first 900 requests
+    /// are served at once.
     #[test]
     fn test_revocation_applies_under_sustained_load_through_the_ffi() {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1139,7 +1140,7 @@ mod tests {
                     sealed.fetch_add(1, Ordering::SeqCst);
                     while !stop.load(Ordering::Relaxed) {
                         let after = revoked.load(Ordering::Acquire);
-                        let r = txn(domain, 0x01, 0);
+                        let r = txn(domain, 0x01, 1);
                         if after {
                             started_after.fetch_add(1, Ordering::Relaxed);
                             match r {

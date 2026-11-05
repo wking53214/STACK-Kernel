@@ -37,6 +37,7 @@ that existed before are unchanged. Additions and changes of meaning:
 | 4 | `stack_execute_governed_transaction` | NEW -13: a capability change is pending; nothing ran, nothing was consumed; retry. |
 | 5a | Rust `audit_read_slot` | Result flipped to what its documentation said: `Some` for a written slot, `None` for an empty one. The C symbol `stack_audit_read_slot` is unchanged. |
 | A3 | `int stack_supervised_run_governed(context_id, required_capability_m0, required_tokens, payload_kind, worker_path, limits, reap_timeout_ns, out, out_capacity, report)` | NEW. Capability and rate-limit checks through the initialized host BEFORE a clean worker program is spawned. Codes in section 8. |
+| R2-K-20 | `stack_execute_governed_transaction`, `stack_supervised_run_governed` | Behaviour: `required_tokens == 0` is now -5 (rate limited), audited as a rate-limit event, nothing consumed, nothing run or spawned. Before, a zero-token request passed the governor's floor check for free (`available >= Reserved + 0`) and was accepted without limit (2000 of 2000 governed runs at 0 tokens, against 9 of 30 at 100 tokens). A caller that passed 0 must pass at least 1. |
 | A3 | `uint64_t stack_supervised_unconfirmed_count(void)`, `uint64_t stack_supervised_reap_unconfirmed(void)` | NEW. Workers sent SIGKILL and not confirmed reaped; re-kill and reap them. |
 | A2 | `stack_supervised_report` | Same size and layout. `reserved[3]` became `result_self_reported` (u8) and `reserved[2]`. Old callers read it as before; it is 1 on `Completed`. |
 | A2 | `stack_supervised_report.outcome` | NEW value 12 `TerminationUnconfirmed`. A caller that switched over the outcome and had a default arm now sees it there. |
@@ -84,7 +85,7 @@ Rust additions in `src/lib.rs`: `host_initialize`, `host_seal_current_thread`,
 | -1 | Host not initialized. |
 | -3 | Setup failure (seccomp, signal handler or timer_create). |
 | -4 | Capability validation failed. |
-| -5 | Rate limited (also: request above 100 tokens, domain id 16 or more). |
+| -5 | Rate limited (also: request above 100 tokens, a request for 0 tokens (R2-K-20), domain id 16 or more). |
 | -6 | Hard (CPU-time) deadline fired. Payload ran. |
 | -7 | Software tick budget exceeded. Payload ran. |
 | -8 | Compute debt ceiling exceeded. Payload ran. |
@@ -110,6 +111,11 @@ every transaction) no longer compiles.
   requests of 100; concurrent transactions consume exactly the tokens expected;
   oversize request and unknown domain are refused (`cpp/tests/ffi_host_tests.cpp`,
   the Rust tests through the FFI).
+- tested (R2-K-20): a request for 0 tokens is rate limited on both the transaction
+  and the governed supervised path, runs and spawns nothing, is audited, and
+  takes nothing from the bucket (`ffi_host_tests.cpp` "a zero-token transaction
+  is rate limited", `ffi_supervised_tests.cpp` "a zero-token request is rate
+  limited").
 - implemented, not tested: the refill rate is calibrated once against
   `CLOCK_MONOTONIC` over 10 ms. Behaviour on a machine whose TSC frequency
   changes at run time is not tested.
@@ -340,7 +346,7 @@ What is now done (each statement names its test):
 | -2 | Unknown payload kind (above 6). |
 | -3 | A null pointer, or `out` null with a non-zero capacity. |
 | -4 | Capability validation failed, including a request naming no capability bit. |
-| -5 | Rate limited (also above 100 tokens, domain 16 or more). |
+| -5 | Rate limited (also above 100 tokens, 0 tokens (R2-K-20), domain 16 or more). |
 | -9 | `wall_clock_deadline_ns` was 0. |
 | -12 | Initialization failed (latched). |
 | -13 | A capability change is pending; retry. |

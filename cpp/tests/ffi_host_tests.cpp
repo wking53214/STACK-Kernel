@@ -316,6 +316,35 @@ TEST_CASE("FFI host: a request above the largest allowed request and an unknown 
     REQUIRE(completed <= static_cast<int>(kSpendable / kLargestRequest) + elapsed_ms / 100 + 1);
 }
 
+// R2-K-20: a zero-token request used to pass the rate limit (the governor's
+// "available >= Reserved + 0" is always true), so a domain could run any number
+// of transactions for free. A governed request must consume at least one token.
+TEST_CASE("FFI host: a zero-token transaction is rate limited, runs nothing and is audited", "[ffi][R2-K-20]") {
+    const uint64_t domain = 1;
+    int zero_rc[3] = {99, 99, 99};
+    uint64_t payload_before = 0, payload_after = 0;
+    int one_token = 99;
+    const int seal = OnSealedThread([&] {
+        (void)stack_host_set_capabilities(0xFF, 0, 0, 0);
+        payload_before = stack_host_payload_count();
+        for (int& rc : zero_rc) rc = Txn(domain, 0x01, 0);
+        payload_after = stack_host_payload_count();
+        one_token = Txn(domain, 0x01, 1);  // one token still works
+    });
+    REQUIRE(seal == 0);
+    for (const int rc : zero_rc) REQUIRE(rc == kRateLimited);
+    REQUIRE(payload_after == payload_before);
+    REQUIRE(one_token == kCompleted);
+    bool audited = false;
+    for (uint64_t i = 0; i < kHostAuditSlots; ++i) {
+        uint8_t t = 0;
+        uint64_t ts = 0, ctx = 0;
+        uint32_t tok = 0;
+        if (stack_host_audit_read_slot(i, &t, &ts, &ctx, &tok) == 0 && ctx == domain && t == kAuditRateLimitTriggered) audited = true;
+    }
+    REQUIRE(audited);
+}
+
 TEST_CASE("FFI host: an overrun transaction keeps its tokens", "[ffi][I-03]") {
     // A software budget of one tick is always exceeded. The payload ran, so
     // its 100 tokens are spent: 8 more requests of 100 follow, not 9.
@@ -368,12 +397,10 @@ TEST_CASE("FFI host: a failed transaction produces no success audit record", "[f
 TEST_CASE("FFI host: a revocation applies under sustained transaction load (R2-K-07)", "[ffi][I-04]") {
     // Eight sealed executor threads run transactions back to back, each on its
     // own domain, so at every instant some transaction is in flight. They ask
-    // for zero tokens: the bucket's rate limit (1000 tokens per second) would
-    // otherwise end the load within milliseconds, and a rate limited
-    // transaction leaves the host before the payload and the timer, which
-    // leaves the setter gaps to slip through. A zero-token transaction takes
-    // the whole path: capability check, floor check, timer arm, payload,
-    // debt. The
+    // for one token each (they used to ask for zero, which R2-K-20 made a rate
+    // limit refusal): the bucket serves a domain's first 900 requests at once,
+    // and a rate limited transaction leaves the host before the payload and
+    // the timer. The
     // capability change used to be refused whenever the global in-flight count
     // was above zero, so it never applied (334 attempts with one executor,
     // none in 2 s with eight). The change must now apply within a bound, a
@@ -403,7 +430,7 @@ TEST_CASE("FFI host: a revocation applies under sustained transaction load (R2-K
                 // Read before the call: a transaction that begins after the
                 // change returned applied is the one that must be refused.
                 const bool after = revoked.load(std::memory_order_acquire);
-                const int rc = Txn(kDomains[t], 0x01, 0);
+                const int rc = Txn(kDomains[t], 0x01, 1);
                 attempts.fetch_add(1, std::memory_order_relaxed);
                 if (after) {
                     started_after_revoke.fetch_add(1, std::memory_order_relaxed);
