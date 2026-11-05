@@ -544,3 +544,43 @@ Not done, and why:
   without a kernel fault, so only the simulated ineffective kill is tested.
 - aarch64: the helper and the filter compile for it by their `#if`s but only
   x86_64 was built and run; the x32 test exists for x86_64 only.
+
+## 9. Authorized entry points and run cancellation (D2-A, R-5)
+
+Implemented and tested: the safe Rust governed entry points take `&AuthorizedAction`; the
+raw ones are `unsafe fn` (`tests/api_surface.rs`, `compile_fail` doc tests); the C symbols
+`stack_supervised_run_authorized`, `stack_execute_governed_transaction_authorized` and
+`stack_supervised_run_authorized_cancellable` refuse a NULL or all-zero digest with -18 and
+spawn nothing (`cpp/tests/ffi_authorized_caller.c`, ctest `STACKFfiAuthorizedCaller`;
+`tests/authorized_run.rs`). A run started with a run id is stopped by
+`stack_supervised_cancel`, with the same pidfd SIGKILL as a mask revocation; a stopped run
+is `Terminated`, never a success.
+
+Non-guarantees, stated plainly:
+
+- The host holds no trust set. ANY 32 non-zero bytes are accepted at the C layer, and a test
+  pins that. Code in the same process can call the raw C symbols, authorized or not, with any
+  digest. This is an anti-misuse boundary, not protection from malicious in-process code.
+- The audit ring entry (`AuthorizationBound`) carries only a LABEL, the first 8 bytes of the
+  digest. It is not a MAC and not an integrity value. The full 32-byte digest is recorded in
+  the receipt (`Authorized.capability.cap_digest`).
+- `stack_supervised_cancel` needs no authorization; it can only end a run early.
+- The in-flight table holds 64 cancellable runs; a 65th is -19.
+- Remaining: the legacy symbols `stack_supervised_run`, `stack_supervised_run_governed` and
+  `stack_execute_governed_transaction` still exist and take no authorization.
+
+## D2-C follow-up (deferred): a separate kernel process owning execution
+
+Status: NOT implemented. Nothing in this repository is a daemon, an IPC client or a
+process boundary between a caller and the kernel.
+
+D2-A (this wave) is an anti-misuse boundary. In Rust, the governed run needs an
+`AuthorizedAction`, which only `Authority::authorize` can mint. In C++, the host refuses an
+all-zero capability digest and records a label of the digest in its audit trail. It is not a
+defence against hostile code in the calling process: that code can call the raw C symbols
+with any 32 non-zero bytes, and a test pins that
+(`cpp/tests/ffi_authorized_caller.c`, "NON-GUARANTEE"). The only design that gives a real
+boundary is a separate kernel process (a daemon) that alone owns the host, the worker
+supervisor, the authority checks and the receipt log, reached over IPC through a thin client
+crate; it would live as new crates in this repository. Priority P2. Revisit when hostile
+code inside the calling process enters the threat model.

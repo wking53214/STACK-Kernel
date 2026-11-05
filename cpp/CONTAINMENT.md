@@ -379,3 +379,18 @@ time into a 50 ms budget (idle: 50 to 54 ms). R2-K-16: the cooperative
 deadline is therefore a lower bound on how long a payload may run, not a tight
 one. The cause inside the kernel's CPU-timer delivery was not investigated.
 The supervised executor's wall-clock kill is the bounded path.
+
+## Authorized entry points and stopping a run (D2-A, R-5)
+
+Implemented and tested. The authorized supervised run and in-process transaction require a
+non-zero capability digest (-18 otherwise, nothing spawned); the run can be named by a run id
+and stopped with `stack_supervised_cancel`, which sends the SIGKILL through the worker's pidfd
+exactly as a capability-mask revocation does, ending the run `Terminated` and audited
+`SupervisedTerminated`. Tests: `cpp/tests/ffi_authorized_caller.c` (ctest
+`STACKFfiAuthorizedCaller`), `crates/stack-admission/tests/revocation_real_worker.rs`
+(a 3 s spin worker is dead within 1 s of the revocation, measured 58 ms).
+
+Limits: the host cannot tell a real digest from a made-up non-zero one, and in-process code can
+call the raw symbols; the audit entry carries a label, not the digest (ABI.md section 9).
+See also "D2-C follow-up (deferred)" in `crates/stack-ffi/ABI.md`: a separate kernel process
+owning execution is NOT implemented.

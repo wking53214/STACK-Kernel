@@ -448,3 +448,12 @@ verify_log(&[SignedRecord], &TrustedReceiptKeys, &Expectations) -> LogVerificati
 verify_receipt_chain(&[SignedRecord], ExecutionId, &TrustedReceiptKeys, &Expectations) -> Verification
 Verification::to_json(&self) -> String ; LogVerification::to_json(&self) -> String
 ```
+
+## Execution authorization (D2-A) and the receipt
+
+Implemented: the capability digest the C++ host receives is `Authorized.capability.cap_digest`,
+recorded in full in the receipt. The host's audit ring carries only a label derived from it,
+which is not evidence. A receipt cannot show that the host was reached only through the
+authorized entry points: in-process code can call the raw C symbols (see
+`crates/stack-ffi/ABI.md` section 9). The worker image and limits (`Attempted`) and the use
+evidence (`Authorized`) are version 2 additions described above.

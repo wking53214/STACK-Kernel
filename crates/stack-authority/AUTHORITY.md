@@ -290,6 +290,17 @@ It is marked `must_use`. It is permission to perform exactly the operation
 and resource it names, once if the capability was one-time; it records
 nothing about what then happened.
 
+### Authorization at the execution boundary (D2-A)
+
+Implemented and tested. `stack-ffi`'s safe governed entry points take `&AuthorizedAction`,
+which only `Authority::authorize` can mint, and pass its capability digest to the C++ host.
+`AuthorizedAction::use_evidence()` returns what the use store reported (record hash and
+position for `FileUseStore`, a labeled non-durable marker for `MemoryUseStore`, `NotProvided`
+for a store that predates the method); `stack-authority/tests/use_evidence.rs`.
+Non-guarantee: code in the same process can call the raw C symbols with any digest, so this is
+an anti-misuse boundary, not protection from malicious in-process code. A separate kernel
+process (D2-C) is deferred and NOT implemented; see `crates/stack-ffi/ABI.md`.
+
 ## 8. Limitations, stated
 
 * Revocation and trust-set distribution are the operator's job; a

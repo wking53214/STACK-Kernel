@@ -237,3 +237,32 @@ supervisor (`PR_SET_PDEATHSIG`, measured 8 ms in
 `a_kernel_killed_during_execution_leaves_an_incomplete_unknown_execution`);
 `cpp/CONTAINMENT.md` does not mention it and the header does.
 
+## 8. Execution authorization and revocation of a running worker (D2-A, R-5)
+
+| Item | State | Evidence |
+|---|---|---|
+| `SupervisedExecutor` runs only through `run_authorized` with the `AuthorizedAction`; `run` and `run_observed` are refused and spawn nothing | implemented, tested | `tests/authorization_required.rs` |
+| The C++ host gets the capability digest and refuses an all-zero one; the full digest is in the receipt, the audit ring holds only a label | implemented, tested | `stack-ffi/tests/authorized_run.rs`, `cpp/tests/ffi_authorized_caller.c` |
+| A signed capability revoked while a real 3 s spin worker runs kills it (< 1 s, measured 58 ms); terminal is `Terminated`, not a success; an unrelated run is unaffected | implemented, tested | `tests/revocation_real_worker.rs` |
+| Real admission runs record the observed terminal, the worker image and limits, and the use evidence (receipt format version 2) | implemented, tested | `tests/observed_terminal.rs`, `tests/worker_use_native.rs` |
+
+Non-guarantee: code in the same process can call the raw C symbols with any digest; this is
+an anti-misuse boundary, not protection from malicious in-process code. Remaining limits:
+the worker kinds are a fixed built-in set, arguments are not delivered, the native digest is
+not recomputed by the kernel, and storage is single process and single host.
+
+## D2-C follow-up (deferred): a separate kernel process owning execution
+
+Status: NOT implemented. Nothing in this repository is a daemon, an IPC client or a
+process boundary between a caller and the kernel.
+
+D2-A (this wave) is an anti-misuse boundary. In Rust, the governed run needs an
+`AuthorizedAction`, which only `Authority::authorize` can mint. In C++, the host refuses an
+all-zero capability digest and records a label of the digest in its audit trail. It is not a
+defence against hostile code in the calling process: that code can call the raw C symbols
+with any 32 non-zero bytes, and a test pins that
+(`cpp/tests/ffi_authorized_caller.c`, "NON-GUARANTEE"). The only design that gives a real
+boundary is a separate kernel process (a daemon) that alone owns the host, the worker
+supervisor, the authority checks and the receipt log, reached over IPC through a thin client
+crate; it would live as new crates in this repository. Priority P2. Revisit when hostile
+code inside the calling process enters the threat model.
