@@ -247,7 +247,12 @@ impl Execution<ProposedStage> {
 }
 
 impl Execution<AuthorizedStage> {
-    /// Records, before anything runs, exactly what is about to run. The
+    /// Records, before anything runs, the action the kernel is about to
+    /// run: the operation it selects, the resource it was authorized for,
+    /// and the digest of the argument bytes it intends to pass. The record
+    /// is the kernel's intent, not proof of what the worker received: the
+    /// supervised executor in this repository delivers neither the
+    /// arguments nor the resource to its built-in workers (R2-X-02). The
     /// payload may start only once this returns `Ok`.
     pub fn attempt(self, action: ActualAction, started_at_ms: u64) -> Result<Execution<AttemptedStage>, AttemptUnrecorded> {
         self.append(Event::Attempted(Attempted { action, started_at_ms }))

@@ -137,14 +137,17 @@ numbers, not a guarantee.
   checks the verdicts against its policy; it does not and cannot check
   that SuperGate issued them. The issuer is what ties a decision to a
   capability, and it is outside this repository.
-* **Arguments are not delivered, and not authorized.** The C ABI runs a
-  fixed set of built-in workers and carries no argument bytes. The
-  pipeline validates `args`, canonicalizes them and records their SHA-256
-  as the attempted argument digest, but the worker never sees them; the
-  receipt field now documents itself as the digest the producer intended
-  to pass, not proof of delivery (R2-X-02, wording corrected). Neither the subject digest nor the capability covers `args`.
-  Until a worker reads them and a binding exists, `args` must not carry
-  meaning.
+* **Arguments and the resource are not delivered, and the arguments are
+  not authorized.** The C ABI runs a fixed set of built-in workers and
+  carries neither argument bytes nor a resource. The pipeline validates
+  `args`, canonicalizes them and records their SHA-256 as the attempted
+  argument digest, and it authorizes the `resource` and records it in the
+  `attempted` action, but the worker sees neither; the record is the
+  digest and the resource the kernel intended to use, not proof of
+  delivery (R2-X-02, wording corrected). Neither the subject digest nor
+  the capability covers `args`. Until a worker reads them and a binding
+  exists, `args` and `resource` must not be read as what the worker
+  acted on.
 * **A roster with the `CNS:same_subject` seat is refused.** A real
   SuperGate decision built with `same_subject=` carries a pseudo seat whose
   verdict binds its own object, not the content; the kernel requires every
@@ -208,7 +211,7 @@ and a log for another kernel.
 | Id | Finding | Evidence | Effect |
 |---|---|---|---|
 | R2-X-01 | A supervised worker is a fork of the whole process and holds a copy of every advisory-lock descriptor (replay store, use store, receipt log) until its setup closes them. | scratch experiment: 3 threads forking workers continuously, 1,008,508 of 1,101,388 lock re-acquisitions in the parent failed in 8 s; one intermittent "still locked" start in about 60 runs of `tests/adversarial.rs` | fail closed, intermittent restart failures; the planned fork+exec clean worker (I-05) removes it |
-| R2-X-02 | `args` are validated and digested but the worker never receives them, and no capability or digest covers them; the receipt's `argument_digest` is documented as "bytes actually passed". | `src/executor.rs` (`_args` unused); `RECEIPT.md` section 2 | the receipt field overstates; harmless while no worker reads arguments |
+| R2-X-02 | `args` are validated and digested and the `resource` is authorized, but the worker receives neither, and no capability or digest covers `args`; the receipt's `attempted` record was documented as "bytes actually passed" and "exactly what is about to run". | `src/executor.rs` (`_args` unused); `RECEIPT.md` section 2 | the receipt field overstates; harmless while no worker reads arguments |
 | R2-X-03 | A Trident refusal or an unparseable payload is not written to the receipt log. | `a_malformed_payload_is_refused_before_anything_is_recorded` | an auditor of the log alone does not see refused replays |
 | R2-X-04 | The payload has no version field. | `src/payload.rs` | a future format change cannot be told from a malformed payload |
 | R2-X-05 | A real CNS roster using `same_subject=` is refused. | `a_real_decision_that_carries_the_same_subject_seat_is_refused_today` | safe direction; a CNS feature the kernel cannot admit yet |
