@@ -255,28 +255,27 @@ TEST_CASE("Image: a pinned image with the right digest runs; a wrong digest is r
     REQUIRE(SupervisedExecutor::CheckWorkerImage(STACK_WORKER_PATH, bad) == EKEYREJECTED);
 }
 
-TEST_CASE("Image: a non-worker binary (touch) is not run when the worker's digest is pinned", "[image][digest]") {
+TEST_CASE("Image: a non-worker binary (this test binary) is not run when the worker's digest is pinned", "[image][digest]") {
     TempDir d;
-    // Copy touch into a directory we own so the owner/mode checks pass; only
-    // the digest stands between it and execution.
-    const std::string touch = CopyOf("/usr/bin/touch", d.In("touch"), 0755);
+    // Copy this very test binary (a real ELF that is not the worker, so its
+    // SHA-256 differs) into a directory we own, mode 0755, owned by the current
+    // euid, so the owner/mode/symlink checks pass on every host; only the digest
+    // stands between it and execution. No host binary is involved.
+    const std::string other_program = CopyOf("/proc/self/exe", d.In("other_program"), 0755);
     uint8_t worker_digest[32];
     DigestOf(STACK_WORKER_PATH, worker_digest);
-    const std::string marker = d.In("marker");
     Limits l;
     l.wall_clock_deadline_ns = 2'000 * kMs;
     l.max_output_bytes = 16;
     uint8_t out[16];
     WorkerSpec spec;
-    spec.executable = touch.c_str();
+    spec.executable = other_program.c_str();
     spec.kind = 0;
-    spec.argument = marker.c_str();
     spec.expected_sha256 = worker_digest;
     const ExecutionReport r = SupervisedExecutor::RunWorker(l, spec, out, sizeof out);
     REQUIRE(r.outcome == Outcome::SpawnFailed);
     REQUIRE(r.error_number == EKEYREJECTED);
-    REQUIRE(r.child_pid == 0);
-    REQUIRE(::access(marker.c_str(), F_OK) != 0);
+    REQUIRE(r.child_pid == 0);  // nothing was spawned
 }
 
 #ifdef STACK_SUPERVISED_TESTING

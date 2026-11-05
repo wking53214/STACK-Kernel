@@ -140,7 +140,7 @@ fn the_executor_is_fail_closed_and_governed_before_spawn() {
         pinned.run_authorized(&common::authorization(), WorkerKind::ReturnBytes, &limits(), b"").expect("report").outcome,
         RunOutcome::Completed { .. }
     ));
-    // Any other image will do; the test binary itself is one that every host has.
+    // Another real program, not the worker: this test binary (no host binary).
     std::fs::copy(std::env::current_exe().unwrap(), &swapped).unwrap();
     std::fs::set_permissions(&swapped, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(matches!(

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -178,10 +179,24 @@ namespace {
 // namespace's next pid, which needs root), leads its own process group and
 // sleeps. This is a real pid reuse, not a simulation of one. Returns -1 if
 // the number could not be had.
+// On failure g_victim_failure says why, with the path, the call and the errno.
+std::string g_victim_failure;
+
+void RecordVictimFailure(const char* what, int err) {
+    char text[200];
+    std::snprintf(text, sizeof text, "ForkVictimWithPid: %s on /proc/sys/kernel/ns_last_pid failed: errno %d (%s), euid %d",
+                  what, err, std::strerror(err), static_cast<int>(::geteuid()));
+    g_victim_failure = text;
+}
+
 pid_t ForkVictimWithPid(pid_t want) {
+    g_victim_failure.clear();
     for (int attempt = 0; attempt < 50; ++attempt) {
         const int fd = ::open("/proc/sys/kernel/ns_last_pid", O_WRONLY | O_CLOEXEC);
-        if (fd < 0) return -1;
+        if (fd < 0) {
+            RecordVictimFailure("open", errno);
+            return -1;
+        }
         char text[16];
         const int n = std::snprintf(text, sizeof text, "%d", static_cast<int>(want) - 1);
         const bool wrote = ::write(fd, text, static_cast<std::size_t>(n)) == n;
@@ -201,11 +216,41 @@ pid_t ForkVictimWithPid(pid_t want) {
                 ::waitpid(pid, nullptr, 0);
             }
         } else {
+            RecordVictimFailure("write", errno);
             ::close(fd);
             return -1;
         }
     }
+    g_victim_failure = "ForkVictimWithPid: 50 attempts never produced the wanted pid (it was taken each time)";
     return -1;
+}
+
+// Fails the test loudly, with the reason, when this process cannot set the pid
+// namespace's next pid. The pid-reuse cases need to write
+// /proc/sys/kernel/ns_last_pid, which requires CAP_SYS_ADMIN (in practice:
+// root). They are never skipped; a CI job that runs them as an ordinary user
+// is misconfigured and must fail here, not pass vacuously or fail with a bare
+// "victim == -1". They are root-only and are not run in CI (ctest label "needs-root"); the blocking CI check of the same property is pid_reuse_interposed_tests.cpp.
+void RequirePidReuseCapability() {
+    const int fd = ::open("/proc/sys/kernel/ns_last_pid", O_RDWR | O_CLOEXEC);
+    const int open_errno = errno;
+    char text[16] = {0};
+    bool ok = false;
+    int err = open_errno;
+    if (fd >= 0) {
+        const ssize_t got = ::pread(fd, text, sizeof text - 1, 0);
+        // Write back the value just read: a no-op for the pid namespace that
+        // still proves the write permission.
+        ok = got > 0 && ::write(fd, text, static_cast<std::size_t>(got)) == got;
+        err = errno;
+        ::close(fd);
+    }
+    INFO("euid " << ::geteuid() << ", errno " << err << " (" << std::strerror(err) << ")");
+    if (!ok) {
+        FAIL("the pid-reuse cases must write /proc/sys/kernel/ns_last_pid, which needs CAP_SYS_ADMIN "
+             "(run as root, e.g. `sudo env PATH=$PATH ctest -L needs-root` from a build owned by root); this process cannot, "
+             "so the pid reuse cannot be simulated. This case is never skipped.");
+    }
 }
 
 bool StillRunningAndUnreaped(pid_t pid) {
@@ -241,12 +286,16 @@ bool ReapElsewhereThenReuse(pid_t pid, int) {
 }  // namespace
 
 TEST_CASE("Reap: a worker reaped elsewhere cannot make the supervisor kill or reap whoever now holds its pid", "[reap][pid-reuse]") {
+    RequirePidReuseCapability();
     g_reuse.fired = false;
     g_reuse.victim = -1;
     SupervisedExecutor::SetKillHookForTesting(&ReapElsewhereThenReuse);
     const ExecutionReport r = RunSpinner(QuickLimits(100, 300));
     SupervisedExecutor::SetKillHookForTesting(nullptr);
     const pid_t victim = g_reuse.victim;
+    INFO(g_victim_failure);
+    INFO("run outcome " << static_cast<int>(r.outcome) << " (8 is SpawnFailed: the kill hook, and so ForkVictimWithPid, never ran), error_number "
+                        << r.error_number << ", child_pid " << r.child_pid);
     REQUIRE(victim > 0);          // the simulation worked: the number was reused
     REQUIRE(victim == r.child_pid);
     const bool victim_ok = StillRunningAndUnreaped(victim);        // not killed, not reaped by the supervisor
@@ -262,15 +311,18 @@ TEST_CASE("Reap: a worker reaped elsewhere cannot make the supervisor kill or re
 }
 
 TEST_CASE("Reap: a tracked unconfirmed worker reaped elsewhere is forgotten, not signaled by number", "[reap][pid-reuse]") {
+    RequirePidReuseCapability();
     SupervisedExecutor::SetKillHookForTesting(&IneffectiveKill);
     const ExecutionReport stuck = RunSpinner(QuickLimits(50, 50));
     SupervisedExecutor::SetKillHookForTesting(nullptr);
+    INFO("run outcome " << static_cast<int>(stuck.outcome) << " (8 is SpawnFailed), error_number " << stuck.error_number);
     REQUIRE(stuck.outcome == Outcome::TerminationUnconfirmed);
     REQUIRE(SupervisedExecutor::UnconfirmedCount() == 1);
     // Reaped elsewhere, and its number now belongs to a stranger.
     ::kill(stuck.child_pid, SIGKILL);
     REQUIRE(::waitpid(stuck.child_pid, nullptr, 0) == stuck.child_pid);
     const pid_t victim = ForkVictimWithPid(stuck.child_pid);
+    INFO(g_victim_failure);
     REQUIRE(victim == stuck.child_pid);
 
     const std::size_t remaining = SupervisedExecutor::ReapUnconfirmed();

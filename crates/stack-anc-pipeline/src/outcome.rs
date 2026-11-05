@@ -15,12 +15,12 @@ pub enum GateOutcome {
 }
 
 impl GateOutcome {
-    /// The CNS spelling: `PASS`, `RETRY` or `TERMINAL_BREACH`.
+    /// The CNS spelling: `pass`, `retry` or `terminal_breach`.
     pub const fn as_str(self) -> &'static str {
         match self {
-            GateOutcome::Pass => "PASS",
-            GateOutcome::Retry => "RETRY",
-            GateOutcome::TerminalBreach => "TERMINAL_BREACH",
+            GateOutcome::Pass => "pass",
+            GateOutcome::Retry => "retry",
+            GateOutcome::TerminalBreach => "terminal_breach",
         }
     }
 
@@ -141,12 +141,12 @@ mod tests {
         ] {
             assert_eq!(t.gate_outcome(), GateOutcome::Retry);
             assert_eq!(t.resolution(), Resolution::Reject);
-            assert_eq!(t.gate_outcome().as_str(), "RETRY");
+            assert_eq!(t.gate_outcome().as_str(), "retry");
             assert!(t.to_string().starts_with("RETRY: "));
         }
         assert!(!Trip::Mismatch.is_admission());
         assert!(Trip::InputTooLarge.is_admission());
-        assert_eq!(Accepted.gate_outcome().as_str(), "PASS");
-        assert_eq!(GateOutcome::TerminalBreach.as_str(), "TERMINAL_BREACH");
+        assert_eq!(Accepted.gate_outcome().as_str(), "pass");
+        assert_eq!(GateOutcome::TerminalBreach.as_str(), "terminal_breach");
     }
 }

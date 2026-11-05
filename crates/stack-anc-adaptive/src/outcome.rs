@@ -17,12 +17,12 @@ pub enum GateOutcome {
 }
 
 impl GateOutcome {
-    /// The CNS spelling: `PASS`, `RETRY` or `TERMINAL_BREACH`.
+    /// The CNS spelling: `pass`, `retry` or `terminal_breach`.
     pub const fn as_str(self) -> &'static str {
         match self {
-            GateOutcome::Pass => "PASS",
-            GateOutcome::Retry => "RETRY",
-            GateOutcome::TerminalBreach => "TERMINAL_BREACH",
+            GateOutcome::Pass => "pass",
+            GateOutcome::Retry => "retry",
+            GateOutcome::TerminalBreach => "terminal_breach",
         }
     }
 

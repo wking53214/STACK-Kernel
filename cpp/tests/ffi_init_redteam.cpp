@@ -229,11 +229,13 @@ void ScenarioC() {
 // D: initialization racing capability updates and transaction entry.
 void ScenarioD() {
     std::printf("D. concurrent initialization, capability updates and transactions\n");
-    constexpr int kInit = 16, kCaps = 4, kExec = 4, kIters = 200;
+    constexpr int kInit = 16, kCaps = 4, kExec = 4, kIters = 200, kPost = 50;
     int init_rc[kInit];
     int caps_hist[kCaps][16] = {};
     int exec_hist[kExec][16] = {};
+    int post_hist[kExec][16] = {};
     int exec_seal[kExec];
+    std::atomic<int> setters_done{0};
     Barrier barrier;
     std::thread threads[kInit + kCaps + kExec];
     int n = 0;
@@ -248,6 +250,7 @@ void ScenarioD() {
                 const int r = stack_host_set_capabilities(0xFF, 0, 0, 0);
                 caps_hist[i][(-r) & 15]++;
             }
+            setters_done.fetch_add(1, std::memory_order_acq_rel);
         });
     }
     for (int i = 0; i < kExec; ++i) {
@@ -259,8 +262,16 @@ void ScenarioD() {
                 const int r = Txn(8 + static_cast<uint64_t>(i), 1);  // 200 of 900 tokens per domain
                 exec_hist[i][(-r) & 15]++;
             }
+            // Liveness is only promised once the change pressure stops, so
+            // wait for every setter to finish and then require completion.
+            // (How the contention phase interleaves is up to the scheduler:
+            // on a loaded runner the executors can finish all of their
+            // iterations before a setter has applied anything.)
+            while (setters_done.load(std::memory_order_acquire) < kCaps) std::this_thread::yield();
+            for (int k = 0; k < kPost; ++k) post_hist[i][(-Txn(8 + static_cast<uint64_t>(i), 1)) & 15]++;
         });
     }
+    const uint64_t payload_before = stack_host_payload_count();
     barrier.ReleaseWhen(n);
     for (int i = 0; i < n; ++i) threads[i].join();
 
@@ -295,7 +306,39 @@ void ScenarioD() {
         }
     }
     Check(exec_ok, "sealed executors returned only 0, -4 or -13");
-    Check(completed > 0, "at least one transaction completed");
+    // Not asserted: completed > 0 during the contention phase. A pending
+    // change refuses new transactions with -13 by design, and the executors
+    // may also run all of their iterations before any setter is scheduled
+    // (every one then sees the empty mask and gets -4). Neither is a defect.
+    // What the design guarantees is checked below, once the setters stop.
+    bool post_ok = true;
+    int post_completed = 0;
+    for (int i = 0; i < kExec; ++i) {
+        for (int c = 0; c < 16; ++c) {
+            if (post_hist[i][c] == 0) continue;
+            if (c == 0) post_completed += post_hist[i][c]; else post_ok = false;
+        }
+    }
+    Check(post_ok && post_completed == kExec * kPost,
+          "once the setters stop, every executor transaction completes");
+    Check(stack_host_payload_count() - payload_before == static_cast<uint64_t>(completed + post_completed),
+          "the payload ran exactly once per completed transaction and never for a refused one");
+    // Safety, deterministic: once a revocation is acknowledged (0, nothing in
+    // flight now) nothing runs with the revoked mask. Left as it was found.
+    int revoke_rc = 99, revoked_txn = 99, restore_rc = 99;
+    uint64_t runs_before_revoked = 0, runs_after_revoked = 0;
+    std::thread([&] {
+        (void)stack_host_initialize_and_seal();
+        revoke_rc = stack_host_set_capabilities(0, 0, 0, 0);
+        runs_before_revoked = stack_host_payload_count();
+        revoked_txn = Txn(8, 1);
+        runs_after_revoked = stack_host_payload_count();
+        restore_rc = stack_host_set_capabilities(0xFF, 0, 0, 0);
+    }).join();
+    Check(revoke_rc == 0, "a revocation with nothing in flight is acknowledged");
+    Check(revoked_txn == -4 && runs_after_revoked == runs_before_revoked,
+          "after the acknowledged revocation a transaction is refused (-4) and runs no payload");
+    Check(restore_rc == 0, "the mask is restored");
     Check(stack_ffi_testing_init_work_runs() == 1, "the one-time work still ran exactly once");
     Check(stack_ffi_testing_host_constructions() == 1, "the host is still one object");
 }

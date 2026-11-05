@@ -32,6 +32,7 @@
 #include <vector>
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -324,11 +325,37 @@ TEST_CASE("Governed supervised: the worker image digest is required, and an imag
     std::memcpy(wrong, g_worker_digest, 32);
     wrong[0] ^= 0x80;
     REQUIRE(Governed(domain, kCap, kRequest, 0, 2'000 * kMs, STACK_WORKER_PATH, 0, wrong).rc == kDigestMismatch);
-    // A real, owner-and-mode-clean program that is not the worker: it would create
-    // the file "0" in the working directory if it ran.
-    ::unlink("0");
-    REQUIRE(Governed(domain, kCap, kRequest, 0, 2'000 * kMs, "/usr/bin/touch").rc == kDigestMismatch);
-    REQUIRE(::access("0", F_OK) != 0);
+    // A real, regular, mode 0755, current-euid program that is not the worker: a
+    // copy of this test binary in a private directory. It passes the symlink,
+    // owner and mode checks on every host, so only the digest refuses it. (A host
+    // binary such as /usr/bin/touch is a symlink on some distributions, which is
+    // refused earlier, as unavailable; that case has its own test below.)
+    char fixture_dir[] = "/tmp/stack_ffi_other_XXXXXX";
+    REQUIRE(::mkdtemp(fixture_dir) != nullptr);
+    const std::string other = std::string(fixture_dir) + "/other_program";
+    // Copied in process: a child process (cp) would add to the SIGCHLD count below.
+    {
+        const int in = ::open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+        REQUIRE(in >= 0);
+        const int outfd = ::open(other.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0755);
+        REQUIRE(outfd >= 0);
+        char buf[65536];
+        ssize_t n;
+        while ((n = ::read(in, buf, sizeof buf)) > 0) {
+            REQUIRE(::write(outfd, buf, static_cast<std::size_t>(n)) == n);
+        }
+        REQUIRE(n == 0);
+        ::close(in);
+        ::close(outfd);
+    }
+    REQUIRE(::chmod(other.c_str(), 0755) == 0);
+    struct stat ost{};
+    REQUIRE(::lstat(other.c_str(), &ost) == 0);
+    REQUIRE(S_ISREG(ost.st_mode));
+    REQUIRE(ost.st_uid == ::geteuid());
+    REQUIRE(Governed(domain, kCap, kRequest, 0, 2'000 * kMs, other.c_str()).rc == kDigestMismatch);
+    (void)::unlink(other.c_str());
+    (void)::rmdir(fixture_dir);
     ::usleep(100'000);
     REQUIRE(g_sigchld.load() == before);  // nothing spawned
     // The digest is checked after governance, so the two mismatches took tokens
