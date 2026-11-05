@@ -99,8 +99,14 @@ pub struct SupervisedReportFfi {
     pub deadline_fired: u8,
     /// 1 when result bytes were delivered: the worker's own claim.
     pub result_self_reported: u8,
-    pub reserved: [u8; 2],
+    /// D1-C: how the supervisor saw the process end (see [`ExitObserved`]). Was `reserved[0]`.
+    pub exit_observed: u8,
+    /// D1-C: what the supervisor made of the result pipe (see [`FrameStatus`]). Was `reserved[1]`.
+    pub frame_status: u8,
 }
+
+// The report keeps the size it had before D1-C added two facts in its reserved bytes.
+const _: () = assert!(core::mem::size_of::<SupervisedReportFfi>() == 40);
 
 /// Process initialization only (I-02): constructs the host once, registers the
 /// deadline signal handler and creates this thread's deadline timer. Does not
@@ -304,6 +310,29 @@ pub enum SupervisedOutcome {
 }
 
 impl SupervisedOutcome {
+    /// The campaign vocabulary name of this outcome (D1-C). Additive: no existing
+    /// name changes; the table is in `cpp/CONTAINMENT.md`. `RUNNING` never appears
+    /// here (an in-memory state), and `INTERRUPTED` is what a later verifier infers
+    /// from an attempt with no terminal event, so no run reports it.
+    pub const fn campaign_name(self) -> &'static str {
+        match self {
+            SupervisedOutcome::Completed => "COMPLETED",
+            SupervisedOutcome::TimedOut => "TIMED_OUT",
+            SupervisedOutcome::Terminated => "TERMINATED",
+            SupervisedOutcome::TerminationUnconfirmed => "TERMINATION_UNCONFIRMED",
+            SupervisedOutcome::Crashed
+            | SupervisedOutcome::SeccompViolation
+            | SupervisedOutcome::ResourceLimit
+            | SupervisedOutcome::ExitedNonZero => "CRASHED",
+            SupervisedOutcome::ResultMissing | SupervisedOutcome::ResultOversized => "RESULT_INVALID",
+            SupervisedOutcome::SpawnFailed
+            | SupervisedOutcome::SupervisorError
+            | SupervisedOutcome::InvalidLimits
+            | SupervisedOutcome::SigchldIgnored
+            | SupervisedOutcome::Unrecognized(_) => "UNKNOWN",
+        }
+    }
+
     fn from_code(code: i32) -> Self {
         match code {
             0 => SupervisedOutcome::Completed,
@@ -321,6 +350,76 @@ impl SupervisedOutcome {
             12 => SupervisedOutcome::TerminationUnconfirmed,
             13 => SupervisedOutcome::Terminated,
             other => SupervisedOutcome::Unrecognized(other),
+        }
+    }
+}
+
+/// How the supervisor saw the worker process end (D1-C). Observed from the wait
+/// status and from the supervisor's own kill; nothing the worker writes can change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitObserved {
+    /// No child was forked, or its end was not observed (the wait failed).
+    None,
+    /// The worker called exit with this status.
+    Exited(i32),
+    /// The worker was ended by this signal and the supervisor did not send it.
+    Signaled(i32),
+    /// The supervisor sent SIGKILL (deadline, oversized result, cancel) and the worker ended by it.
+    KilledBySupervisor(i32),
+    /// SIGKILL was sent and the worker was not reaped in time; it may still be running.
+    Unreaped,
+    /// A code this crate does not know; carried rather than collapsed.
+    Unrecognized(u8),
+}
+
+impl ExitObserved {
+    fn from_raw(kind: u8, exit_code: i32, signal: i32) -> Self {
+        match kind {
+            0 => ExitObserved::None,
+            1 => ExitObserved::Exited(exit_code),
+            2 => ExitObserved::Signaled(signal),
+            3 => ExitObserved::KilledBySupervisor(signal),
+            4 => ExitObserved::Unreaped,
+            other => ExitObserved::Unrecognized(other),
+        }
+    }
+}
+
+/// What the supervisor made of the bytes on the result pipe (D1-C). Only the
+/// frame's well-formedness is judged; the result bytes are never interpreted.
+/// `Valid` says "one well-formed frame arrived", not that the run succeeded and
+/// not that the result is true: a valid frame can accompany a timeout or a crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameStatus {
+    /// The pipe was not evaluated (nothing spawned, wait failed, termination unconfirmed).
+    NotRead,
+    /// Exactly one complete, well-formed frame and nothing after it.
+    Valid,
+    /// No byte arrived.
+    Missing,
+    /// Bytes arrived but no complete frame with a good magic and checksum.
+    Malformed,
+    /// The header announced more than the result cap.
+    Oversized,
+    /// One good frame, then bytes that are not a second complete frame.
+    Trailing,
+    /// Two or more complete, well-formed frames.
+    Conflicting,
+    /// A code this crate does not know; carried rather than collapsed.
+    Unrecognized(u8),
+}
+
+impl FrameStatus {
+    fn from_raw(code: u8) -> Self {
+        match code {
+            0 => FrameStatus::NotRead,
+            1 => FrameStatus::Valid,
+            2 => FrameStatus::Missing,
+            3 => FrameStatus::Malformed,
+            4 => FrameStatus::Oversized,
+            5 => FrameStatus::Trailing,
+            6 => FrameStatus::Conflicting,
+            other => FrameStatus::Unrecognized(other),
         }
     }
 }
@@ -348,6 +447,28 @@ pub struct SupervisedReport {
     /// "a well-formed frame came from a process that exited 0 in time" may be
     /// inferred from them.
     pub result_self_reported: bool,
+    /// D1-C: how the supervisor saw the process end. Never derived from payload bytes.
+    pub exit_observed: ExitObserved,
+    /// D1-C: what the supervisor made of the result pipe. Well-formedness only.
+    pub frame_status: FrameStatus,
+}
+
+impl SupervisedReport {
+    fn from_ffi(r: &SupervisedReportFfi) -> Self {
+        SupervisedReport {
+            outcome: SupervisedOutcome::from_code(r.outcome),
+            elapsed_ns: r.elapsed_ns,
+            exit_code: r.exit_code,
+            signal_number: r.signal_number,
+            error_number: r.error_number,
+            child_pid: r.child_pid,
+            deadline_fired: r.deadline_fired != 0,
+            result_length: r.result_length,
+            result_self_reported: r.result_self_reported != 0,
+            exit_observed: ExitObserved::from_raw(r.exit_observed, r.exit_code, r.signal_number),
+            frame_status: FrameStatus::from_raw(r.frame_status),
+        }
+    }
 }
 
 /// Why `supervised_run` could not even produce a report.
@@ -426,17 +547,7 @@ pub unsafe fn supervised_run(
         )
     };
     match rc {
-        0 => Ok(SupervisedReport {
-            outcome: SupervisedOutcome::from_code(ffi_report.outcome),
-            elapsed_ns: ffi_report.elapsed_ns,
-            exit_code: ffi_report.exit_code,
-            signal_number: ffi_report.signal_number,
-            error_number: ffi_report.error_number,
-            child_pid: ffi_report.child_pid,
-            deadline_fired: ffi_report.deadline_fired != 0,
-            result_length: ffi_report.result_length,
-            result_self_reported: ffi_report.result_self_reported != 0,
-        }),
+        0 => Ok(SupervisedReport::from_ffi(&ffi_report)),
         -1 => Err(SupervisedCallError::NullArgument),
         -2 => Err(SupervisedCallError::UnknownPayloadKind),
         other => Err(SupervisedCallError::Unrecognized(other)),
@@ -558,17 +669,7 @@ pub fn supervised_run_governed(
         )
     };
     match rc {
-        0 => Ok(SupervisedReport {
-            outcome: SupervisedOutcome::from_code(ffi_report.outcome),
-            elapsed_ns: ffi_report.elapsed_ns,
-            exit_code: ffi_report.exit_code,
-            signal_number: ffi_report.signal_number,
-            error_number: ffi_report.error_number,
-            child_pid: ffi_report.child_pid,
-            deadline_fired: ffi_report.deadline_fired != 0,
-            result_length: ffi_report.result_length,
-            result_self_reported: ffi_report.result_self_reported != 0,
-        }),
+        0 => Ok(SupervisedReport::from_ffi(&ffi_report)),
         -1 => Err(GovernedSupervisedError::NotInitialized),
         -2 => Err(GovernedSupervisedError::UnknownPayloadKind),
         -3 => Err(GovernedSupervisedError::NullArgument),
@@ -1866,5 +1967,87 @@ mod tests {
             return;
         }
         run_in_child("tests::test_governed_supervised_repeated_timeouts_leave_no_zombie_and_no_descriptor", CHILD_ENV);
+    }
+
+    /// D1-C: the two supervisor-observed facts survive the C struct and the
+    /// Rust mapping, for a run that ends cleanly and for one the supervisor kills.
+    #[test]
+    fn test_d1c_exit_observed_and_frame_status_map_from_the_ffi_report() {
+        let mut raw = SupervisedReportFfi::default();
+        assert_eq!(SupervisedReport::from_ffi(&raw).exit_observed, ExitObserved::None);
+        assert_eq!(SupervisedReport::from_ffi(&raw).frame_status, FrameStatus::NotRead);
+        raw.exit_observed = 1;
+        raw.exit_code = 3;
+        raw.frame_status = 1;
+        let r = SupervisedReport::from_ffi(&raw);
+        assert_eq!((r.exit_observed, r.frame_status), (ExitObserved::Exited(3), FrameStatus::Valid));
+        raw.exit_observed = 2;
+        raw.signal_number = 11;
+        assert_eq!(SupervisedReport::from_ffi(&raw).exit_observed, ExitObserved::Signaled(11));
+        raw.exit_observed = 3;
+        raw.signal_number = 9;
+        raw.frame_status = 6;
+        let r = SupervisedReport::from_ffi(&raw);
+        assert_eq!((r.exit_observed, r.frame_status), (ExitObserved::KilledBySupervisor(9), FrameStatus::Conflicting));
+        raw.exit_observed = 4;
+        assert_eq!(SupervisedReport::from_ffi(&raw).exit_observed, ExitObserved::Unreaped);
+        raw.exit_observed = 200;
+        raw.frame_status = 201;
+        let r = SupervisedReport::from_ffi(&raw);
+        assert_eq!((r.exit_observed, r.frame_status), (ExitObserved::Unrecognized(200), FrameStatus::Unrecognized(201)));
+    }
+
+    #[test]
+    fn test_d1c_governed_runs_report_what_the_supervisor_observed() {
+        const CHILD_ENV: &str = "STACK_FFI_D1C_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let mut out = [0u8; 64];
+            let mut run = |kind, deadline| {
+                let mut req = governed_request(&path, 8, 0x01, kind);
+                req.required_tokens = 1;
+                supervised_run_governed(&req, &governed_limits(deadline), &mut out).expect("report")
+            };
+            let ok = run(PayloadKind::ReturnBytes, 2_000_000_000);
+            assert_eq!(ok.outcome, SupervisedOutcome::Completed);
+            assert_eq!((ok.exit_observed, ok.frame_status), (ExitObserved::Exited(0), FrameStatus::Valid));
+            let spin = run(PayloadKind::SpinForever, 150_000_000);
+            assert_eq!(spin.outcome, SupervisedOutcome::TimedOut);
+            assert_eq!((spin.exit_observed, spin.frame_status), (ExitObserved::KilledBySupervisor(9), FrameStatus::Missing));
+            let nz = run(PayloadKind::ExitNonZero, 2_000_000_000);
+            assert_eq!((nz.exit_observed, nz.frame_status), (ExitObserved::Exited(3), FrameStatus::Missing));
+            let crash = run(PayloadKind::Crash, 2_000_000_000);
+            assert_eq!(crash.exit_observed, ExitObserved::Signaled(11));
+            return;
+        }
+        run_in_child("tests::test_d1c_governed_runs_report_what_the_supervisor_observed", CHILD_ENV);
+    }
+
+    /// D1-C vocabulary: every existing outcome has exactly one campaign name, and
+    /// only `Completed` maps to COMPLETED.
+    #[test]
+    fn test_d1c_campaign_vocabulary_maps_each_outcome_once() {
+        let table = [
+            (0, "COMPLETED"),
+            (1, "TIMED_OUT"),
+            (2, "CRASHED"),
+            (3, "CRASHED"),
+            (4, "CRASHED"),
+            (5, "RESULT_INVALID"),
+            (6, "RESULT_INVALID"),
+            (7, "CRASHED"),
+            (8, "UNKNOWN"),
+            (9, "UNKNOWN"),
+            (10, "UNKNOWN"),
+            (11, "UNKNOWN"),
+            (12, "TERMINATION_UNCONFIRMED"),
+            (13, "TERMINATED"),
+            (99, "UNKNOWN"),
+        ];
+        for (code, name) in table {
+            assert_eq!(SupervisedOutcome::from_code(code).campaign_name(), name, "code {code}");
+        }
     }
 }

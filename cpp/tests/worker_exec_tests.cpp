@@ -600,3 +600,57 @@ TEST_CASE("Worker: bytes of a run that did not complete are not left in the call
         REQUIRE(r.out[c.written] == 0xAB);  // only what the parser had written is cleared
     }
 }
+
+// D1-C: two facts the supervisor observes itself are reported beside the outcome.
+// exit_observed is how the process ended as the supervisor saw it; frame_status is what the
+// supervisor made of the pipe (well-formedness only). Neither is read from payload content.
+TEST_CASE("Worker: exit_observed and frame_status are reported beside the outcome (D1-C)", "[worker][d1c]") {
+    SECTION("a clean worker: Exited(0), one valid frame") {
+        const Run r = Shipped(kReturnBytes);
+        REQUIRE(r.report.outcome == Outcome::Completed);
+        REQUIRE(r.report.exit_observed == ExitKind::Exited);
+        REQUIRE(r.report.exit_code == 0);
+        REQUIRE(r.report.frame_status == FrameStatus::Valid);
+    }
+    SECTION("a spin killed at the deadline: KilledBySupervisor(9), no frame") {
+        const Run r = Shipped(kSpin);
+        REQUIRE(r.report.outcome == Outcome::TimedOut);
+        REQUIRE(r.report.exit_observed == ExitKind::KilledBySupervisor);
+        REQUIRE(r.report.signal_number == SIGKILL);
+        REQUIRE(r.report.frame_status == FrameStatus::Missing);
+    }
+    SECTION("a crash is Signaled, not killed by the supervisor") {
+        const Run r = Shipped(kCrash);
+        REQUIRE(r.report.outcome == Outcome::Crashed);
+        REQUIRE(r.report.exit_observed == ExitKind::Signaled);
+        REQUIRE(r.report.signal_number == SIGSEGV);
+    }
+    SECTION("a worker that kills itself with SIGKILL is Signaled: the supervisor did not send it") {
+        const Run r = Hostile(kSelfSigkill);
+        REQUIRE(r.report.outcome == Outcome::Crashed);
+        REQUIRE(r.report.exit_observed == ExitKind::Signaled);
+        REQUIRE(r.report.signal_number == SIGKILL);
+    }
+    SECTION("a non-zero exit is Exited(3)") {
+        const Run r = Shipped(kExitNonZero);
+        REQUIRE(r.report.exit_observed == ExitKind::Exited);
+        REQUIRE(r.report.exit_code == 3);
+        REQUIRE(r.report.frame_status == FrameStatus::Missing);
+    }
+    SECTION("each frame defect has its own status") {
+        REQUIRE(Hostile(kExitZeroNoFrame).report.frame_status == FrameStatus::Missing);
+        REQUIRE(Hostile(kMalformedFrame).report.frame_status == FrameStatus::Malformed);
+        REQUIRE(Hostile(kTruncatedFrame).report.frame_status == FrameStatus::Malformed);
+        REQUIRE(Hostile(kOversizedFrame).report.frame_status == FrameStatus::Oversized);
+        REQUIRE(Hostile(kTrailingBytes).report.frame_status == FrameStatus::Conflicting);
+    }
+    SECTION("nothing spawned: nothing observed") {
+        Limits l = DefaultLimits();
+        l.wall_clock_deadline_ns = 0;
+        const Run r = Shipped(kReturnBytes, l);
+        REQUIRE(r.report.outcome == Outcome::InvalidLimits);
+        REQUIRE(r.report.exit_observed == ExitKind::None);
+        REQUIRE(r.report.frame_status == FrameStatus::NotRead);
+    }
+    REQUIRE(NoChildrenLeft());
+}
