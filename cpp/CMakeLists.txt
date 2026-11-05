@@ -64,6 +64,19 @@ target_link_libraries(stack_supervised_fallback_tests PRIVATE stack_containment 
 add_test(NAME STACKSupervisedFallback COMMAND stack_supervised_fallback_tests)
 set_tests_properties(STACKSupervisedFallback PROPERTIES TIMEOUT 120)
 
+# The pid-reuse property without root (kill, waitpid, waitid and pidfd_send_signal
+# are interposed by the program itself and every call after a "reaped
+# elsewhere" is recorded). Needs the kill-hook seam; no label, runs everywhere.
+add_executable(stack_pid_reuse_interposed_tests tests/pid_reuse_interposed_tests.cpp)
+target_compile_definitions(stack_pid_reuse_interposed_tests PRIVATE
+    STACK_SUPERVISED_TESTING=1
+    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>")
+target_link_libraries(stack_pid_reuse_interposed_tests PRIVATE stack_containment atomic ${CMAKE_DL_LIBS})
+add_dependencies(stack_pid_reuse_interposed_tests stack_worker)
+add_test(NAME STACKPidReuseInterposedRunning COMMAND stack_pid_reuse_interposed_tests running)
+add_test(NAME STACKPidReuseInterposedTracked COMMAND stack_pid_reuse_interposed_tests tracked)
+set_tests_properties(STACKPidReuseInterposedRunning STACKPidReuseInterposedTracked PROPERTIES TIMEOUT 120)
+
 # The shipped FFI host (crates/stack-ffi/src/ffi_wrapper.cpp) through its C
 # entry points: the same object, parameters and calibration a Rust caller gets.
 set(STACK_FFI_WRAPPER ${CMAKE_CURRENT_SOURCE_DIR}/../crates/stack-ffi/src/ffi_wrapper.cpp)
@@ -105,9 +118,9 @@ set_tests_properties(STACKWorkerExec PROPERTIES TIMEOUT 300)
 add_test(NAME STACKWorkerImage COMMAND stack_worker_image_tests)
 set_tests_properties(STACKWorkerImage PROPERTIES TIMEOUT 300)
 # The two pid-reuse cases write /proc/sys/kernel/ns_last_pid and so need
-# CAP_SYS_ADMIN. They are a separate ctest entry with the label "needs-root" so
-# CI can run everything else as an ordinary user (ctest -LE needs-root) and
-# these under sudo (ctest -L needs-root). Never skipped: as an ordinary user
+# CAP_SYS_ADMIN. They are a separate ctest entry with the label "needs-root",
+# root-only and not run in CI (CI runs ctest -LE needs-root; the property is
+# checked there by STACKPidReuseInterposed*). Never skipped: as an ordinary user
 # they fail with an explanatory message.
 add_test(NAME STACKWorkerReap COMMAND stack_worker_reap_tests "~[pid-reuse]")
 set_tests_properties(STACKWorkerReap PROPERTIES TIMEOUT 300)
