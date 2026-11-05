@@ -1,3 +1,4 @@
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -255,6 +256,13 @@ int stack_host_initialize_and_seal() {
 // is running or will run with the old one. -2 means it was not applied, no
 // change is left pending and the host serves under the old mask again; the
 // caller retries or escalates. Do not call it from a payload.
+//
+// R2-K-24: governed supervised workers in flight are TERMINATED by a pending
+// change, not waited for: each is sent SIGKILL through its pidfd and its run
+// ends with outcome Terminated (13), audited as SupervisedTerminated (9), with
+// its tokens spent. The change then applies as soon as they are reaped (a few
+// milliseconds), instead of after their deadline. In-process transactions
+// cannot be stopped and are still waited for, up to kCapabilityDrainNs.
 int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t m3) {
     const int state = g_init_state.load(std::memory_order_acquire);
     if (state == kInitFailed) return -3;
@@ -273,7 +281,7 @@ int stack_host_set_capabilities(uint64_t m0, uint64_t m1, uint64_t m2, uint64_t 
 //   -3  execution failed for a reason not listed below: seccomp, signal
 //       handler or timer_create setup failed (unchanged meaning, narrower)
 //   -4  capability validation failed
-//   -5  rate limit exceeded
+//   -5  rate limit exceeded (also: required_tokens == 0, R2-K-20)
 //   -6  hard (CPU-time) deadline fired: PreemptionTriggered
 //   -7  software deadline (tick budget) exceeded
 //   -8  compute debt ceiling exceeded
@@ -475,21 +483,37 @@ int stack_supervised_run(
 //
 // Return codes. Nothing is spawned and nothing is consumed unless 0:
 //    0  governance passed. The run's outcome is in report->outcome (any
-//       Outcome, including TimedOut and TerminationUnconfirmed). Tokens are
-//       spent when child_pid != 0 and refunded when nothing was spawned.
+//       Outcome, including TimedOut, TerminationUnconfirmed and Terminated).
+//       Tokens are spent when child_pid != 0 and refunded when nothing was
+//       spawned. Terminated (13): a capability change that was waiting killed
+//       the worker (R2-K-24); never a success.
 //   -1  host not initialized
 //   -2  unknown payload kind (above 6)
 //   -3  a null pointer argument, or out null with a non-zero capacity
 //   -4  capability validation failed, including a request that names no
 //       capability bit at all (required_capability_m0 == 0)
-//   -5  rate limited (also: more than 100 tokens, domain id 16 or more)
+//   -5  rate limited (also: more than 100 tokens, 0 tokens (R2-K-20: a
+//       governed request consumes at least one), domain id 16 or more)
 //   -9  wall_clock_deadline_ns was 0
 //  -12  initialization failed (latched)
 //  -13  a capability change is pending; retry
-//  -14  worker_path is unusable (null, relative, missing, not a regular
-//       executable file, world-writable, or owned by someone else)
+//  -14  worker_path is unusable (null, relative, missing, a symlink anywhere
+//       in the path, not a regular executable file, setuid, setgid,
+//       group-writable, world-writable, or owned by someone else)
 //  -15  the other limits are invalid (deadline above one hour, output above
 //       the buffer or 1 MiB, reap_timeout_ns above one minute)
+//  -16  worker_sha256 is null: the digest of the worker image is REQUIRED
+//       (R2-K-21); nothing is spawned and nothing consumed
+//  -17  the image at worker_path does not hash to worker_sha256 (R2-K-21).
+//       Checked after governance: tokens taken for the call are refunded and
+//       one SupervisedFailed event with 0 tokens is written
+//
+// worker_sha256 points to 32 bytes, the SHA-256 the configuration pins for
+// the worker image. The image is read through the descriptor that is then
+// executed, hashed, and a sealed in-memory copy of the hashed bytes is what
+// runs, so a swap of the file after the check changes nothing (see
+// cpp/include/stack_supervised_exec.hpp). stack_supervised_image_sha256
+// computes the digest of a file for provisioning and for tests.
 // reap_timeout_ns 0 means the default, 2 s. On a non-zero return the report is
 // zeroed. Do not call from a sealed thread: the seal forbids open, fork and
 // exec, so the worker image cannot be opened and the call is -14 with nothing
@@ -501,6 +525,7 @@ int stack_supervised_run_governed(
     uint32_t required_tokens,
     uint32_t payload_kind,
     const char* worker_path,
+    const uint8_t* worker_sha256,
     const stack_supervised_limits* limits,
     uint64_t reap_timeout_ns,
     uint8_t* out,
@@ -526,11 +551,17 @@ int stack_supervised_run_governed(
     l.inherit_fd = -1;
     if (reap_timeout_ns != 0) l.reap_timeout_ns = reap_timeout_ns;
     if (!supervised::SupervisedExecutor::LimitsAreValid(l, out, out_capacity)) return -15;
+    if (worker_sha256 == nullptr) return -16;  // fail closed: the image must be pinned
+    // Cheap policy checks here, before governance. The digest itself is checked
+    // by RunWorker on the descriptor it executes, after governance: hashing the
+    // image costs milliseconds, and a refused request must not make the host
+    // pay that.
     if (supervised::SupervisedExecutor::CheckWorkerImage(worker_path) != 0) return -14;
 
     supervised::WorkerSpec spec;
     spec.executable = worker_path;
     spec.kind = payload_kind;
+    spec.expected_sha256 = worker_sha256;
 
     // A request that names no capability would pass any mask: refuse it.
     if (required_capability_m0 == 0) return -4;
@@ -540,12 +571,13 @@ int stack_supervised_run_governed(
     supervised::ExecutionReport r{};
     auto governed = g_host->ExecuteGovernedSupervised(
         token, required_tokens, limits->wall_clock_deadline_ns,
-        [&]() -> FfiHost::SupervisedRunResult {
-            r = supervised::SupervisedExecutor::RunWorker(l, spec, out, out_capacity);
+        [&](supervised::CancelHandle& cancel) -> FfiHost::SupervisedRunResult {
+            r = supervised::SupervisedExecutor::RunWorker(l, spec, out, out_capacity, &cancel);
             if (r.child_pid == 0) return FfiHost::SupervisedRunResult::NotSpawned;
             switch (r.outcome) {
                 case supervised::Outcome::Completed: return FfiHost::SupervisedRunResult::Completed;
                 case supervised::Outcome::TimedOut: return FfiHost::SupervisedRunResult::TimedOut;
+                case supervised::Outcome::Terminated: return FfiHost::SupervisedRunResult::Terminated;
                 case supervised::Outcome::TerminationUnconfirmed:
                     return FfiHost::SupervisedRunResult::TerminationUnconfirmed;
                 default: return FfiHost::SupervisedRunResult::Failed;
@@ -560,7 +592,27 @@ int stack_supervised_run_governed(
             default: return -3;
         }
     }
+    // The image did not hash to the pinned digest: nothing was spawned, the
+    // tokens were refunded and one SupervisedFailed event with 0 tokens records it.
+    if (r.outcome == supervised::Outcome::SpawnFailed && r.child_pid == 0 && r.error_number == EKEYREJECTED) {
+        std::memset(report, 0, sizeof *report);
+        return -17;
+    }
     FillReport(report, r);
+    return 0;
+}
+
+// Computes the SHA-256 of the file at `path` into out[32], for provisioning
+// and for tests (R2-K-21). It applies no trust policy: it hashes any readable
+// regular file. A production deployment pins a digest from its release record,
+// not one computed from the file it is about to trust. Returns 0, or an errno
+// (a positive number) when the file cannot be read; -3 for a null argument.
+int stack_supervised_image_sha256(const char* path, uint8_t* out) {
+    if (path == nullptr || out == nullptr) return -3;
+    uint8_t digest[32];
+    const int err = supervised::SupervisedExecutor::Sha256OfFile(path, digest);
+    if (err != 0) return err;
+    std::memcpy(out, digest, sizeof digest);
     return 0;
 }
 

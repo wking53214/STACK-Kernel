@@ -80,6 +80,21 @@ target_compile_definitions(ffi_supervised_tests PRIVATE
 target_link_libraries(ffi_supervised_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic pthread)
 add_dependencies(ffi_supervised_tests stack_worker)
 
+# Worker image trust (R2-K-21): symlink, mode, NO_NEW_PRIVS and digest pin.
+# probe_nnp is a test-only image that installs no filter and reports whether
+# NO_NEW_PRIVS was already set. STACK_SUPERVISED_TESTING enables the swap seam.
+add_executable(probe_nnp tests/probe_nnp.cpp)
+target_link_libraries(probe_nnp PRIVATE stack_containment)
+target_link_options(probe_nnp PRIVATE -static)
+add_executable(stack_worker_image_tests tests/worker_image_tests.cpp)
+target_compile_definitions(stack_worker_image_tests PRIVATE
+    STACK_SUPERVISED_TESTING=1
+    STACK_WORKER_PATH="$<TARGET_FILE:stack_worker>"
+    STACK_WORKER_TEST_PATH="$<TARGET_FILE:stack_worker_test>"
+    STACK_PROBE_NNP_PATH="$<TARGET_FILE:probe_nnp>")
+target_link_libraries(stack_worker_image_tests PRIVATE Catch2::Catch2WithMain stack_containment atomic)
+add_dependencies(stack_worker_image_tests stack_worker stack_worker_test probe_nnp)
+
 enable_testing()
 add_test(NAME STACKTests COMMAND stack_tests)
 add_test(NAME STACKProductionHardened COMMAND stack_production_hardened)
@@ -87,6 +102,8 @@ add_test(NAME STACKSupervisedExec COMMAND stack_supervised_exec_tests)
 set_tests_properties(STACKSupervisedExec PROPERTIES TIMEOUT 300)
 add_test(NAME STACKWorkerExec COMMAND stack_worker_exec_tests)
 set_tests_properties(STACKWorkerExec PROPERTIES TIMEOUT 300)
+add_test(NAME STACKWorkerImage COMMAND stack_worker_image_tests)
+set_tests_properties(STACKWorkerImage PROPERTIES TIMEOUT 300)
 add_test(NAME STACKWorkerReap COMMAND stack_worker_reap_tests)
 set_tests_properties(STACKWorkerReap PROPERTIES TIMEOUT 300)
 add_test(NAME STACKFfiSupervised COMMAND ffi_supervised_tests)

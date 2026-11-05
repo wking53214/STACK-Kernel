@@ -48,12 +48,14 @@ extern "C" {
         required_tokens: u32,
         payload_kind: u32,
         worker_path: *const core::ffi::c_char,
+        worker_sha256: *const u8,
         limits: *const SupervisedLimitsFfi,
         reap_timeout_ns: u64,
         out: *mut u8,
         out_capacity: usize,
         report: *mut SupervisedReportFfi,
     ) -> i32;
+    pub fn stack_supervised_image_sha256(path: *const core::ffi::c_char, out: *mut u8) -> i32;
     pub fn stack_supervised_unconfirmed_count() -> u64;
     pub fn stack_supervised_reap_unconfirmed() -> u64;
 }
@@ -146,7 +148,13 @@ pub fn host_initialize_and_seal() -> Result<(), HostError> {
 /// for the ones in flight to drain, so it applies under steady load. If they
 /// do not drain in time it returns `TransactionInFlight`: the mask was NOT
 /// applied, nothing is left pending, and the caller retries or escalates. Do
-/// not call it from inside a payload. It needs a completed
+/// not call it from inside a payload.
+///
+/// Governed supervised workers in flight are TERMINATED, not waited for
+/// (R2-K-24): each is killed through its pidfd and its run ends as
+/// [`SupervisedOutcome::Terminated`], so a revocation applies within about a
+/// millisecond of the workers being reaped rather than after their deadline.
+/// In-process transactions can only be waited for. It needs a completed
 /// initialization: `NotInitialized` before (or during) it, and
 /// `InitializationFailed` for good once it has failed.
 pub fn host_set_capabilities(m0: u64, m1: u64, m2: u64, m3: u64) -> Result<(), CapabilityError> {
@@ -285,6 +293,12 @@ pub enum SupervisedOutcome {
     /// still be running. Never a success. `supervised_unconfirmed_count`
     /// says how many such workers are tracked.
     TerminationUnconfirmed,
+    /// The worker was killed because a pending capability change (a
+    /// revocation) asked for it (R2-K-24). Never a success; its tokens were
+    /// spent. A run that had not been forked yet reports this with
+    /// `child_pid` 0 only through the C++ API; the governed call refuses such
+    /// a run with `CapabilityChangePending` instead.
+    Terminated,
     /// A code this crate does not know; carried rather than collapsed.
     Unrecognized(i32),
 }
@@ -305,6 +319,7 @@ impl SupervisedOutcome {
             10 => SupervisedOutcome::InvalidLimits,
             11 => SupervisedOutcome::SigchldIgnored,
             12 => SupervisedOutcome::TerminationUnconfirmed,
+            13 => SupervisedOutcome::Terminated,
             other => SupervisedOutcome::Unrecognized(other),
         }
     }
@@ -358,7 +373,35 @@ pub enum SupervisedCallError {
 /// Forking a multithreaded process copies only the calling thread; a child
 /// that deadlocks on a lock another thread held is killed at the deadline
 /// and reported `TimedOut`, never `Completed`.
-pub fn supervised_run(
+///
+/// This is an `unsafe fn` (R2-K-22) so that safe code cannot reach the
+/// ungoverned path by accident. The C symbol `stack_supervised_run` keeps its
+/// name and signature for ABI compatibility; nothing in this repository calls
+/// it except this crate's own tests.
+///
+/// # Safety
+///
+/// The caller takes responsibility for everything the governed entry would
+/// have checked: it is NOT checked against the capability mask or the rate
+/// limit, it writes no audit event, and the payload runs in a fork of this
+/// process with a copy of its memory. Call it only for a trusted, built-in
+/// payload, from a process that can tolerate `fork`, and never for a payload
+/// that came from outside. Use [`supervised_run_governed`] otherwise.
+///
+/// ```compile_fail,E0133
+/// // R2-K-22: the ungoverned run is not callable from safe code.
+/// let limits = stack_ffi::SupervisedLimits {
+///     wall_clock_deadline_ns: 1_000_000_000,
+///     cpu_seconds: 0,
+///     address_space_bytes: 1 << 30,
+///     max_output_bytes: 64,
+///     file_size_bytes: 0,
+///     nofile: 0,
+/// };
+/// let mut out = [0u8; 64];
+/// let _ = stack_ffi::supervised_run(stack_ffi::PayloadKind::ReturnBytes, &limits, &mut out);
+/// ```
+pub unsafe fn supervised_run(
     kind: PayloadKind,
     limits: &SupervisedLimits,
     out: &mut [u8],
@@ -413,8 +456,14 @@ pub struct GovernedSupervisedRequest<'a> {
     pub required_tokens: u32,
     /// Which built-in worker kind to run.
     pub kind: PayloadKind,
-    /// ABSOLUTE path of the worker program, from kernel configuration.
+    /// ABSOLUTE path of the worker program, from kernel configuration. No
+    /// symlink may be in the path (where the kernel has `openat2`).
     pub worker_path: &'a core::ffi::CStr,
+    /// The SHA-256 the configuration pins for the worker image (R2-K-21).
+    /// REQUIRED: `None` is refused ([`GovernedSupervisedError::WorkerDigestRequired`])
+    /// and nothing is spawned. Take it from a release record; see
+    /// [`worker_image_sha256`] for provisioning and tests.
+    pub worker_sha256: Option<[u8; 32]>,
     /// Bound on the wait for a killed worker to be reaped; 0 means 2 s.
     pub reap_timeout_ns: u64,
 }
@@ -439,14 +488,31 @@ pub enum GovernedSupervisedError {
     InvalidDeadline,
     /// A capability change is pending; retry.
     CapabilityChangePending,
-    /// The worker path is null, relative, missing, not a regular executable
-    /// file, world-writable, or owned by someone else.
+    /// The worker path is null, relative, missing, a symlink (anywhere in the
+    /// path), not a regular executable file, setuid, setgid, group-writable,
+    /// world-writable, or owned by someone else.
     WorkerUnavailable,
     /// The other limits are invalid (deadline above an hour, output above the
     /// buffer or 1 MiB, reap bound above a minute).
     InvalidLimits,
+    /// No worker image digest was supplied. The governed path fails closed.
+    WorkerDigestRequired,
+    /// The image at the worker path does not hash to the pinned digest.
+    WorkerDigestMismatch,
     /// A code this crate does not know.
     Unrecognized(i32),
+}
+
+/// SHA-256 of the file at `path`, for provisioning a configuration and for
+/// tests. It applies no trust policy: it hashes any readable regular file. A
+/// production deployment pins a digest from its release record, not one
+/// computed from the file it is about to trust. `None` if the file cannot be
+/// read.
+pub fn worker_image_sha256(path: &core::ffi::CStr) -> Option<[u8; 32]> {
+    let mut out = [0u8; 32];
+    // SAFETY: `path` is NUL terminated and `out` is 32 writable bytes.
+    let rc = unsafe { stack_supervised_image_sha256(path.as_ptr(), out.as_mut_ptr()) };
+    (rc == 0).then_some(out)
 }
 
 /// Runs a built-in worker kind in a separate worker PROGRAM (fork then exec;
@@ -483,6 +549,7 @@ pub fn supervised_run_governed(
             request.required_tokens,
             request.kind.code(),
             request.worker_path.as_ptr(),
+            request.worker_sha256.as_ref().map_or(core::ptr::null(), |d| d.as_ptr()),
             &ffi_limits,
             request.reap_timeout_ns,
             out.as_mut_ptr(),
@@ -512,6 +579,8 @@ pub fn supervised_run_governed(
         -13 => Err(GovernedSupervisedError::CapabilityChangePending),
         -14 => Err(GovernedSupervisedError::WorkerUnavailable),
         -15 => Err(GovernedSupervisedError::InvalidLimits),
+        -16 => Err(GovernedSupervisedError::WorkerDigestRequired),
+        -17 => Err(GovernedSupervisedError::WorkerDigestMismatch),
         other => Err(GovernedSupervisedError::Unrecognized(other)),
     }
 }
@@ -583,6 +652,9 @@ pub enum HostAuditEvent {
     SupervisedFailed,
     /// A supervised worker was killed and not confirmed reaped in time.
     SupervisedTerminationUnconfirmed,
+    /// A supervised worker was killed because a pending capability revocation
+    /// asked for it (R2-K-24); its tokens were spent.
+    SupervisedTerminated,
     /// A value this crate does not know; carried rather than collapsed.
     Unrecognized(u8),
 }
@@ -599,6 +671,7 @@ impl HostAuditEvent {
             6 => HostAuditEvent::SupervisedTimedOut,
             7 => HostAuditEvent::SupervisedFailed,
             8 => HostAuditEvent::SupervisedTerminationUnconfirmed,
+            9 => HostAuditEvent::SupervisedTerminated,
             other => HostAuditEvent::Unrecognized(other),
         }
     }
@@ -1112,8 +1185,9 @@ mod tests {
 
     /// I-04 (R2-K-07): a revocation applies under sustained load from eight
     /// sealed executor threads, within a bound, and no transaction that begins
-    /// after it returned runs its payload. Executors ask for zero tokens so the
-    /// load is not ended by the rate limit.
+    /// after it returned runs its payload. Executors ask for one token each (zero
+    /// became a rate limit refusal in R2-K-20); a domain's first 900 requests
+    /// are served at once.
     #[test]
     fn test_revocation_applies_under_sustained_load_through_the_ffi() {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1139,7 +1213,7 @@ mod tests {
                     sealed.fetch_add(1, Ordering::SeqCst);
                     while !stop.load(Ordering::Relaxed) {
                         let after = revoked.load(Ordering::Acquire);
-                        let r = txn(domain, 0x01, 0);
+                        let r = txn(domain, 0x01, 1);
                         if after {
                             started_after.fetch_add(1, Ordering::Relaxed);
                             match r {
@@ -1291,6 +1365,18 @@ mod tests {
             file_size_bytes: 0,
             nofile: 0,
         }
+    }
+
+    /// The legacy run is an `unsafe fn` (R2-K-22). These tests exercise the
+    /// C++ fork path itself with built-in payloads, so they call it through
+    /// this local wrapper, which shadows the glob import.
+    fn supervised_run(
+        kind: PayloadKind,
+        limits: &SupervisedLimits,
+        out: &mut [u8],
+    ) -> Result<SupervisedReport, SupervisedCallError> {
+        // SAFETY: built-in payloads only, in a test process.
+        unsafe { super::supervised_run(kind, limits, out) }
     }
 
     /// The supervised runs fork this test process; the harness is
@@ -1446,6 +1532,11 @@ mod tests {
         std::ffi::CString::new(WORKER_BUILD_PATH).expect("worker path has no NUL")
     }
 
+    /// The digest the configuration pins for the build's worker (R2-K-21).
+    fn worker_digest() -> [u8; 32] {
+        worker_image_sha256(&worker_path()).expect("hash the worker build")
+    }
+
     fn governed_request<'a>(
         path: &'a std::ffi::CStr,
         domain: u64,
@@ -1458,8 +1549,60 @@ mod tests {
             required_tokens: LARGEST_REQUEST,
             kind,
             worker_path: path,
+            worker_sha256: Some(worker_digest()),
             reap_timeout_ns: 0,
         }
+    }
+
+    /// R2-K-21: the governed call requires the digest of the worker image and
+    /// refuses a program that is not the pinned one; nothing is spawned.
+    #[test]
+    fn test_governed_supervised_requires_the_worker_digest_and_refuses_another_program() {
+        const CHILD_ENV: &str = "STACK_FFI_GOVERNED_DIGEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("capabilities");
+            let lim = governed_limits(1_000_000_000);
+            let mut out = [0u8; 64];
+            let mut req = governed_request(&path, 4, 0x01, PayloadKind::ReturnBytes);
+            // Unset: fail closed.
+            req.worker_sha256 = None;
+            assert_eq!(
+                supervised_run_governed(&req, &lim, &mut out).unwrap_err(),
+                GovernedSupervisedError::WorkerDigestRequired
+            );
+            // Wrong digest, and another program under the right digest.
+            let mut wrong = worker_digest();
+            wrong[0] ^= 0x80;
+            req.worker_sha256 = Some(wrong);
+            assert_eq!(
+                supervised_run_governed(&req, &lim, &mut out).unwrap_err(),
+                GovernedSupervisedError::WorkerDigestMismatch
+            );
+            let touch = std::ffi::CString::new("/usr/bin/touch").expect("no NUL");
+            let other = governed_request(&touch, 4, 0x01, PayloadKind::ReturnBytes);
+            assert_eq!(
+                supervised_run_governed(&other, &lim, &mut out).unwrap_err(),
+                GovernedSupervisedError::WorkerDigestMismatch
+            );
+            // The pinned image runs, and the tokens were not kept by the refusals.
+            let (ok, ms) = served_runs(&path, 4);
+            assert!(ok >= 9 && ok <= 9 + (ms / 100) as u32 + 1, "served {ok} in {ms} ms");
+            return;
+        }
+        run_in_child("tests::test_governed_supervised_requires_the_worker_digest_and_refuses_another_program", CHILD_ENV);
+    }
+
+    #[test]
+    fn test_worker_image_sha256_matches_sha256sum_and_fails_for_a_missing_file() {
+        let digest = worker_digest();
+        let hex: std::string::String = digest.iter().map(|b| std::format!("{b:02x}")).collect();
+        let out = std::process::Command::new("sha256sum").arg(WORKER_BUILD_PATH).output().expect("sha256sum");
+        let text = std::string::String::from_utf8(out.stdout).expect("utf8");
+        assert_eq!(&text[..64], hex);
+        let missing = std::ffi::CString::new("/nonexistent/stack_worker").expect("no NUL");
+        assert_eq!(worker_image_sha256(&missing), None);
     }
 
     fn governed_limits(deadline_ns: u64) -> SupervisedLimits {
@@ -1509,12 +1652,56 @@ mod tests {
         assert_eq!(SupervisedOutcome::from_code(0), SupervisedOutcome::Completed);
         assert_eq!(SupervisedOutcome::from_code(11), SupervisedOutcome::SigchldIgnored);
         assert_eq!(SupervisedOutcome::from_code(12), SupervisedOutcome::TerminationUnconfirmed);
-        assert_eq!(SupervisedOutcome::from_code(13), SupervisedOutcome::Unrecognized(13));
+        assert_eq!(SupervisedOutcome::from_code(13), SupervisedOutcome::Terminated);
         assert_eq!(HostAuditEvent::from_code(5), HostAuditEvent::SupervisedCompleted);
         assert_eq!(HostAuditEvent::from_code(6), HostAuditEvent::SupervisedTimedOut);
         assert_eq!(HostAuditEvent::from_code(7), HostAuditEvent::SupervisedFailed);
         assert_eq!(HostAuditEvent::from_code(8), HostAuditEvent::SupervisedTerminationUnconfirmed);
-        assert_eq!(HostAuditEvent::from_code(9), HostAuditEvent::Unrecognized(9));
+        assert_eq!(HostAuditEvent::from_code(9), HostAuditEvent::SupervisedTerminated);
+    }
+
+    /// R2-K-24: a pending revocation terminates the governed supervised
+    /// workers in flight. Before, `host_set_capabilities` waited 500 ms and
+    /// returned `Busy` while a 3 s worker ran to its deadline.
+    #[test]
+    fn test_revocation_terminates_in_flight_supervised_workers() {
+        const CHILD_ENV: &str = "STACK_FFI_REVOKE_SUPERVISED_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let path = worker_path();
+            host_initialize().expect("initialize");
+            host_set_capabilities(0x01, 0, 0, 0).expect("grant");
+            let runner = std::thread::spawn(move || {
+                let path = worker_path();
+                let mut out = [0u8; 64];
+                let mut req = governed_request(&path, 6, 0x01, PayloadKind::SpinForever);
+                req.required_tokens = 1;
+                supervised_run_governed(&req, &governed_limits(3_000_000_000), &mut out)
+            });
+            std::thread::sleep(std::time::Duration::from_millis(200)); // the worker is in flight
+            let t0 = std::time::Instant::now();
+            let applied = host_set_capabilities(0x04, 0, 0, 0);
+            let took = t0.elapsed();
+            assert_eq!(applied, Ok(()), "the revocation applied");
+            assert!(took < std::time::Duration::from_secs(1), "applied after {took:?}");
+            let report = runner.join().expect("runner").expect("report");
+            assert_eq!(report.outcome, SupervisedOutcome::Terminated);
+            assert!(!report.result_self_reported);
+            assert!(!report.deadline_fired);
+            assert_eq!(report.signal_number, 9);
+            assert_eq!(audit_count(6, HostAuditEvent::SupervisedTerminated), 1);
+            assert_eq!(audit_count(6, HostAuditEvent::SupervisedCompleted), 0);
+            assert_eq!(audit_count(6, HostAuditEvent::SupervisedTimedOut), 0);
+            // A later run with the revoked capability is refused.
+            let mut out = [0u8; 64];
+            assert_eq!(
+                supervised_run_governed(&governed_request(&path, 6, 0x01, PayloadKind::ReturnBytes), &governed_limits(1_000_000_000), &mut out)
+                    .unwrap_err(),
+                GovernedSupervisedError::CapabilityDenied
+            );
+            assert_eq!(supervised_unconfirmed_count(), 0);
+            return;
+        }
+        run_in_child("tests::test_revocation_terminates_in_flight_supervised_workers", CHILD_ENV);
     }
 
     #[test]

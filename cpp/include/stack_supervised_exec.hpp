@@ -73,6 +73,15 @@
  *     2 s by default). If the child is not reaped in time the run is
  *     TerminationUnconfirmed: not a success, the pid and pidfd stay tracked
  *     (UnconfirmedCount, ReapUnconfirmed) and the child may still be running.
+ *   - The worker image is trusted before it runs (R2-K-21): a symlink in the path is
+ *     refused (openat2 RESOLVE_NO_SYMLINKS; O_NOFOLLOW only where openat2 is missing), so are
+ *     setuid, setgid, group-writable and world-writable images and owners other than root or
+ *     the effective user, the child sets PR_SET_NO_NEW_PRIVS before the exec, and
+ *     WorkerSpec::expected_sha256 pins the image: the bytes read through the opened
+ *     descriptor are hashed and a sealed memfd copy of those bytes is what executes.
+ *   - With a pidfd the child is signaled and reaped only through it (pidfd_send_signal,
+ *     waitid(P_PIDFD)), never by a pid number another process may have reused; the
+ *     tracking slot for an unconfirmed child is reserved before the fork (R2-K-23).
  *   - Otherwise the child is reaped and both parent-side descriptors are
  *     closed, on every path. There is no heap allocation in the parent; the
  *     result goes into the caller's buffer.
@@ -139,6 +148,8 @@
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 
+#include "stack_run_cancel.hpp"
+
 namespace stack::supervised {
 
 enum class Outcome : uint8_t {
@@ -156,7 +167,11 @@ enum class Outcome : uint8_t {
     SigchldIgnored = 11,  // SIGCHLD is ignored in this process; refused before anything was spawned
     // The child was sent SIGKILL and was NOT reaped within Limits::reap_timeout_ns. It may still be
     // running. Never a success; the pid stays tracked (UnconfirmedCount / ReapUnconfirmed).
-    TerminationUnconfirmed = 12
+    TerminationUnconfirmed = 12,
+    // The worker was killed because the caller's CancelHandle was triggered (a pending capability
+    // revocation, R2-K-24). Never a success. A worker the handle was triggered for before it
+    // was forked is not spawned and reports this with child_pid 0.
+    Terminated = 13
 };
 
 /** Upper bound on a deadline: one hour. Larger values are InvalidLimits. */
@@ -181,6 +196,8 @@ inline constexpr uint64_t kMaxReapTimeoutNs = 60'000'000'000ULL;
 inline constexpr std::size_t kMaxUnconfirmedChildren = 64;
 /** Longest worker path accepted (bytes, without the terminator). */
 inline constexpr std::size_t kMaxWorkerPathBytes = 4095;
+/** Largest worker image the supervisor will hash and copy (pinned mode): 64 MiB. */
+inline constexpr std::size_t kMaxWorkerImageBytes = 64u << 20;
 
 struct Limits {
     /** Required, 1 .. kMaxWallClockDeadlineNs. */
@@ -247,6 +264,16 @@ struct WorkerSpec {
     uint32_t kind = 0;
     /** Optional argv[2]; used by test workers only. Null for none. */
     const char* argument = nullptr;
+    /**
+     * Optional (R2-K-21): the expected SHA-256 of the worker image, 32 bytes. When set the
+     * supervisor reads the image through the descriptor it opened, hashes what it read, refuses
+     * (SpawnFailed, error_number EKEYREJECTED, nothing forked) on a mismatch, and executes a
+     * sealed in-memory copy of exactly the bytes it hashed, so nothing that happens to the
+     * file after the check changes what runs. When null the opened descriptor itself is
+     * executed (not pinned: a write into the same file between the open and the exec would be
+     * executed). The governed FFI path requires the digest.
+     */
+    const uint8_t* expected_sha256 = nullptr;
 };
 
 /** Payload entry used by the child: writes up to capacity bytes to out and returns the count. */
@@ -293,8 +320,12 @@ public:
         }
         const uint64_t t0 = MonotonicNs();
         const uint64_t deadline = t0 + limits.wall_clock_deadline_ns;
-        if (ReapUnconfirmed() >= kMaxUnconfirmedChildren) {
-            // Too many children whose death was never confirmed: spawn no more.
+        // A tracking slot is reserved BEFORE anything is forked (R2-K-23): a worker is
+        // never spawned that could not be tracked if its death went unconfirmed. A full
+        // table is a refusal, not a silent drop.
+        (void)ReapUnconfirmed();
+        SlotGuard slot{ReserveSlot()};
+        if (slot.index < 0) {
             report.outcome = Outcome::SupervisorError;
             report.error_number = EBUSY;
             return report;
@@ -333,7 +364,7 @@ public:
         // Parent.
         report.child_pid = pid;
         pipe_w.Close();
-        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity);
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity, slot);
         return report;
     }
 
@@ -349,9 +380,15 @@ public:
      *
      * Completed means: the worker exited 0 before the deadline AND sent a
      * well-formed frame. The frame bytes are the worker's own claim.
+     *
+     * `cancel` (R2-K-24), when given, lets another thread terminate the worker: its pidfd is
+     * published in the handle after the fork, and a Request() kills the worker with SIGKILL
+     * through it. The run is then Terminated, never a success. A worker that exits 0 with a
+     * good frame before the kill takes effect is still Completed: it finished first.
      */
     [[nodiscard]] static ExecutionReport RunWorker(const Limits& limits, const WorkerSpec& spec, uint8_t* result,
-                                                   std::size_t result_capacity) noexcept {
+                                                   std::size_t result_capacity,
+                                                   CancelHandle* cancel = nullptr) noexcept {
         ExecutionReport report{};
         if (!LimitsAreValid(limits, result, result_capacity) || limits.inherit_fd != -1) {
             report.outcome = Outcome::InvalidLimits;
@@ -361,10 +398,17 @@ public:
             report.outcome = Outcome::SigchldIgnored;
             return report;
         }
+        if (cancel != nullptr && cancel->Requested()) {
+            // Asked to stop before there is anything to stop: spawn nothing (R2-K-24).
+            report.outcome = Outcome::Terminated;
+            return report;
+        }
         const uint64_t t0 = MonotonicNs();
         const uint64_t deadline = t0 + limits.wall_clock_deadline_ns;
-        if (ReapUnconfirmed() >= kMaxUnconfirmedChildren) {
-            // Too many children whose death was never confirmed: spawn no more.
+        // Reserve the tracking slot before the fork (see RunThunk).
+        (void)ReapUnconfirmed();
+        SlotGuard slot{ReserveSlot()};
+        if (slot.index < 0) {
             report.outcome = Outcome::SupervisorError;
             report.error_number = EBUSY;
             return report;
@@ -374,7 +418,7 @@ public:
         // child executes this descriptor, not the path.
         FdGuard image{-1};
         {
-            const int err = OpenWorkerImage(spec.executable, image.fd);
+            const int err = OpenWorkerImage(spec.executable, spec.expected_sha256, image.fd);
             if (err != 0) {
                 report.outcome = Outcome::SpawnFailed;
                 report.error_number = err;
@@ -382,6 +426,9 @@ public:
                 return report;
             }
         }
+#ifdef STACK_SUPERVISED_TESTING
+        if (image_checked_hook_ != nullptr) image_checked_hook_(spec.executable);
+#endif
         // argv and envp are built here, on the stack: the child allocates nothing.
         char kind_text[16];
         FormatDecimal(spec.kind, kind_text);
@@ -420,20 +467,43 @@ public:
         report.child_pid = pid;
         pipe_w.Close();
         image.Close();
-        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity);
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity, slot, cancel);
         return report;
     }
 
     /**
-     * Checks a worker path the way RunWorker does before it forks (absolute,
-     * opens, regular, executable, not world-writable, owned by root or the
-     * effective user) and closes it again. Returns 0 or an errno. For a caller
-     * that wants to refuse a request before it spends anything on it.
+     * Checks a worker path the way RunWorker does before it forks (absolute, no symlink in
+     * the path where openat2 is available, opens, regular, executable, not setuid, setgid,
+     * group-writable or world-writable, owned by root or the effective user and, when
+     * `expected_sha256` is given, hashing to it) and closes it again. Returns 0 or an errno
+     * (EKEYREJECTED for a digest mismatch). For a caller that wants to refuse a request before
+     * it spends anything on it.
      */
-    [[nodiscard]] static int CheckWorkerImage(const char* path) noexcept {
+    [[nodiscard]] static int CheckWorkerImage(const char* path, const uint8_t* expected_sha256 = nullptr) noexcept {
         int fd = -1;
-        const int err = OpenWorkerImage(path, fd);
+        const int err = OpenWorkerImage(path, expected_sha256, fd);
         if (err == 0) ::close(fd);
+        return err;
+    }
+
+    /** SHA-256 of `n` bytes at `data` (n may be 0). No allocation. */
+    static void Sha256(const uint8_t* data, std::size_t n, uint8_t (&out)[32]) noexcept {
+        Sha256State st;
+        st.Update(data, n);
+        st.Final(out);
+    }
+
+    /**
+     * SHA-256 of the file at `path`, read through one descriptor (no policy check: it hashes any
+     * regular file). Returns 0 or an errno. For provisioning and for tests, to obtain the digest
+     * a configuration pins; a production deployment takes the digest from its release record,
+     * not from the file it is about to trust.
+     */
+    [[nodiscard]] static int Sha256OfFile(const char* path, uint8_t (&out)[32]) noexcept {
+        const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return errno;
+        const int err = HashDescriptor(fd, out, -1);
+        ::close(fd);
         return err;
     }
 
@@ -467,16 +537,25 @@ public:
 private:
     struct FdGuard;
     struct FrameParser;
+    struct SlotGuard;
 
     // The parent half of a run, shared by the fork-of-caller path and the
     // worker path: watch the child until it exits or the deadline passes,
     // kill it, reap it, and classify what was seen. pipe_r is the read end of
     // the result pipe (the write end is already closed here).
     static void Supervise(ExecutionReport& report, const Limits& limits, pid_t pid, FdGuard& pipe_r, uint64_t t0,
-                          uint64_t deadline, uint8_t* result, std::size_t result_capacity) noexcept {
+                          uint64_t deadline, uint8_t* result, std::size_t result_capacity, SlotGuard& slot,
+                          CancelHandle* cancel = nullptr) noexcept {
         (void)::setpgid(pid, pid);  // the child does the same; whichever runs first wins
         (void)::fcntl(pipe_r.fd, F_SETFL, O_NONBLOCK);
         FdGuard pidfd{PidfdOpen(pid)};
+        // Publish the pidfd for a cancel request, and withdraw it before the descriptor can be
+        // closed or handed to the unconfirmed table (declared after pidfd, so it runs first).
+        struct Armed {
+            CancelHandle* handle;
+            ~Armed() noexcept { if (handle != nullptr) handle->Disarm(); }
+        } armed{cancel};
+        if (cancel != nullptr && pidfd.fd >= 0) cancel->Arm(pidfd.fd);
 
         FrameParser parser{result, result_capacity, static_cast<std::size_t>(limits.max_output_bytes)};
         int status = 0;
@@ -534,6 +613,10 @@ private:
                 }
             }
             if (poll_failed) break;
+            if (!exited && pidfd.fd < 0 && cancel != nullptr && cancel->Requested()) {
+                // No pidfd (kernel older than 5.3): the polling loop honors the request by number.
+                KillChild(pid, -1);
+            }
             if (!exited && pidfd.fd < 0) {
                 const pid_t w = ::waitpid(pid, &status, WNOHANG);
                 if (w == pid) {
@@ -566,7 +649,7 @@ private:
                 // SIGKILL did not take effect in time. The child may still be
                 // running: say so, keep tracking it, report no success.
                 KillChild(pid, pidfd.fd);
-                TrackUnconfirmed(pid, pidfd);
+                TrackUnconfirmed(slot, pid, pidfd);
                 report.outcome = Outcome::TerminationUnconfirmed;
                 report.error_number = ETIMEDOUT;
                 report.elapsed_ns = MonotonicNs() - t0;
@@ -585,7 +668,7 @@ private:
         if (!pipe_eof) DrainPipeAfterExit(pipe_r.fd, parser, pipe_eof);
 
         report.elapsed_ns = MonotonicNs() - t0;
-        Classify(report, status, parser, poll_failed, poll_errno);
+        Classify(report, status, parser, poll_failed, poll_errno, cancel != nullptr && cancel->Requested());
         // Bytes the caller's buffer received from a run that did not complete are
         // not a result; do not leave them there to be mistaken for one.
         if (report.outcome != Outcome::Completed) ScrubResult(result, parser);
@@ -599,16 +682,46 @@ private:
     // Bounded reap and the children that could not be confirmed dead.
     // ------------------------------------------------------------------
 
-    // Waits for pid to be reaped, at most bound_ns, re-sending SIGKILL every
+    // waitid(P_PIDFD) is called by number so no glibc newer than the kernel's is needed.
+    static constexpr long kPidfdIdType = 3;  // P_PIDFD
+
+    // Reaps the child if it has ended, without blocking. With a pidfd the wait is on THAT
+    // process and no other (R2-K-23): a pid number that was reaped elsewhere and reused can
+    // never be reaped here. Returns 1 reaped (status set), 0 still running, -1 error with
+    // errno set (ECHILD: it is gone, reaped by someone else; its status is unknown). Without a
+    // pidfd (kernel older than 5.3) it falls back to waitpid on the number, which is only
+    // correct while nothing else reaps children of this process.
+    [[nodiscard]] static int TryReap(pid_t pid, int pidfd, int& status) noexcept {
+#ifdef __NR_waitid
+        if (pidfd >= 0) {
+            siginfo_t info{};
+            const long r = ::syscall(__NR_waitid, kPidfdIdType, pidfd, &info, WEXITED | WNOHANG, nullptr);
+            if (r < 0) return errno == EINTR ? 0 : -1;
+            if (info.si_pid == 0) return 0;
+            const int code = info.si_status;
+            if (info.si_code == CLD_EXITED) status = (code & 0xff) << 8;
+            else if (info.si_code == CLD_KILLED) status = code & 0x7f;
+            else if (info.si_code == CLD_DUMPED) status = (code & 0x7f) | 0x80;
+            else return 0;
+            return 1;
+        }
+#endif
+        const pid_t w = ::waitpid(pid, &status, WNOHANG);
+        if (w == pid) return 1;
+        if (w < 0 && errno != EINTR) return -1;
+        return 0;
+    }
+
+    // Waits for the child to be reaped, at most bound_ns, re-sending SIGKILL every
     // 100 ms while it waits (when `resend`). Returns 1 reaped (status set),
-    // 0 not reaped in time, -1 waitpid failed (errno set).
+    // 0 not reaped in time, -1 the wait failed (errno set; ECHILD means it was reaped
+    // elsewhere).
     [[nodiscard]] static int ReapBounded(pid_t pid, int pidfd, uint64_t bound_ns, int& status, bool resend) noexcept {
         const uint64_t end = MonotonicNs() + bound_ns;
         uint64_t next_kill = MonotonicNs() + 100'000'000ULL;
         for (;;) {
-            const pid_t w = ::waitpid(pid, &status, WNOHANG);
-            if (w == pid) return 1;
-            if (w < 0 && errno != EINTR) return -1;
+            const int w = TryReap(pid, pidfd, status);
+            if (w != 0) return w;
             const uint64_t now = MonotonicNs();
             if (now >= end) return 0;
             if (resend && now >= next_kill) {
@@ -627,23 +740,46 @@ private:
         }
     }
 
-    // Slot states in unconfirmed_pid_: 0 free, > 0 a tracked pid, kSlotBusy being edited.
+    // Slot states in unconfirmed_pid_: 0 free, > 0 a tracked pid (a worker whose death was not
+    // confirmed), kSlotBusy being edited, kSlotReserved held by a run in progress (R2-K-23).
     static constexpr pid_t kSlotBusy = -2;
+    static constexpr pid_t kSlotReserved = -3;
     static inline std::atomic<pid_t> unconfirmed_pid_[kMaxUnconfirmedChildren]{};
     static inline int unconfirmed_fd_[kMaxUnconfirmedChildren]{};
 
-    // Takes over the pidfd (the guard no longer closes it). If every slot is
-    // taken the pid is untracked (callers refuse new runs before that happens).
-    static void TrackUnconfirmed(pid_t pid, FdGuard& pidfd) noexcept {
+    // Reserves a free slot for a run about to fork. Returns its index, or -1 when every slot is
+    // taken (tracked or reserved): the run is refused, it does not spawn untracked.
+    [[nodiscard]] static int ReserveSlot() noexcept {
         for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
             pid_t expected = 0;
-            if (unconfirmed_pid_[i].compare_exchange_strong(expected, kSlotBusy, std::memory_order_acq_rel)) {
-                unconfirmed_fd_[i] = pidfd.fd;
-                pidfd.fd = -1;
-                unconfirmed_pid_[i].store(pid, std::memory_order_release);
-                return;
+            if (unconfirmed_pid_[i].compare_exchange_strong(expected, kSlotReserved, std::memory_order_acq_rel)) {
+                unconfirmed_fd_[i] = -1;
+                return static_cast<int>(i);
             }
         }
+        return -1;
+    }
+
+    // Holds a reservation for the life of a run; gives it back unless the run handed it to a
+    // tracked pid.
+    struct SlotGuard {
+        int index;
+        explicit SlotGuard(int i) noexcept : index(i) {}
+        SlotGuard(const SlotGuard&) = delete;
+        SlotGuard& operator=(const SlotGuard&) = delete;
+        ~SlotGuard() noexcept {
+            if (index >= 0) unconfirmed_pid_[static_cast<std::size_t>(index)].store(0, std::memory_order_release);
+        }
+    };
+
+    // Moves the reserved slot to the tracked pid and takes over the pidfd (the guard no longer
+    // closes it). Cannot fail: the slot was reserved before the fork.
+    static void TrackUnconfirmed(SlotGuard& slot, pid_t pid, FdGuard& pidfd) noexcept {
+        const std::size_t i = static_cast<std::size_t>(slot.index);
+        unconfirmed_fd_[i] = pidfd.fd;
+        pidfd.fd = -1;
+        unconfirmed_pid_[i].store(pid, std::memory_order_release);
+        slot.index = -1;
     }
 
 public:
@@ -651,7 +787,7 @@ public:
     [[nodiscard]] static std::size_t UnconfirmedCount() noexcept {
         std::size_t n = 0;
         for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
-            if (unconfirmed_pid_[i].load(std::memory_order_acquire) != 0) ++n;
+            if (unconfirmed_pid_[i].load(std::memory_order_acquire) > 0) ++n;
         }
         return n;
     }
@@ -660,6 +796,11 @@ public:
      * Re-sends SIGKILL to each tracked child that is still there and reaps the
      * ones that have gone. Returns how many remain unconfirmed. Called at the
      * start of every run; a monitor may call it too.
+     *
+     * A tracked child is reached only through its pidfd (R2-K-23): a child that was reaped
+     * elsewhere (ECHILD, or ESRCH on the signal) is forgotten and its number is never signaled
+     * or waited on, so a pid that has been reused cannot be hit. A tracked child with no pidfd
+     * (kernel older than 5.3) is reaped by number but never re-signaled.
      */
     static std::size_t ReapUnconfirmed() noexcept {
         for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
@@ -667,13 +808,14 @@ public:
             if (p <= 0) continue;
             if (!unconfirmed_pid_[i].compare_exchange_strong(p, kSlotBusy, std::memory_order_acq_rel)) continue;
             int status = 0;
-            const pid_t w = ::waitpid(p, &status, WNOHANG);
-            if (w == p || (w < 0 && errno == ECHILD)) {
-                if (unconfirmed_fd_[i] >= 0) ::close(unconfirmed_fd_[i]);
+            const int fd = unconfirmed_fd_[i];
+            const int rc = TryReap(p, fd, status);
+            if (rc == 1 || (rc < 0 && errno == ECHILD)) {
+                if (fd >= 0) ::close(fd);
                 unconfirmed_fd_[i] = -1;
                 unconfirmed_pid_[i].store(0, std::memory_order_release);
             } else {
-                KillChild(p, unconfirmed_fd_[i]);
+                if (fd >= 0) KillChild(p, fd);
                 unconfirmed_pid_[i].store(p, std::memory_order_release);
             }
         }
@@ -689,6 +831,14 @@ public:
      */
     using KillHook = bool (*)(pid_t pid, int pidfd);
     static void SetKillHookForTesting(KillHook hook) noexcept { kill_hook_ = hook; }
+
+    /**
+     * Test seam (same define): a function RunWorker calls after the worker image was opened and
+     * verified and before the fork, to let a test change the file at the path (R2-K-21). Pass
+     * nullptr to remove it.
+     */
+    using ImageCheckedHook = void (*)(const char* path);
+    static void SetImageCheckedHookForTesting(ImageCheckedHook hook) noexcept { image_checked_hook_ = hook; }
 #endif
 
 private:
@@ -813,20 +963,49 @@ private:
 #endif
     }
 
-    // Only called while the child is not yet reaped, so its pid (and its
-    // process group, which the child leads) cannot have been reused. With a
-    // pidfd the child itself is signaled through the descriptor, which names
-    // that process and no other.
+    // Sends SIGKILL to the child (R2-K-23).
+    //
+    // With a pidfd the signal goes ONLY through the descriptor, which names that process and
+    // no other: if the process is gone (reaped elsewhere) the kernel answers ESRCH and nothing
+    // is signaled. The child's process group is signaled by number only while the child is
+    // checked alive and unreaped (waitid on the pidfd with WNOHANG|WNOWAIT answers "no state
+    // change"); a child that has exited, or was reaped, gets no group signal, because a pid
+    // number is reusable once reaped. The check and the group signal are two calls: the
+    // window between them is the time another thread would need to reap the child AND have
+    // its number reused, and the filter denies the worker any descendant, so the group signal
+    // is defense in depth, not the kill.
+    //
+    // Without a pidfd (kernel older than 5.3) the child is signaled by number, as before: the
+    // caller has not reaped it and nothing else is assumed to.
 #ifdef STACK_SUPERVISED_TESTING
     static inline KillHook kill_hook_ = nullptr;
+#endif
+#ifdef STACK_SUPERVISED_TESTING
+    static inline ImageCheckedHook image_checked_hook_ = nullptr;
 #endif
     static void KillChild(pid_t pid, int pidfd) noexcept {
 #ifdef STACK_SUPERVISED_TESTING
         if (kill_hook_ != nullptr && kill_hook_(pid, pidfd)) return;
 #endif
+        if (pidfd >= 0) {
+            if (ChildIsAliveAndUnreaped(pidfd)) (void)::kill(-pid, SIGKILL);
+            (void)PidfdSendKill(pidfd);  // ESRCH: already gone
+            return;
+        }
         (void)::kill(-pid, SIGKILL);
-        if (pidfd >= 0 && PidfdSendKill(pidfd)) return;
         (void)::kill(pid, SIGKILL);
+    }
+
+    // True when the process behind pidfd exists, has not exited and has not been reaped.
+    [[nodiscard]] static bool ChildIsAliveAndUnreaped(int pidfd) noexcept {
+#ifdef __NR_waitid
+        siginfo_t info{};
+        const long r = ::syscall(__NR_waitid, kPidfdIdType, pidfd, &info, WEXITED | WNOHANG | WNOWAIT, nullptr);
+        return r == 0 && info.si_pid == 0;
+#else
+        (void)pidfd;
+        return false;
+#endif
     }
 
     [[nodiscard]] static bool PidfdSendKill(int pidfd) noexcept {
@@ -879,11 +1058,16 @@ private:
     }
 
     static void Classify(ExecutionReport& report, int status, const FrameParser& parser,
-                         bool poll_failed, int poll_errno) noexcept {
+                         bool poll_failed, int poll_errno, bool cancel_requested) noexcept {
         if (WIFSIGNALED(status)) report.signal_number = WTERMSIG(status);
         if (WIFEXITED(status)) report.exit_code = WEXITSTATUS(status);
 
         if (report.deadline_fired) { report.outcome = Outcome::TimedOut; return; }
+        // Killed while a cancel was requested: the supervisor's own SIGKILL (R2-K-24).
+        if (cancel_requested && !poll_failed && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL) {
+            report.outcome = Outcome::Terminated;
+            return;
+        }
         if (poll_failed) {
             report.outcome = Outcome::SupervisorError;
             report.error_number = poll_errno;
@@ -964,20 +1148,33 @@ private:
     // Worker path.
     // ------------------------------------------------------------------
 
-    // Opens the worker image and checks the OPEN file, not the path: a
-    // regular file, executable, not world-writable, owned by root or by this
-    // process's effective user. Returns 0 or an errno. The descriptor is
-    // close-on-exec, which is also why a script (shebang) worker cannot be
-    // executed: the interpreter would not find the descriptor. Workers are
-    // ELF programs.
-    [[nodiscard]] static int OpenWorkerImage(const char* path, int& fd_out) noexcept {
+    // Opens the worker image and checks the OPEN file, not the path. Returns 0 or an errno.
+    //
+    // Open: openat2 with RESOLVE_NO_SYMLINKS refuses a symlink in ANY component of the path
+    // (ELOOP); where openat2 is unavailable (ENOSYS, or a filter that answers EPERM) the open
+    // falls back to O_NOFOLLOW, which refuses only a symlink as the FINAL component. A
+    // deployment names a canonical path.
+    //
+    // Checks on the open file: a regular file, an exec bit, none of setuid, setgid,
+    // group-writable, world-writable, owned by root or by this process's effective user.
+    //
+    // Digest (expected_sha256 non-null): the file is read through this descriptor, hashed as it
+    // is read and copied into a sealed memfd (no writes, no resize, sealed). A mismatch is
+    // EKEYREJECTED. On success fd_out is the SEALED COPY, so the bytes that run are the bytes
+    // that were hashed whatever happens to the file afterwards. A kernel without memfd_create,
+    // or one that forbids executing memfds, fails closed here. Without a digest fd_out is the
+    // opened file itself.
+    //
+    // The descriptor is close-on-exec, which is also why a script (shebang) worker cannot be
+    // executed: the interpreter would not find the descriptor. Workers are ELF programs.
+    [[nodiscard]] static int OpenWorkerImage(const char* path, const uint8_t* expected_sha256, int& fd_out) noexcept {
         fd_out = -1;
         if (path == nullptr || path[0] != '/') return EINVAL;
         std::size_t n = 0;
         while (path[n] != '\0') {
             if (++n > kMaxWorkerPathBytes) return ENAMETOOLONG;
         }
-        const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+        int fd = OpenNoSymlinks(path);
         if (fd < 0) return errno;
         struct stat st{};
         if (::fstat(fd, &st) != 0) {
@@ -988,15 +1185,186 @@ private:
         int err = 0;
         if (!S_ISREG(st.st_mode)) err = EACCES;
         else if ((st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0) err = EACCES;
-        else if ((st.st_mode & S_IWOTH) != 0) err = EACCES;
+        else if ((st.st_mode & (S_ISUID | S_ISGID | S_IWGRP | S_IWOTH)) != 0) err = EACCES;
         else if (st.st_uid != 0 && st.st_uid != ::geteuid()) err = EACCES;
         if (err != 0) {
             ::close(fd);
             return err;
         }
+        if (expected_sha256 != nullptr) {
+            int copy = -1;
+            uint8_t actual[32];
+            err = HashDescriptor(fd, actual, kSealedCopy, &copy);
+            ::close(fd);
+            if (err == 0 && !Equal32(actual, expected_sha256)) err = EKEYREJECTED;
+            if (err != 0) {
+                if (copy >= 0) ::close(copy);
+                return err;
+            }
+            fd = copy;
+        }
         fd_out = fd;
         return 0;
     }
+
+    static constexpr int kSealedCopy = -2;  // HashDescriptor: also copy into a sealed memfd
+
+    [[nodiscard]] static bool Equal32(const uint8_t* a, const uint8_t* b) noexcept {
+        uint8_t diff = 0;
+        for (int i = 0; i < 32; ++i) diff = static_cast<uint8_t>(diff | (a[i] ^ b[i]));
+        return diff == 0;
+    }
+
+    // openat2 how struct, spelled here so no header newer than the kernel's is needed.
+    struct OpenHow {
+        uint64_t flags;
+        uint64_t mode;
+        uint64_t resolve;
+    };
+    static constexpr uint64_t kResolveNoMagicLinks = 0x02;
+    static constexpr uint64_t kResolveNoSymlinks = 0x04;
+
+    [[nodiscard]] static int OpenNoSymlinks(const char* path) noexcept {
+#ifdef __NR_openat2
+        OpenHow how{};
+        how.flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW;
+        how.resolve = kResolveNoMagicLinks | kResolveNoSymlinks;
+        const long r = ::syscall(__NR_openat2, AT_FDCWD, path, &how, sizeof how);
+        if (r >= 0) return static_cast<int>(r);
+        if (errno != ENOSYS && errno != EPERM) return -1;
+#endif
+        return ::open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    }
+
+    // Reads fd to its end with pread (the file offset is not used), hashing as it goes. With
+    // `copy_mode == kSealedCopy` the bytes are also written to a new memfd, which is sealed and
+    // returned in *copy_out. Returns 0 or an errno; on an error *copy_out is closed and -1.
+    [[nodiscard]] static int HashDescriptor(int fd, uint8_t (&digest)[32], int copy_mode, int* copy_out = nullptr) noexcept {
+        int copy = -1;
+        if (copy_mode == kSealedCopy) {
+            copy = CreateExecMemfd();
+            if (copy < 0) return errno != 0 ? errno : ENOSYS;
+        }
+        Sha256State st;
+        uint8_t buf[65536];
+        std::size_t total = 0;
+        int err = 0;
+        for (;;) {
+            const ssize_t r = ::pread(fd, buf, sizeof buf, static_cast<off_t>(total));
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                err = errno;
+                break;
+            }
+            if (r == 0) break;
+            const std::size_t got = static_cast<std::size_t>(r);
+            if (total + got > kMaxWorkerImageBytes) { err = EFBIG; break; }
+            st.Update(buf, got);
+            if (copy >= 0 && !WriteAll(copy, buf, got)) { err = errno != 0 ? errno : EIO; break; }
+            total += got;
+        }
+        if (err == 0 && copy >= 0) {
+#if defined(F_ADD_SEALS)
+            if (::fcntl(copy, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE) != 0) err = errno;
+#else
+            err = ENOSYS;
+#endif
+        }
+        if (err != 0) {
+            if (copy >= 0) ::close(copy);
+            if (copy_out != nullptr) *copy_out = -1;
+            return err;
+        }
+        st.Final(digest);
+        if (copy_out != nullptr) *copy_out = copy;
+        return 0;
+    }
+
+    [[nodiscard]] static int CreateExecMemfd() noexcept {
+#if defined(__NR_memfd_create)
+        constexpr unsigned kCloexec = 0x0001U, kAllowSealing = 0x0002U, kExec = 0x0010U;
+        long r = ::syscall(__NR_memfd_create, "stack-worker-image", kCloexec | kAllowSealing | kExec);
+        if (r < 0 && errno == EINVAL) r = ::syscall(__NR_memfd_create, "stack-worker-image", kCloexec | kAllowSealing);
+        return r < 0 ? -1 : static_cast<int>(r);
+#else
+        errno = ENOSYS;
+        return -1;
+#endif
+    }
+
+    // SHA-256 (FIPS 180-4). No allocation; the whole state is on the stack.
+    struct Sha256State {
+        uint32_t h[8] = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+        uint8_t block[64]{};
+        std::size_t fill = 0;
+        uint64_t total = 0;
+
+        static uint32_t Rotr(uint32_t x, unsigned n) noexcept { return (x >> n) | (x << (32 - n)); }
+
+        void Compress(const uint8_t* p) noexcept {
+            static constexpr uint32_t K[64] = {
+                0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+                0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+                0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu, 0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+                0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+                0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+                0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+                0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+                0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u};
+            uint32_t w[64];
+            for (int i = 0; i < 16; ++i) {
+                w[i] = (static_cast<uint32_t>(p[4 * i]) << 24) | (static_cast<uint32_t>(p[4 * i + 1]) << 16) |
+                       (static_cast<uint32_t>(p[4 * i + 2]) << 8) | static_cast<uint32_t>(p[4 * i + 3]);
+            }
+            for (int i = 16; i < 64; ++i) {
+                const uint32_t s0 = Rotr(w[i - 15], 7) ^ Rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                const uint32_t s1 = Rotr(w[i - 2], 17) ^ Rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+            }
+            uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+            for (int i = 0; i < 64; ++i) {
+                const uint32_t s1 = Rotr(e, 6) ^ Rotr(e, 11) ^ Rotr(e, 25);
+                const uint32_t ch = (e & f) ^ (~e & g);
+                const uint32_t t1 = hh + s1 + ch + K[i] + w[i];
+                const uint32_t s0 = Rotr(a, 2) ^ Rotr(a, 13) ^ Rotr(a, 22);
+                const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+                const uint32_t t2 = s0 + maj;
+                hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+            }
+            h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+        }
+
+        void Update(const uint8_t* p, std::size_t n) noexcept {
+            total += n;
+            while (n > 0) {
+                std::size_t take = 64 - fill;
+                if (take > n) take = n;
+                std::memcpy(block + fill, p, take);
+                fill += take;
+                p += take;
+                n -= take;
+                if (fill == 64) { Compress(block); fill = 0; }
+            }
+        }
+
+        void Final(uint8_t (&out)[32]) noexcept {
+            const uint64_t bits = total * 8;
+            const uint8_t one = 0x80;
+            Update(&one, 1);
+            const uint8_t zero = 0;
+            while (fill != 56) Update(&zero, 1);
+            uint8_t len[8];
+            for (int i = 0; i < 8; ++i) len[i] = static_cast<uint8_t>(bits >> (56 - 8 * i));
+            Update(len, 8);
+            for (int i = 0; i < 8; ++i) {
+                out[4 * i] = static_cast<uint8_t>(h[i] >> 24);
+                out[4 * i + 1] = static_cast<uint8_t>(h[i] >> 16);
+                out[4 * i + 2] = static_cast<uint8_t>(h[i] >> 8);
+                out[4 * i + 3] = static_cast<uint8_t>(h[i]);
+            }
+        }
+    };
 
     static void FormatDecimal(uint32_t v, char (&out)[16]) noexcept {
         char tmp[12];
@@ -1019,6 +1387,9 @@ private:
         if (!ResetSignals()) ::_exit(kExitSignalReset);
         if (!WorkerDescriptors(result_fd, image_fd)) ::_exit(kExitDescriptors);
         if (!ApplyRlimits(limits, image_fd)) ::_exit(kExitRlimits);
+        // Whatever image this is, exec may not grant it privilege (setuid, setgid, file
+        // capabilities). The worker sets it again inside its own filter install (R2-K-21).
+        if (::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) ::_exit(kExitSeccomp);
 #ifdef __NR_execveat
         (void)::syscall(__NR_execveat, image_fd, "", argv, envp, AT_EMPTY_PATH);
 #else

@@ -138,7 +138,8 @@ enum class AuditEventType : uint8_t {
     SupervisedCompleted,              // worker exited 0 in time with a well-formed frame (self-reported)
     SupervisedTimedOut,               // wall-clock deadline passed; worker killed
     SupervisedFailed,                 // spawned and ended any other way, or never spawned
-    SupervisedTerminationUnconfirmed  // killed, not reaped within the bound; may still be running
+    SupervisedTerminationUnconfirmed, // killed, not reaped within the bound; may still be running
+    SupervisedTerminated              // killed because a pending capability revocation asked for it (R2-K-24); tokens spent
 };
 
 /**

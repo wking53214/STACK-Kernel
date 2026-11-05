@@ -65,7 +65,10 @@ deadline expiry is `TimedOut` even if the child exited in the same instant.
 Ambiguity is never reported as success.
 
 The FFI (`crates/stack-ffi`) exposes the same executor over a fixed set of
-built-in payloads and its Rust tests repeat the spin, block, crash, abort,
+built-in payloads (the ungoverned fork-of-caller entry, `stack_supervised_run`, is
+kept as a C symbol for ABI compatibility; its Rust wrapper is an `unsafe fn`
+since R2-K-22, so safe Rust reaches only the governed worker entry; tested by
+`crates/stack-ffi/tests/api_surface.rs`) and its Rust tests repeat the spin, block, crash, abort,
 exit, forbidden-syscall, return-bytes and invalid-limits cases.
 
 ## The clean worker path (decision A, RACE-02)
@@ -94,17 +97,45 @@ tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
   `Completed`, and cannot expose the caller's memory (it is not mapped in the
   worker). What it can do is say whatever it likes in a run that really did exit
   0 in time; that is what "self-reported" means. The receipt layer records it so.
+- The worker image is trusted before it runs (R2-K-21; implemented and tested in
+  `cpp/tests/worker_image_tests.cpp`, ctest `STACKWorkerImage`, and through the FFI
+  in `ffi_supervised_tests.cpp`). A symlink in the path is refused (`openat2` with
+  `RESOLVE_NO_SYMLINKS`; where that call is missing only the final component is
+  refused, via `O_NOFOLLOW`, and that fallback is not tested). Setuid, setgid,
+  group-writable and world-writable images are refused, as are owners other than
+  root or the effective user. The child sets `PR_SET_NO_NEW_PRIVS` before the
+  exec (it used to be set only inside the worker). When the configuration pins
+  a SHA-256 (`WorkerSpec::expected_sha256`; REQUIRED by the FFI) the supervisor
+  hashes the bytes it reads through the opened descriptor and executes a sealed
+  memfd copy of exactly those bytes, so a swap of the file after the check
+  (in place or by rename) changes nothing and a program that is not the pinned
+  one never runs. Without a pin the opened descriptor itself is executed: a write
+  into the same inode between open and exec would run, and a non-worker program
+  would run with no seccomp filter (the worker installs its own). That mode is
+  for callers who accept it; it is not what the FFI offers.
+- Pid reuse and the tracking table (R2-K-23; implemented and tested in
+  `worker_reap_tests.cpp`, root needed for the reuse tests). With a pidfd the
+  supervisor signals and reaps the worker only through the descriptor, never by
+  a pid number that may have been reused after someone else reaped the worker;
+  a worker that is gone answers ESRCH/ECHILD and is forgotten. The process group
+  is signaled only while the worker is checked alive and unreaped. The tracking
+  slot for a worker that might go unconfirmed is reserved BEFORE the fork, and a
+  full table is a refusal (`EBUSY`), not a silent drop; the cost is a cap of 64
+  runs in progress plus unconfirmed. Without pidfd support (older than Linux 5.3)
+  the by-number behaviour remains for a run in progress.
 - The wait after SIGKILL is bounded (`reap_timeout_ns`, default 2 s). A worker
   that is not reaped in time is `TerminationUnconfirmed`: never a success, still
   tracked (`UnconfirmedCount`, `ReapUnconfirmed`).
+- A run can be terminated from another thread (R2-K-24): `RunWorker` takes an
+  optional `CancelHandle`, publishes the worker's pidfd in it, and a request kills
+  the worker through the pidfd; the outcome is `Terminated`, never a success.
 - Through the FFI the run is governed first: capability mask and rate limit are
   checked by the initialized host before anything is spawned, and one audit event
   records the outcome, timeouts included (`crates/stack-ffi/ABI.md`, section 8).
 - Found while testing it, R2-K-19, fixed: the fork-path child never closed the
   descriptors above the highest one it kept (a signed comparison with -1 in
   `CloseRange`). The seccomp filter already stopped the payload from using one.
-- Not done: no digest pin on the worker image; no compute-debt charge; no
-  argument delivery; ELF workers only. Still true: same uid, filesystem view and
+- Not done: no compute-debt charge; no argument delivery; ELF workers only. Still true: same uid, filesystem view and
   network namespace as the caller.
 
 ## What the executor does not do
@@ -206,6 +237,18 @@ in-process path that the FFI exposes:
   a transaction that ran keeps its tokens and is charged its ticks, one
   rejected before it ran costs nothing; a revocation applies under sustained
   load within a bound and no transaction that begins after it runs.
+- tested (R2-K-24): a pending capability revocation terminates the governed
+  supervised workers in flight (SIGKILL through the pidfd, outcome `Terminated`,
+  audited, tokens spent) instead of waiting for them, so the revocation applies
+  in about a millisecond rather than after the workers' deadline (measured
+  0.5 to 0.6 ms with two 3 s workers in flight; asserted below 1 s). New governed
+  runs are refused while a change is pending. In-process transactions are still
+  only waited for.
+- tested (R2-K-20): a governed request consumes at least one token. A request
+  for 0 tokens is refused as rate limited on the transaction path and on the
+  governed supervised path, before anything runs or spawns, and is audited. It
+  used to pass the governor's floor check for free and was accepted without
+  limit.
 - not isolation, still: the deadline stays cooperative (section above).
 - the direct C++ call `GovernedMinotaurHost::ExecuteGovernedTransaction` still
   seals an unsealed calling thread, as before; only the FFI entry point stopped

@@ -37,16 +37,23 @@ that existed before are unchanged. Additions and changes of meaning:
 | 4 | `stack_execute_governed_transaction` | NEW -13: a capability change is pending; nothing ran, nothing was consumed; retry. |
 | 5a | Rust `audit_read_slot` | Result flipped to what its documentation said: `Some` for a written slot, `None` for an empty one. The C symbol `stack_audit_read_slot` is unchanged. |
 | A3 | `int stack_supervised_run_governed(context_id, required_capability_m0, required_tokens, payload_kind, worker_path, limits, reap_timeout_ns, out, out_capacity, report)` | NEW. Capability and rate-limit checks through the initialized host BEFORE a clean worker program is spawned. Codes in section 8. |
+| R2-K-20 | `stack_execute_governed_transaction`, `stack_supervised_run_governed` | Behaviour: `required_tokens == 0` is now -5 (rate limited), audited as a rate-limit event, nothing consumed, nothing run or spawned. Before, a zero-token request passed the governor's floor check for free (`available >= Reserved + 0`) and was accepted without limit (2000 of 2000 governed runs at 0 tokens, against 9 of 30 at 100 tokens). A caller that passed 0 must pass at least 1. |
+| R2-K-21 | `int stack_supervised_run_governed(context_id, required_capability_m0, required_tokens, payload_kind, worker_path, worker_sha256, limits, reap_timeout_ns, out, out_capacity, report)` | SIGNATURE CHANGE relative to the previous commit of this series (the symbol is NEW relative to the base, so no base caller breaks): `const uint8_t* worker_sha256` (32 bytes) inserted after `worker_path`. REQUIRED. NULL is -16 (fail closed); an image that does not hash to it is -17. New -14 causes: a symlink in the path, setuid, setgid or group-writable image. |
+| R2-K-21 | `int stack_supervised_image_sha256(const char* path, uint8_t out[32])` | NEW. SHA-256 of a file, for provisioning and for tests. 0, a positive errno, or -3 for a null argument. No trust policy. |
+| R2-K-24 | `stack_host_set_capabilities`, `stack_supervised_run_governed` | A pending change now TERMINATES governed supervised workers in flight instead of waiting for them; the run's `report->outcome` is NEW value 13 `Terminated`. Section 5. |
+| R2-K-24 | host audit ring, `AuditEventType` | NEW value 9 `SupervisedTerminated`, appended. |
 | A3 | `uint64_t stack_supervised_unconfirmed_count(void)`, `uint64_t stack_supervised_reap_unconfirmed(void)` | NEW. Workers sent SIGKILL and not confirmed reaped; re-kill and reap them. |
 | A2 | `stack_supervised_report` | Same size and layout. `reserved[3]` became `result_self_reported` (u8) and `reserved[2]`. Old callers read it as before; it is 1 on `Completed`. |
 | A2 | `stack_supervised_report.outcome` | NEW value 12 `TerminationUnconfirmed`. A caller that switched over the outcome and had a default arm now sees it there. |
-| A3 | `stack_supervised_run` | Unchanged signature and behaviour. Now documented LEGACY: its child is a fork of the caller, it makes no capability or rate-limit check and writes no audit event. Not for untrusted payloads. Nothing in this repository calls it except its own tests. |
+| A3 | `stack_supervised_run` | Unchanged signature and behaviour. Now documented LEGACY: its child is a fork of the caller, it makes no capability or rate-limit check and writes no audit event. Not for untrusted payloads. Nothing in this repository calls it except its own tests. R2-K-22: the C symbol is kept unchanged for ABI compatibility; the Rust wrapper `supervised_run` is now `pub unsafe fn` (with a `# Safety` section), so safe Rust can no longer reach it. Tested: `tests/api_surface.rs` (source guard: no safe public function reaches the symbol; `supervised_run` is `unsafe`) and a `compile_fail,E0133` doc test on `supervised_run`. |
 | A3 | host audit ring, `AuditEventType` | NEW values 5 `SupervisedCompleted`, 6 `SupervisedTimedOut`, 7 `SupervisedFailed`, 8 `SupervisedTerminationUnconfirmed`, appended so 0 to 4 keep their numbers. `stack_host_audit_read_slot` returns them. |
 
 Test-only, present only when compiled with `-DSTACK_FFI_TESTING` (CMake
 `ffi_init_redteam`; never defined by `build.rs`):
 `uint64_t stack_ffi_testing_init_work_runs(void)` and
 `uint64_t stack_ffi_testing_host_constructions(void)`.
+
+`SupervisedOutcome::Terminated` and `HostAuditEvent::SupervisedTerminated` (R2-K-24) are new Rust variants.
 
 Rust additions for decision A in `src/lib.rs`: `supervised_run_governed`,
 `GovernedSupervisedRequest`, `GovernedSupervisedError`,
@@ -55,7 +62,7 @@ Rust additions for decision A in `src/lib.rs`: `supervised_run_governed`,
 `SupervisedReport::result_self_reported`, `HostAuditEvent::{SupervisedCompleted,
 SupervisedTimedOut, SupervisedFailed, SupervisedTerminationUnconfirmed}`,
 `WORKER_BUILD_PATH`, `TESTING_WORKER_PATH` (hidden). `supervised_run` is
-documented legacy. `stack-admission`: `SupervisedExecutor` is no longer a unit
+documented legacy and an `unsafe fn` (R2-K-22). `stack-admission`: `SupervisedExecutor` is no longer a unit
 struct; it is built by `SupervisedExecutor::new(WorkerConfig)`, which fails
 closed (new `ExecutorError::{Refused, WorkerUnavailable}`).
 
@@ -84,7 +91,7 @@ Rust additions in `src/lib.rs`: `host_initialize`, `host_seal_current_thread`,
 | -1 | Host not initialized. |
 | -3 | Setup failure (seccomp, signal handler or timer_create). |
 | -4 | Capability validation failed. |
-| -5 | Rate limited (also: request above 100 tokens, domain id 16 or more). |
+| -5 | Rate limited (also: request above 100 tokens, a request for 0 tokens (R2-K-20), domain id 16 or more). |
 | -6 | Hard (CPU-time) deadline fired. Payload ran. |
 | -7 | Software tick budget exceeded. Payload ran. |
 | -8 | Compute debt ceiling exceeded. Payload ran. |
@@ -110,6 +117,11 @@ every transaction) no longer compiles.
   requests of 100; concurrent transactions consume exactly the tokens expected;
   oversize request and unknown domain are refused (`cpp/tests/ffi_host_tests.cpp`,
   the Rust tests through the FFI).
+- tested (R2-K-20): a request for 0 tokens is rate limited on both the transaction
+  and the governed supervised path, runs and spawns nothing, is audited, and
+  takes nothing from the bucket (`ffi_host_tests.cpp` "a zero-token transaction
+  is rate limited", `ffi_supervised_tests.cpp` "a zero-token request is rate
+  limited").
 - implemented, not tested: the refill rate is calibrated once against
   `CLOCK_MONOTONIC` over 10 ms. Behaviour on a machine whose TSC frequency
   changes at run time is not tested.
@@ -231,6 +243,50 @@ Tested:
   times out, applies nothing, leaves nothing pending, and the host serves under
   the old mask; one setter timing out leaves the other holding the host closed.
 
+### Revocation terminates governed supervised workers (R2-K-24)
+
+Decision (approved): a pending revocation terminates the governed supervised
+workers in flight. Before, `stack_host_set_capabilities` waited for them: with
+a 3 s spin worker in flight it returned -2 after 500 ms, three times in a row,
+and the worker ran to its deadline with the revoked capability still in force.
+
+- implemented, tested: while a change waits, every governed supervised run in
+  flight is requested to stop (`CancelHandle`, `cpp/include/stack_run_cancel.hpp`).
+  Its worker is sent SIGKILL through its pidfd, the run ends with outcome
+  `Terminated` (13; Rust `SupervisedOutcome::Terminated`, admission
+  `RunOutcome::Terminated { signal: 9 }`), never a success
+  (`result_self_reported` 0, `deadline_fired` 0), is audited as
+  `SupervisedTerminated` (event 9) with its tokens SPENT (not refunded), and the
+  change applies once the worker is reaped.
+- implemented, tested: new governed runs are refused while a change is pending
+  (-13, as for transactions): nothing is consumed or spawned. A run that was
+  registered but not yet forked when the request came is not spawned and is
+  refused with -13, tokens refunded.
+- tested: with two 3 s workers (a spinner and a blocked one) in flight the
+  change applied after 0.5 to 0.6 ms (measured, development host, five runs;
+  asserted below 1 s) with both workers dead and reaped when it returned, both
+  outcomes `Terminated` with `elapsed_ns` below 1 s, a later run with the revoked
+  capability -4 with nothing spawned, and the terminated run's 100 tokens still
+  spent. Tests: `ffi_supervised_tests.cpp` "a pending revocation terminates
+  in-flight workers within a bound", Rust
+  `test_revocation_terminates_in_flight_supervised_workers`, admission
+  `worker_governance.rs`. The pre-existing "a revocation waits for a run in flight
+  and then refuses" asserted the old wait and was changed to assert termination.
+- tested (through a test-only seam, `STACK_SUPERVISED_TESTING`, that suppresses
+  the cancellation kill): if the worker is not killed, the change stays pending,
+  new governed runs get -13 meanwhile, and the call returns -2 at 500 ms with the
+  mask NOT applied and nothing left pending ("new governed runs are refused while
+  a change is pending, and an unkillable run leaves it unapplied").
+- not changed: in-process transactions (`stack_execute_governed_transaction`)
+  cannot be stopped; a pending change still waits for them, up to 500 ms.
+- not tested: a worker stuck in uninterruptible sleep that SIGKILL cannot end
+  (the same limit as `TerminationUnconfirmed`); then the call is -2 as above and
+  the caller escalates.
+- Behaviour change for callers: a revocation now ends the runs it overlaps. A
+  caller that granted a capability and revokes it mid-run sees `Terminated`, not
+  `TimedOut` or `Completed`. A worker that exits 0 with a good frame before the
+  kill takes effect is still `Completed`: it finished first.
+
 Not tested, and why:
 - The FFI's 500 ms timeout path: the FFI payload is a fixed built-in that
   cannot park, so a transaction cannot be held in flight through the C ABI.
@@ -303,9 +359,50 @@ What is now done (each statement names its test):
   helper", "the worker dies when its supervisor is killed", "the worker image
   is checked before anything is forked".
 - implemented, tested: the worker path comes from the caller's configuration
-  only. It must be absolute, a regular file with an exec bit, not
-  world-writable, owned by root or the effective user (checked on the opened
-  file, not the path). Anything else is `-14` and nothing is spawned.
+  only. It must be absolute, a regular file with an exec bit, owned by root or
+  the effective user, and none of setuid, setgid, group-writable or
+  world-writable (checked on the opened file, not the path). It is opened with
+  `openat2(RESOLVE_NO_SYMLINKS)`, so a symlink in ANY component is refused
+  (`ELOOP`); on a kernel without `openat2` (or a filter that answers `EPERM` for
+  it) the open falls back to `O_NOFOLLOW`, which refuses only a symlink as the
+  final component. That fallback is implemented, not tested. Anything else is
+  `-14` and nothing is spawned. Tests: `cpp/tests/worker_image_tests.cpp` (ctest
+  `STACKWorkerImage`) "a symlink is refused, as the final component and as a
+  directory component", "group-writable, world-writable, setuid and setgid
+  images are refused"; `ffi_supervised_tests.cpp` "a symlink, a setuid, a setgid
+  and a group-writable image are refused".
+- implemented, tested: NO_NEW_PRIVS before exec (R2-K-21). The supervisor's
+  child sets `PR_SET_NO_NEW_PRIVS` before `execveat`, so even an image run
+  without a pinned digest cannot gain privilege through exec. Before this the
+  flag was set only inside the worker, after exec. Test: "the worker is exec'd
+  with NO_NEW_PRIVS already set" (a test-only image that installs no filter and
+  reports the flag).
+- implemented, tested: the worker image is pinned by SHA-256 (R2-K-21) and the
+  governed path REQUIRES the pin (`-16` when unset). The supervisor reads the
+  image through the descriptor it opened, hashes what it read, and executes a
+  SEALED in-memory copy (`memfd`, sealed against write, grow and shrink) of
+  exactly those bytes. A swap of the file after the check, in place or by
+  rename, therefore changes nothing: the verified bytes run. A program that is
+  not the pinned one never runs (`/usr/bin/touch`, an altered copy). Tests:
+  "a pinned image swapped after the check still runs the verified bytes" (the
+  file at the path is overwritten in place, and separately renamed over,
+  between the check and the fork, through the `STACK_SUPERVISED_TESTING` seam),
+  "a non-worker binary (touch) is not run when the worker's digest is pinned",
+  "the worker image digest is required, and an image that is not the pinned one
+  is refused", Rust `test_governed_supervised_requires_the_worker_digest_and_refuses_another_program`.
+  SHA-256 is checked against the standard vectors and `sha256sum`.
+  The digest is checked after governance, not before: hashing costs
+  milliseconds, so a request refused for capability or rate limit does not make
+  the host pay it. A kernel that cannot `memfd_create`, or one that forbids
+  executing memfds (`vm.memfd_noexec=2`), fails closed (the run does not start).
+  An image larger than 64 MiB is refused when pinned.
+- not pinned, and labelled so: `RunWorker` called WITHOUT a digest (the C++
+  API allows it; the FFI does not) executes the opened descriptor itself. A
+  rename over the path afterwards changes nothing (the opened inode runs; test
+  "the same swap with no digest pinned"), but a write into the same inode
+  between the open and the exec would be executed. Such a caller has not pinned
+  the worker and is outside the guarantee above. A non-worker program run that
+  way has no seccomp filter (only the worker installs it).
   `stack-admission` fails closed when it is unset or unusable
   (`tests/worker_governance.rs`).
 - implemented, tested: result semantics. `Completed` means the worker exited 0
@@ -325,6 +422,28 @@ What is now done (each statement names its test):
   reaped it reports `TerminationUnconfirmed`, never a success, keeps the pid and
   pidfd in a table of 64, and every later run first re-kills and reaps them and
   refuses to spawn when the table is full (`SupervisorError`, errno `EBUSY`).
+  R2-K-23: the slot is RESERVED before the fork, so a worker is never spawned
+  that could not be tracked, and the check and the tracking can no longer
+  race (four runs racing for one free slot: one spawns, three are refused
+  `EBUSY` with nothing forked; before, all four forked and three were
+  untracked). A reservation is held for the whole run and given back when the
+  run ends, so at most 64 runs (in progress plus unconfirmed) exist at once; a
+  65th concurrent run is refused `EBUSY`. Behaviour change: that is a cap on
+  concurrent supervised runs per process that did not exist before.
+  A worker is signaled and reaped only through its pidfd (`pidfd_send_signal`,
+  `waitid(P_PIDFD)`): a worker reaped elsewhere (a SIGCHLD handler, a
+  `waitpid(-1)`) answers ESRCH/ECHILD and is forgotten, and its pid number, which
+  may by then belong to someone else, is never signaled or waited on. The
+  process group is signaled only while the worker is checked alive and
+  unreaped. On a kernel without pidfd (older than 5.3) the old by-number
+  behaviour remains for a run in progress, and a tracked unconfirmed worker is
+  reaped by number but not re-signaled; that path is tested only by the
+  existing fallback test, not for reuse. Tests (real pid reuse, produced by
+  setting `ns_last_pid`, which needs root): "a worker reaped elsewhere cannot
+  make the supervisor kill or reap whoever now holds its pid", "a tracked
+  unconfirmed worker reaped elsewhere is forgotten, not signaled by number", "the
+  tracking slot is reserved before the fork", "a run that completes gives its
+  reserved slot back" (`worker_reap_tests.cpp`, ctest `STACKWorkerReap`).
   The test seam that simulates an ineffective kill exists only when
   `-DSTACK_SUPERVISED_TESTING` is defined (CMake targets `stack_worker_reap_tests`
   and `ffi_supervised_tests`); it is in no shipped build. Tests: `STACKWorkerReap`
@@ -340,18 +459,21 @@ What is now done (each statement names its test):
 | -2 | Unknown payload kind (above 6). |
 | -3 | A null pointer, or `out` null with a non-zero capacity. |
 | -4 | Capability validation failed, including a request naming no capability bit. |
-| -5 | Rate limited (also above 100 tokens, domain 16 or more). |
+| -5 | Rate limited (also above 100 tokens, 0 tokens (R2-K-20), domain 16 or more). |
 | -9 | `wall_clock_deadline_ns` was 0. |
 | -12 | Initialization failed (latched). |
 | -13 | A capability change is pending; retry. |
-| -14 | `worker_path` unusable (also: called from a sealed thread, which cannot `open`). |
+| -14 | `worker_path` unusable (also: a symlink in the path, a setuid, setgid or group-writable image, or a call from a sealed thread, which cannot `open`). |
 | -15 | Other limits invalid (deadline above one hour, output above the buffer or 1 MiB, reap bound above a minute). |
+| -16 | `worker_sha256` is NULL. The digest of the worker image is required. Nothing spawned, nothing consumed. |
+| -17 | The image does not hash to `worker_sha256`. Nothing spawned; tokens taken for the call are refunded and one `SupervisedFailed` event with 0 tokens is written. |
 
-  While a worker runs the call counts as in flight, so `stack_host_set_capabilities`
-  waits for it (at most 500 ms, then `-2`) exactly as for a governed transaction.
+  While a worker runs the call counts as in flight. A capability change that
+  is waiting TERMINATES it (R2-K-24, below) instead of waiting for it.
   One audit event records the outcome in the host ring, timeouts included:
   `SupervisedCompleted`, `SupervisedTimedOut`, `SupervisedFailed` (also written
-  with 0 tokens when nothing was spawned) or `SupervisedTerminationUnconfirmed`.
+  with 0 tokens when nothing was spawned), `SupervisedTerminationUnconfirmed` or
+  `SupervisedTerminated` (event 9, tokens spent).
   Tests: `cpp/tests/ffi_supervised_tests.cpp` (ctest `STACKFfiSupervised`) and the
   Rust tests `test_governed_supervised_*`.
 - implemented, tested: SIGCHLD ignored is refused (`SigchldIgnored`, outcome 11)
@@ -365,10 +487,10 @@ ms deadline plus a 300 ms bound. These are observations, not guarantees.
 
 Not done, and why:
 
-- planned: no digest or signature pin on the worker image. The check is on the
-  opened file's type, mode and owner; the directory's permissions are the
-  operator's. A worker that is replaced by someone able to write the file
-  before the kernel starts is not detected.
+- not done: no signature, only a digest. The digest comes from the operator's
+  configuration; nothing here protects the configuration itself, and a digest
+  taken from the file it is about to trust (`stack_supervised_image_sha256` on
+  the live path) pins nothing.
 - not done: compute debt is not charged on the supervised path (the host's
   tick-based debt is for the in-process path).
 - not done: arguments are not delivered to the worker (`args` in the admission
