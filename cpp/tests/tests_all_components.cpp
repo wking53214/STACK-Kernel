@@ -2,8 +2,11 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
+#include <expected>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -300,18 +303,38 @@ TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][def
         std::atomic<bool> validator_done{false};
         std::atomic<bool> transaction_ok{false};
         std::atomic<bool> capabilities_changed{false};
+        // Latch (R2-K-14): the payload does not return until the changer has made
+        // its attempt, so the attempt is made while the transaction is provably in
+        // flight. Without it the transaction could finish between the payload's
+        // signal and the changer's call, and the attempt would (correctly) apply.
+        // The payload blocks on a condition variable (no CPU is burned while
+        // it waits) and the wait is bounded, so a changer that never attempts
+        // fails the assertions below instead of hanging the run. Because the
+        // payload now waits, the deadline budgets are generous (the nearby
+        // latch test uses the same): the old 100 000 ticks and 50 microseconds
+        // of CPU were sized for a payload that returned at once, and this test
+        // is about snapshot consistency, not about deadlines.
+        std::mutex attempt_mutex;
+        std::condition_variable attempt_cv;
+        bool change_attempted = false;
 
-        std::thread validator([&host, &token_validated, &validator_done, &transaction_ok]() {
+        std::thread validator([&host, &token_validated, &validator_done, &transaction_ok,
+                               &attempt_mutex, &attempt_cv, &change_attempted]() {
             SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
             auto res = host.ExecuteGovernedTransaction(
-                token, 5, 100'000ULL, 50'000ULL,
-                [&token_validated]() { token_validated.store(true, std::memory_order_release); }
+                token, 5, 100'000'000'000ULL, 1'000'000'000ULL,
+                [&token_validated, &attempt_mutex, &attempt_cv, &change_attempted]() {
+                    token_validated.store(true, std::memory_order_release);
+                    std::unique_lock<std::mutex> lk(attempt_mutex);
+                    attempt_cv.wait_for(lk, std::chrono::seconds(5), [&] { return change_attempted; });
+                }
             );
             transaction_ok.store(res.has_value(), std::memory_order_release);
             validator_done.store(true, std::memory_order_release);
         });
 
-        std::thread changer([&host, &token_validated, &validator_done, &capabilities_changed]() {
+        std::thread changer([&host, &token_validated, &validator_done, &capabilities_changed,
+                             &attempt_mutex, &attempt_cv, &change_attempted]() {
             while (!token_validated.load(std::memory_order_acquire)) {
                 if (validator_done.load(std::memory_order_acquire)) return;
                 std::this_thread::yield();
@@ -319,6 +342,11 @@ TEST_CASE("Component 12: Layer 4 - Capability Mutation Race Fix", "[layer-4][def
             // Try to change capabilities during validation
             bool success = host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0));
             capabilities_changed.store(!success, std::memory_order_release);  // Should fail (txn in flight)
+            {
+                std::lock_guard<std::mutex> lk(attempt_mutex);
+                change_attempted = true;
+            }
+            attempt_cv.notify_all();
         });
 
         validator.join();
@@ -404,6 +432,208 @@ TEST_CASE("Component 12: Layer 4 - Capability change refused while a payload run
     REQUIRE(refused_while_running);
     // Asked after the transaction returned: the counter is back to zero.
     REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0)));
+}
+
+namespace {
+
+// A transaction whose payload parks until released, so a test can hold one
+// transaction provably in flight (I-04). It runs on its own thread, which
+// seals itself; the test thread stays unsealed.
+struct ParkedTransaction {
+    std::mutex m;
+    std::condition_variable cv;
+    bool parked = false;
+    bool release = false;
+    std::atomic<bool> payload_ran{false};
+    std::expected<void, HostExecutionError> result{};
+    std::thread thread;
+
+    template <typename Host>
+    void Start(Host& host, uint64_t domain, uint64_t capability_bits) {
+        thread = std::thread([this, &host, domain, capability_bits]() {
+            SIMDCapabilityToken token(domain, CapabilityMask256(capability_bits, 0, 0, 0));
+            result = host.ExecuteGovernedTransaction(
+                token, 5, 100'000'000'000ULL, 10'000'000'000ULL,
+                [this]() {
+                    payload_ran.store(true, std::memory_order_release);
+                    std::unique_lock<std::mutex> lk(m);
+                    parked = true;
+                    cv.notify_all();
+                    cv.wait(lk, [this] { return release; });
+                });
+            // A refused or failed transaction never parks: wake the waiter.
+            std::lock_guard<std::mutex> lk(m);
+            parked = true;
+            cv.notify_all();
+        });
+    }
+    void WaitParked() {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [this] { return parked; });
+    }
+    void Release() {
+        std::lock_guard<std::mutex> lk(m);
+        release = true;
+        cv.notify_all();
+    }
+    void Join() { if (thread.joinable()) thread.join(); }
+};
+
+// Polls on the unsealed test thread; a failure shows as a false return, not a hang.
+template <typename Pred>
+bool WaitUntil(Pred pred, int timeout_ms = 5000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!pred()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+// One quick transaction on a fresh thread; returns its result and whether the payload ran.
+template <typename Host>
+std::expected<void, HostExecutionError> QuickTransaction(Host& host, uint64_t domain, uint64_t capability_bits,
+                                                         bool* payload_ran) {
+    std::expected<void, HostExecutionError> result{};
+    std::atomic<bool> ran{false};
+    std::thread([&]() {
+        SIMDCapabilityToken token(domain, CapabilityMask256(capability_bits, 0, 0, 0));
+        result = host.ExecuteGovernedTransaction(
+            token, 5, 100'000'000'000ULL, 10'000'000'000ULL,
+            [&ran]() { ran.store(true, std::memory_order_release); });
+    }).join();
+    *payload_ran = ran.load(std::memory_order_acquire);
+    return result;
+}
+
+}  // namespace
+
+TEST_CASE("Component 12: Layer 4 - A pending capability change blocks new transactions and applies when in-flight ones drain", "[layer-4][I-04]") {
+    // R2-K-07. A transaction is held in flight (payload parked on a latch). A
+    // bounded capability change then waits for it: while it waits, a NEW
+    // transaction is refused with CapabilityChangePending (fail closed, nothing
+    // runs, nothing is charged). When the parked transaction finishes the
+    // change applies and the revoked capability is refused.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+
+    ParkedTransaction a;
+    a.Start(host, 1, 0x01);
+    a.WaitParked();
+    REQUIRE(a.payload_ran.load());
+
+    std::atomic<bool> setter_done{false};
+    bool setter_applied = false;
+    std::thread setter([&]() {
+        setter_applied = host.SetActiveCapabilitiesWithin(
+            CapabilityMask256(0, 0, 0, 0), std::chrono::seconds(30));
+        setter_done.store(true, std::memory_order_release);
+    });
+    REQUIRE(WaitUntil([&] { return host.PendingCapabilityChanges() == 1; }));
+
+    // A new transaction while the change is pending: refused, payload not run.
+    bool b_ran = true;
+    const auto b = QuickTransaction(host, 2, 0x01, &b_ran);
+    REQUIRE_FALSE(b.has_value());
+    REQUIRE(b.error() == HostExecutionError::CapabilityChangePending);
+    REQUIRE_FALSE(b_ran);
+    REQUIRE(host.DebtTracker().Accrued(2) == 0);
+    // The change waits for the parked transaction: it has not applied.
+    REQUIRE_FALSE(setter_done.load(std::memory_order_acquire));
+
+    a.Release();
+    a.Join();
+    setter.join();
+    REQUIRE(a.result.has_value());           // it ran to completion under the old mask
+    REQUIRE(setter_applied);
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+
+    // Applied: the revoked capability is refused, and the payload does not run.
+    bool c_ran = true;
+    const auto c = QuickTransaction(host, 3, 0x01, &c_ran);
+    REQUIRE_FALSE(c.has_value());
+    REQUIRE(c.error() == HostExecutionError::CapabilityValidationFailed);
+    REQUIRE_FALSE(c_ran);
+}
+
+TEST_CASE("Component 12: Layer 4 - A bounded capability change that times out leaves nothing pending", "[layer-4][I-04]") {
+    // The wait is bounded. When the in-flight transaction does not drain in
+    // time the change is NOT applied (false), no change remains pending, and
+    // the host serves new transactions under the unchanged mask.
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    ParkedTransaction a;
+    a.Start(host, 1, 0x01);
+    a.WaitParked();
+
+    // Zero wait is the old try-once behaviour: refused at once, nothing pending.
+    REQUIRE_FALSE(host.SetActiveCapabilitiesWithin(CapabilityMask256(0, 0, 0, 0), std::chrono::nanoseconds(0)));
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+    REQUIRE_FALSE(host.SetActiveCapabilities(CapabilityMask256(0, 0, 0, 0)));
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool applied = host.SetActiveCapabilitiesWithin(
+        CapabilityMask256(0, 0, 0, 0), std::chrono::milliseconds(60));
+    const auto waited = std::chrono::steady_clock::now() - t0;
+    REQUIRE_FALSE(applied);
+    REQUIRE(waited >= std::chrono::milliseconds(60));
+    REQUIRE(waited < std::chrono::seconds(5));
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+
+    // Still serving, still under the old mask (nothing was applied).
+    bool b_ran = false;
+    const auto b = QuickTransaction(host, 2, 0x01, &b_ran);
+    REQUIRE(b.has_value());
+    REQUIRE(b_ran);
+
+    a.Release();
+    a.Join();
+    REQUIRE(a.result.has_value());
+    // Nothing in flight now: the same change applies at once.
+    REQUIRE(host.SetActiveCapabilitiesWithin(CapabilityMask256(0, 0, 0, 0), std::chrono::milliseconds(60)));
+    bool c_ran = true;
+    const auto c = QuickTransaction(host, 3, 0x01, &c_ran);
+    REQUIRE(c.error() == HostExecutionError::CapabilityValidationFailed);
+    REQUIRE_FALSE(c_ran);
+}
+
+TEST_CASE("Component 12: Layer 4 - One setter timing out does not unblock another that is still waiting", "[layer-4][I-04]") {
+    GovernedMinotaurHost<> host;
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    ParkedTransaction a;
+    a.Start(host, 1, 0x01);
+    a.WaitParked();
+
+    bool long_applied = false;
+    std::thread long_setter([&]() {
+        long_applied = host.SetActiveCapabilitiesWithin(CapabilityMask256(0x0F, 0, 0, 0), std::chrono::seconds(30));
+    });
+    REQUIRE(WaitUntil([&] { return host.PendingCapabilityChanges() == 1; }));
+
+    REQUIRE_FALSE(host.SetActiveCapabilitiesWithin(CapabilityMask256(0xF0, 0, 0, 0), std::chrono::milliseconds(30)));
+    // The short setter is gone; the long one still holds the host closed.
+    REQUIRE(host.PendingCapabilityChanges() == 1);
+    bool b_ran = true;
+    const auto b = QuickTransaction(host, 2, 0x01, &b_ran);
+    REQUIRE(b.error() == HostExecutionError::CapabilityChangePending);
+    REQUIRE_FALSE(b_ran);
+
+    a.Release();
+    a.Join();
+    long_setter.join();
+    REQUIRE(long_applied);
+    REQUIRE(host.PendingCapabilityChanges() == 0);
+    // The long setter's mask (0x0F) applied, the short one's (0xF0) did not.
+    bool c_ran = false;
+    REQUIRE(QuickTransaction(host, 3, 0x01, &c_ran).has_value());
+    REQUIRE(c_ran);
+    bool d_ran = true;
+    REQUIRE(QuickTransaction(host, 4, 0x10, &d_ran).error() == HostExecutionError::CapabilityValidationFailed);
+    REQUIRE_FALSE(d_ran);
 }
 
 TEST_CASE("Component 12: Layer 4 - A sealed thread can arm its deadline timer", "[layer-4][defect-5]") {
@@ -626,6 +856,319 @@ TEST_CASE("Component 12: Layer 4 - InitializeAndSeal TOCTOU Fix", "[layer-4][def
         REQUIRE(init_failures.load() == 0);
         REQUIRE(init_attempts.load() == 100);
     }
+}
+
+// I-01 (R2-K-01): the FFI host's parameters, with a refill rate the test
+// controls. 2^38 ticks per token is one token per two minutes here, so no
+// refill lands inside a test, and a never-used bucket starts full whatever
+// the rate. Every count below is exact.
+using FfiPolicyHost = GovernedMinotaurHost<1000, 100, 100, 2'100'000, 16>;
+constexpr uint64_t kNoRefill = 1ULL << 38;
+
+namespace {
+int ExactConsumeUntilLimited(FfiPolicyHost& host, uint64_t domain, uint32_t tokens, int limit, HostExecutionError* last) {
+    SIMDCapabilityToken token(domain, CapabilityMask256(0x01, 0, 0, 0));
+    int ok = 0;
+    *last = HostExecutionError::None;
+    for (int i = 0; i < limit; ++i) {
+        auto res = host.ExecuteGovernedTransaction(token, tokens, ~0ULL, 1'000'000'000ULL, []() {});
+        if (res.has_value()) { ++ok; continue; }
+        *last = res.error();
+        break;
+    }
+    return ok;
+}
+}  // namespace
+
+TEST_CASE("Component 12: Layer 4 - FFI policy host serves exactly its budget and refuses the rest", "[layer-4][I-01]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    int completed = 0;
+    int refusals = 0;
+    bool unchanged_after_refusal = false;
+    bool then_exhausted = false;
+    std::thread([&]() {
+        // 17 requests of 50 from the 900 spendable tokens: all complete, leaving 150.
+        SIMDCapabilityToken token(1, CapabilityMask256(0x01, 0, 0, 0));
+        for (int i = 0; i < 17; ++i) {
+            if (host.ExecuteGovernedTransaction(token, 50, ~0ULL, 1'000'000'000ULL, []() {}).has_value()) ++completed;
+        }
+        // 150 left: a request of 100 needs 200 and is refused, five times.
+        for (int i = 0; i < 5; ++i) {
+            auto r = host.ExecuteGovernedTransaction(token, 100, ~0ULL, 1'000'000'000ULL, []() {});
+            if (!r.has_value() && r.error() == HostExecutionError::RateLimitExceeded) ++refusals;
+        }
+        // The refusals consumed nothing: a request of 50 (needs 150) still completes,
+        // and after it the bucket is at the floor.
+        unchanged_after_refusal = host.ExecuteGovernedTransaction(token, 50, ~0ULL, 1'000'000'000ULL, []() {}).has_value();
+        auto r = host.ExecuteGovernedTransaction(token, 1, ~0ULL, 1'000'000'000ULL, []() {});
+        then_exhausted = !r.has_value() && r.error() == HostExecutionError::RateLimitExceeded;
+    }).join();
+
+    REQUIRE(completed == 17);
+    REQUIRE(refusals == 5);
+    REQUIRE(unchanged_after_refusal);
+    REQUIRE(then_exhausted);
+}
+
+TEST_CASE("Component 12: Layer 4 - FFI policy host: denied capability and oversized request consume nothing", "[layer-4][I-01]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    int denied = 0, oversized = 0, completed = 0;
+    bool payload_ran_on_failure = false;
+    HostExecutionError last = HostExecutionError::None;
+    std::thread([&]() {
+        SIMDCapabilityToken bad(2, CapabilityMask256(0x100, 0, 0, 0));
+        SIMDCapabilityToken good(2, CapabilityMask256(0x01, 0, 0, 0));
+        for (int i = 0; i < 20; ++i) {
+            auto r = host.ExecuteGovernedTransaction(bad, 100, ~0ULL, 1'000'000'000ULL,
+                                                     [&]() { payload_ran_on_failure = true; });
+            if (!r.has_value() && r.error() == HostExecutionError::CapabilityValidationFailed) ++denied;
+        }
+        for (int i = 0; i < 20; ++i) {
+            auto r = host.ExecuteGovernedTransaction(good, 101, ~0ULL, 1'000'000'000ULL,
+                                                     [&]() { payload_ran_on_failure = true; });
+            if (!r.has_value() && r.error() == HostExecutionError::RateLimitExceeded) ++oversized;
+        }
+        // The bucket is still full: exactly 9 requests of 100.
+        completed = ExactConsumeUntilLimited(host, 2, 100, 50, &last);
+    }).join();
+
+    REQUIRE(denied == 20);
+    REQUIRE(oversized == 20);
+    REQUIRE_FALSE(payload_ran_on_failure);
+    REQUIRE(completed == 9);
+    REQUIRE(last == HostExecutionError::RateLimitExceeded);
+}
+
+TEST_CASE("Component 12: Layer 4 - FFI policy host: concurrent transactions sum exactly", "[layer-4][I-01]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    constexpr int kThreads = 4;
+    constexpr int kPerThread = 15;
+    constexpr uint32_t kTokens = 10;  // 600 of 900 spendable tokens
+    std::atomic<int> completed{0};
+    std::atomic<int> failed{0};
+    std::atomic<int> payload_runs{0};
+    std::atomic<int> arrived{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&]() {
+            SIMDCapabilityToken token(3, CapabilityMask256(0x01, 0, 0, 0));
+            arrived++;
+            while (!go.load(std::memory_order_acquire)) {}
+            for (int i = 0; i < kPerThread; ++i) {
+                auto r = host.ExecuteGovernedTransaction(token, kTokens, ~0ULL, 1'000'000'000ULL,
+                                                         [&]() { payload_runs++; });
+                if (r.has_value()) completed++; else failed++;
+            }
+        });
+    }
+    while (arrived.load() < kThreads) {}
+    go.store(true, std::memory_order_release);
+    for (auto& w : workers) w.join();
+
+    int drained = 0;
+    HostExecutionError last = HostExecutionError::None;
+    std::thread([&]() { drained = ExactConsumeUntilLimited(host, 3, kTokens, 200, &last); }).join();
+
+    REQUIRE(failed.load() == 0);
+    REQUIRE(completed.load() == kThreads * kPerThread);
+    REQUIRE(payload_runs.load() == kThreads * kPerThread);
+    REQUIRE(drained == 30);  // (900 - 600) / 10
+    REQUIRE(last == HostExecutionError::RateLimitExceeded);
+}
+
+TEST_CASE("Component 12: Layer 4 - a failed transaction records no TransactionCompleted event", "[layer-4][I-01]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    HostExecutionError denied = HostExecutionError::None;
+    HostExecutionError limited = HostExecutionError::None;
+    bool ok = false;
+    std::thread([&]() {
+        SIMDCapabilityToken bad(4, CapabilityMask256(0x100, 0, 0, 0));
+        SIMDCapabilityToken good(4, CapabilityMask256(0x01, 0, 0, 0));
+        auto r1 = host.ExecuteGovernedTransaction(bad, 1, ~0ULL, 1'000'000'000ULL, []() {});
+        if (!r1.has_value()) denied = r1.error();
+        auto r2 = host.ExecuteGovernedTransaction(good, 101, ~0ULL, 1'000'000'000ULL, []() {});
+        if (!r2.has_value()) limited = r2.error();
+        ok = host.ExecuteGovernedTransaction(good, 1, ~0ULL, 1'000'000'000ULL, []() {}).has_value();
+    }).join();
+    REQUIRE(denied == HostExecutionError::CapabilityValidationFailed);
+    REQUIRE(limited == HostExecutionError::RateLimitExceeded);
+    REQUIRE(ok);
+
+    // A fresh host's ring holds the events in order; slot 3 was never written.
+    AuditEventRecord rec{};
+    REQUIRE(host.AuditRing().ReadSlot(0, rec));
+    REQUIRE(rec.event_type == AuditEventType::CapabilityViolation);
+    REQUIRE(rec.context_id == 4);
+    REQUIRE(host.AuditRing().ReadSlot(1, rec));
+    REQUIRE(rec.event_type == AuditEventType::RateLimitTriggered);
+    REQUIRE(host.AuditRing().ReadSlot(2, rec));
+    REQUIRE(rec.event_type == AuditEventType::TransactionCompleted);
+    REQUIRE(rec.tokens_consumed == 1);
+    REQUIRE_FALSE(host.AuditRing().ReadSlot(3, rec));
+}
+
+// I-03 (R2-K-05, R2-K-06): accounting rules of ExecuteGovernedTransaction.
+//   1. Rejected before the payload ran: nothing consumed, nothing accrued.
+//   2. The payload ran: its tokens are spent whatever follows, and its CPU
+//      ticks are charged as debt (an overrun is charged too; at the ceiling
+//      the debt stays where it is and is never refunded).
+// The exact counts use the no-refill rate: 90 requests of 10 tokens are the
+// 900 spendable tokens of one domain.
+namespace {
+constexpr uint64_t kDebtCeiling = 100'000'000'000ULL;
+constexpr uint32_t kTen = 10;
+
+// Requests of 10 tokens with a generous budget until the first RateLimited;
+// returns how many ran (completed or failed after running).
+int DrainTensUntilRateLimited(FfiPolicyHost& host, uint64_t domain, int* completed, int* ceiling_hit) {
+    SIMDCapabilityToken token(domain, CapabilityMask256(0x01, 0, 0, 0));
+    int ran = 0;
+    *completed = 0;
+    *ceiling_hit = 0;
+    for (int i = 0; i < 200; ++i) {
+        auto r = host.ExecuteGovernedTransaction(token, kTen, ~0ULL, 1'000'000'000ULL, []() {});
+        if (!r.has_value() && r.error() == HostExecutionError::RateLimitExceeded) break;
+        ++ran;
+        if (r.has_value()) ++*completed;
+        else if (r.error() == HostExecutionError::DebtCeilingExceeded) ++*ceiling_hit;
+    }
+    return ran;
+}
+}  // namespace
+
+TEST_CASE("Component 12: Layer 4 - at the debt ceiling nothing is refunded (R2-K-05)", "[layer-4][I-03]") {
+    // The observed case: with the debt preloaded one tick below the ceiling,
+    // a transaction hits the ceiling after its payload ran, and the rollback
+    // guard refunded the elapsed ticks that AccrueDebt had refused, so the
+    // debt went down (by 7610 ticks in the baseline run). The ceiling then
+    // defeats itself: every later transaction gets the same discount.
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+    const uint64_t domain = 2;
+    REQUIRE(host.DebtTracker().AccrueDebt(domain, kDebtCeiling - 1).has_value());
+    const uint64_t debt_before = host.DebtTracker().Accrued(domain);
+
+    HostExecutionError first = HostExecutionError::None;
+    bool payload_ran = false;
+    uint64_t debt_after_first = 0;
+    int ran = 0, completed = 0, ceiling_hit = 0;
+    std::thread([&]() {
+        SIMDCapabilityToken token(domain, CapabilityMask256(0x01, 0, 0, 0));
+        auto r = host.ExecuteGovernedTransaction(token, kTen, ~0ULL, 1'000'000'000ULL, [&]() { payload_ran = true; });
+        if (!r.has_value()) first = r.error();
+        debt_after_first = host.DebtTracker().Accrued(domain);
+        ran = DrainTensUntilRateLimited(host, domain, &completed, &ceiling_hit);
+    }).join();
+
+    REQUIRE(payload_ran);
+    REQUIRE(first == HostExecutionError::DebtCeilingExceeded);
+    INFO("debt before " << debt_before << " after " << debt_after_first
+         << " (delta " << static_cast<long long>(debt_after_first - debt_before) << ")");
+    REQUIRE(debt_after_first == debt_before);
+    // The payload ran, so the 10 tokens are spent: 89 more run (all at the
+    // ceiling) and the 91st is RateLimited. The debt never moved.
+    REQUIRE(ran == 89);
+    REQUIRE(completed == 0);
+    REQUIRE(ceiling_hit == 89);
+    REQUIRE(host.DebtTracker().Accrued(domain) == debt_before);
+}
+
+TEST_CASE("Component 12: Layer 4 - an overrun keeps its tokens and is charged its ticks (R2-K-06)", "[layer-4][I-03]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    // Software deadline: a budget of one tick is always exceeded.
+    const uint64_t software_domain = 3;
+    HostExecutionError software = HostExecutionError::None;
+    uint64_t software_debt = 0;
+    int software_ran = 0, software_completed = 0, software_ceiling = 0;
+    std::thread([&]() {
+        SIMDCapabilityToken token(software_domain, CapabilityMask256(0x01, 0, 0, 0));
+        auto r = host.ExecuteGovernedTransaction(token, kTen, 1ULL, 1'000'000'000ULL, []() { BurnCpuForMilliseconds(1); });
+        if (!r.has_value()) software = r.error();
+        software_debt = host.DebtTracker().Accrued(software_domain);
+        software_ran = DrainTensUntilRateLimited(host, software_domain, &software_completed, &software_ceiling);
+    }).join();
+    REQUIRE(software == HostExecutionError::DeadlineExceeded);
+    REQUIRE(software_debt > 0);
+    REQUIRE(software_ran == 89);       // the overrun's 10 tokens were not refunded
+    REQUIRE(software_completed == 89);
+
+    // Hard (CPU-time) deadline: 20 ms of CPU, the payload burns 200 ms.
+    const uint64_t hard_domain = 4;
+    HostExecutionError hard = HostExecutionError::None;
+    uint64_t hard_debt = 0;
+    int hard_ran = 0, hard_completed = 0, hard_ceiling = 0;
+    std::thread([&]() {
+        SIMDCapabilityToken token(hard_domain, CapabilityMask256(0x01, 0, 0, 0));
+        auto r = host.ExecuteGovernedTransaction(token, kTen, ~0ULL, 20'000'000ULL, []() { BurnCpuForMilliseconds(200); });
+        if (!r.has_value()) hard = r.error();
+        hard_debt = host.DebtTracker().Accrued(hard_domain);
+        hard_ran = DrainTensUntilRateLimited(host, hard_domain, &hard_completed, &hard_ceiling);
+    }).join();
+    REQUIRE(hard == HostExecutionError::PreemptionTriggered);
+    REQUIRE(hard_debt > 0);
+    REQUIRE(hard_ran == 89);
+    REQUIRE(hard_completed == 89);
+}
+
+TEST_CASE("Component 12: Layer 4 - a transaction rejected before running consumes and accrues nothing", "[layer-4][I-03]") {
+    FfiPolicyHost host(kNoRefill);
+    REQUIRE(host.SetActiveCapabilities(CapabilityMask256(0xFF, 0, 0, 0)));
+
+    // Capability denied and an oversized request: refused before the payload.
+    const uint64_t refused_domain = 5;
+    int denied = 0, oversized = 0;
+    bool payload_ran = false;
+    uint64_t debt_after_refusals = 1;
+    int ran = 0, completed = 0, ceiling = 0;
+    std::thread([&]() {
+        SIMDCapabilityToken bad(refused_domain, CapabilityMask256(0x100, 0, 0, 0));
+        SIMDCapabilityToken good(refused_domain, CapabilityMask256(0x01, 0, 0, 0));
+        for (int i = 0; i < 10; ++i) {
+            auto r = host.ExecuteGovernedTransaction(bad, kTen, ~0ULL, 1'000'000'000ULL, [&]() { payload_ran = true; });
+            if (!r.has_value() && r.error() == HostExecutionError::CapabilityValidationFailed) ++denied;
+            auto o = host.ExecuteGovernedTransaction(good, 101, ~0ULL, 1'000'000'000ULL, [&]() { payload_ran = true; });
+            if (!o.has_value() && o.error() == HostExecutionError::RateLimitExceeded) ++oversized;
+        }
+        debt_after_refusals = host.DebtTracker().Accrued(refused_domain);
+        ran = DrainTensUntilRateLimited(host, refused_domain, &completed, &ceiling);
+    }).join();
+    REQUIRE(denied == 10);
+    REQUIRE(oversized == 10);
+    REQUIRE_FALSE(payload_ran);
+    REQUIRE(debt_after_refusals == 0);
+    REQUIRE(ran == 90);
+    REQUIRE(completed == 90);
+
+    // A timer that cannot be armed: tokens were consumed and are refunded,
+    // the payload never ran, no debt. Forged timer id as in the D-03 case.
+    const uint64_t arm_domain = 6;
+    HostExecutionError arm = HostExecutionError::None;
+    bool arm_payload_ran = false;
+    std::thread([&]() {
+        g_thread_timer_state.timer_id = reinterpret_cast<timer_t>(static_cast<uintptr_t>(0x7fffffff));
+        g_thread_timer_state.timer_initialized = true;
+        SIMDCapabilityToken token(arm_domain, CapabilityMask256(0x01, 0, 0, 0));
+        auto r = host.ExecuteGovernedTransaction(token, kTen, ~0ULL, 20'000'000ULL, [&]() { arm_payload_ran = true; });
+        if (!r.has_value()) arm = r.error();
+    }).join();
+    REQUIRE(arm == HostExecutionError::TimerArmFailed);
+    REQUIRE_FALSE(arm_payload_ran);
+    REQUIRE(host.DebtTracker().Accrued(arm_domain) == 0);
+    int arm_ran = 0, arm_completed = 0, arm_ceiling = 0;
+    std::thread([&]() { arm_ran = DrainTensUntilRateLimited(host, arm_domain, &arm_completed, &arm_ceiling); }).join();
+    REQUIRE(arm_ran == 90);
+    REQUIRE(arm_completed == 90);
 }
 
 TEST_CASE("Component 16 & 17: Integration & Chaos Stress", "[components][16-17]") {
