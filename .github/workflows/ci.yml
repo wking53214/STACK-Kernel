@@ -129,7 +129,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test the workspace without the ANC crates
         run: |
-          cargo test --workspace --locked --exclude stack-anc-harness --exclude stack-anc-ceiling \
+          cargo test --workspace --locked --no-fail-fast --exclude stack-anc-harness --exclude stack-anc-ceiling \
             --exclude stack-anc-adaptive --exclude stack-anc-pipeline
 
   p3-2:
