@@ -131,7 +131,14 @@ enum class AuditEventType : uint8_t {
     RateLimitTriggered,
     SoftwareDeadlineExceeded,
     HardwareTimerPreempted,
-    CapabilityViolation
+    CapabilityViolation,
+    // Supervised worker runs (RACE-02, decision A). Appended, so the values
+    // above keep their numbers. tokens is the tokens the run spent (0 when it
+    // was refunded because nothing was spawned).
+    SupervisedCompleted,              // worker exited 0 in time with a well-formed frame (self-reported)
+    SupervisedTimedOut,               // wall-clock deadline passed; worker killed
+    SupervisedFailed,                 // spawned and ended any other way, or never spawned
+    SupervisedTerminationUnconfirmed  // killed, not reaped within the bound; may still be running
 };
 
 /**

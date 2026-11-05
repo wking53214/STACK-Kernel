@@ -668,6 +668,121 @@ public:
         audit_ring_.Push(AuditEventType::TransactionCompleted, domain_id, required_tokens);
         return {};
     }
+
+    /**
+     * How a supervised run (see ExecuteGovernedSupervised) ended, as far as the
+     * host's audit trail and accounting are concerned.
+     */
+    enum class SupervisedRunResult : uint8_t {
+        Completed,               // worker exited 0 in time with a well-formed frame
+        TimedOut,                // wall-clock deadline passed; worker killed
+        Failed,                  // spawned, ended any other way
+        TerminationUnconfirmed,  // killed, not reaped in time; may still be running
+        NotSpawned               // refused or failed before any process existed
+    };
+
+    /**
+     * Governance before spawn for a supervised worker run (RACE-02, R2-K-13).
+     *
+     * The same checks as ExecuteGovernedTransaction, in the same order, and
+     * BEFORE `run` is called, so a refused request spawns nothing:
+     *   1. wall_clock_deadline_ns == 0: InvalidHardTimeout (nothing consumed);
+     *   2. a pending capability change: CapabilityChangePending (nothing consumed);
+     *   3. the token's capabilities against the active mask: CapabilityValidationFailed
+     *      (CapabilityViolation audit event, nothing consumed);
+     *   4. the domain's token bucket: RateLimitExceeded (RateLimitTriggered audit event);
+     *   5. the capabilities again under the lock, after the tokens were taken
+     *      (a revocation in between refunds them).
+     * While `run` executes the transaction counts as in flight, so a capability
+     * change waits for it exactly as for a governed transaction.
+     *
+     * `run` spawns and supervises the worker and says how it ended. Tokens
+     * are spent when something was spawned and refunded when it was not
+     * (SupervisedRunResult::NotSpawned). One audit event records the outcome,
+     * timeouts included. Compute debt is not charged on this path.
+     *
+     * No seal is needed and none may be present: a sealed thread's filter
+     * forbids fork and exec, so `run` would fail to spawn (NotSpawned).
+     */
+    template <typename SupervisedRun>
+    [[nodiscard]] std::expected<void, HostExecutionError> ExecuteGovernedSupervised(
+        const SIMDCapabilityToken& token,
+        uint32_t required_tokens,
+        uint64_t wall_clock_deadline_ns,
+        SupervisedRun&& run) noexcept
+    {
+        if (wall_clock_deadline_ns == 0) [[unlikely]] {
+            return std::unexpected(HostExecutionError::InvalidHardTimeout);
+        }
+
+        CapabilityMask256 snapshot_capabilities{};
+        {
+            std::lock_guard<std::mutex> lock(capability_lock_);
+            if (pending_capability_changes_.load(std::memory_order_seq_cst) > 0) [[unlikely]] {
+                return std::unexpected(HostExecutionError::CapabilityChangePending);
+            }
+            snapshot_capabilities = active_host_capabilities_;
+            transactions_in_flight_.fetch_add(1, std::memory_order_release);
+        }
+        struct TransactionGuard {
+            std::atomic<uint32_t>& counter;
+            const std::atomic<uint32_t>& pending;
+            std::mutex& lock;
+            std::condition_variable& drained;
+            ~TransactionGuard() noexcept {
+                counter.fetch_sub(1, std::memory_order_seq_cst);
+                if (pending.load(std::memory_order_seq_cst) != 0) [[unlikely]] {
+                    std::lock_guard<std::mutex> lk(lock);
+                    drained.notify_all();
+                }
+            }
+        } lifecycle_guard{transactions_in_flight_, pending_capability_changes_, capability_lock_,
+                          capability_drained_};
+
+        const uint64_t domain_id = token.GetContextId();
+        if (!token.Validate(snapshot_capabilities)) [[unlikely]] {
+            audit_ring_.Push(AuditEventType::CapabilityViolation, domain_id, 0);
+            return std::unexpected(HostExecutionError::CapabilityValidationFailed);
+        }
+        auto consume_res = governor_.Consume(domain_id, required_tokens, PriorityClass::Standard);
+        if (!consume_res.has_value()) [[unlikely]] {
+            audit_ring_.Push(AuditEventType::RateLimitTriggered, domain_id, required_tokens);
+            return std::unexpected(HostExecutionError::RateLimitExceeded);
+        }
+        TransactionRollbackGuard guard(governor_, debt_tracker_, domain_id, 0, 0, required_tokens);
+        {
+            std::lock_guard<std::mutex> lock(capability_lock_);
+            if (!token.Validate(active_host_capabilities_)) [[unlikely]] {
+                audit_ring_.Push(AuditEventType::CapabilityViolation, domain_id, 0);
+                return std::unexpected(HostExecutionError::CapabilityValidationFailed);
+            }
+        }
+
+        const SupervisedRunResult result = run();
+        switch (result) {
+        case SupervisedRunResult::NotSpawned:
+            // Nothing existed to spend the tokens on: the guard refunds them.
+            audit_ring_.Push(AuditEventType::SupervisedFailed, domain_id, 0);
+            return {};
+        case SupervisedRunResult::Completed:
+            guard.Commit();
+            audit_ring_.Push(AuditEventType::SupervisedCompleted, domain_id, required_tokens);
+            return {};
+        case SupervisedRunResult::TimedOut:
+            guard.Commit();
+            audit_ring_.Push(AuditEventType::SupervisedTimedOut, domain_id, required_tokens);
+            return {};
+        case SupervisedRunResult::TerminationUnconfirmed:
+            guard.Commit();
+            audit_ring_.Push(AuditEventType::SupervisedTerminationUnconfirmed, domain_id, required_tokens);
+            return {};
+        case SupervisedRunResult::Failed:
+            break;
+        }
+        guard.Commit();
+        audit_ring_.Push(AuditEventType::SupervisedFailed, domain_id, required_tokens);
+        return {};
+    }
 };
 
 } // namespace stack::host

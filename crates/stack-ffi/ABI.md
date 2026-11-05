@@ -1,7 +1,8 @@
 # stack-ffi: C ABI, behaviour and what is tested
 
 This is the contract of the exported C symbols in `src/ffi_wrapper.cpp` and
-of the Rust wrappers in `src/lib.rs`, as changed by the RACE-02 steps 1 to 5.
+of the Rust wrappers in `src/lib.rs`, as changed by the RACE-02 steps 1 to 5
+and by decision A (the clean supervised worker, section 8).
 Every statement carries one of four labels:
 
 - **tested**: a test in this repository fails if the statement is false;
@@ -35,11 +36,28 @@ that existed before are unchanged. Additions and changes of meaning:
 | 4 | `stack_host_set_capabilities` | 0 now also means no transaction runs or will run with the old mask. -2 is narrower: the in-flight transactions did not drain within 500 ms, the mask was NOT applied and nothing is left pending. The call may now block for up to 500 ms. |
 | 4 | `stack_execute_governed_transaction` | NEW -13: a capability change is pending; nothing ran, nothing was consumed; retry. |
 | 5a | Rust `audit_read_slot` | Result flipped to what its documentation said: `Some` for a written slot, `None` for an empty one. The C symbol `stack_audit_read_slot` is unchanged. |
+| A3 | `int stack_supervised_run_governed(context_id, required_capability_m0, required_tokens, payload_kind, worker_path, limits, reap_timeout_ns, out, out_capacity, report)` | NEW. Capability and rate-limit checks through the initialized host BEFORE a clean worker program is spawned. Codes in section 8. |
+| A3 | `uint64_t stack_supervised_unconfirmed_count(void)`, `uint64_t stack_supervised_reap_unconfirmed(void)` | NEW. Workers sent SIGKILL and not confirmed reaped; re-kill and reap them. |
+| A2 | `stack_supervised_report` | Same size and layout. `reserved[3]` became `result_self_reported` (u8) and `reserved[2]`. Old callers read it as before; it is 1 on `Completed`. |
+| A2 | `stack_supervised_report.outcome` | NEW value 12 `TerminationUnconfirmed`. A caller that switched over the outcome and had a default arm now sees it there. |
+| A3 | `stack_supervised_run` | Unchanged signature and behaviour. Now documented LEGACY: its child is a fork of the caller, it makes no capability or rate-limit check and writes no audit event. Not for untrusted payloads. Nothing in this repository calls it except its own tests. |
+| A3 | host audit ring, `AuditEventType` | NEW values 5 `SupervisedCompleted`, 6 `SupervisedTimedOut`, 7 `SupervisedFailed`, 8 `SupervisedTerminationUnconfirmed`, appended so 0 to 4 keep their numbers. `stack_host_audit_read_slot` returns them. |
 
 Test-only, present only when compiled with `-DSTACK_FFI_TESTING` (CMake
 `ffi_init_redteam`; never defined by `build.rs`):
 `uint64_t stack_ffi_testing_init_work_runs(void)` and
 `uint64_t stack_ffi_testing_host_constructions(void)`.
+
+Rust additions for decision A in `src/lib.rs`: `supervised_run_governed`,
+`GovernedSupervisedRequest`, `GovernedSupervisedError`,
+`supervised_unconfirmed_count`, `supervised_reap_unconfirmed`,
+`SupervisedOutcome::TerminationUnconfirmed`,
+`SupervisedReport::result_self_reported`, `HostAuditEvent::{SupervisedCompleted,
+SupervisedTimedOut, SupervisedFailed, SupervisedTerminationUnconfirmed}`,
+`WORKER_BUILD_PATH`, `TESTING_WORKER_PATH` (hidden). `supervised_run` is
+documented legacy. `stack-admission`: `SupervisedExecutor` is no longer a unit
+struct; it is built by `SupervisedExecutor::new(WorkerConfig)`, which fails
+closed (new `ExecutorError::{Refused, WorkerUnavailable}`).
 
 Rust additions in `src/lib.rs`: `host_initialize`, `host_seal_current_thread`,
 `host_payload_count`, `host_audit_read_slot`, `HostAuditEvent`,
@@ -244,7 +262,7 @@ They check the synchronization, not the filter; their "thread is filtered"
 checks are reported as skipped. The filter is covered by the unsanitized
 builds of the same tests. No Rust test runs under the sanitizer.
 
-## 7. Not covered by this contract
+## 7. Not covered by this contract (and see section 8)
 
 - No isolation on the in-process path. `-6` is detected after the payload
   returns; a payload that never returns, or blocks in a syscall, is not stopped.
@@ -255,3 +273,113 @@ builds of the same tests. No Rust test runs under the sanitizer.
   from many threads. Not changed here.
 - aarch64: the wrapper includes `<x86intrin.h>` unconditionally (R2-E-10);
   only x86_64 is built and tested.
+
+## 8. Supervised execution in a clean worker (RACE-02, decision A)
+
+Why: the supervised child used to be a fork of the caller. Probes on the
+unchanged code (`race02/ffi/probes`): a payload returned the caller's memory
+(`P12`, `Completed` with `PARENT-SECRET-KEY-0123456789`), and wrote its own
+well-formed result frame then `exit_group(0)` (`P2`, `Completed` with
+`FORGED-OK`). A frame checksum is not a MAC and no key held by an untrusted
+worker could be one.
+
+What is now done (each statement names its test):
+
+- implemented, tested: `stack_supervised_run_governed` forks and, in the
+  child before exec, sets its process group and `PR_SET_PDEATHSIG`, resets
+  signals, closes every descriptor except 0 to 2 (`/dev/null`) and the result
+  pipe (placed on fd 3), applies rlimits, then `execveat`s an image
+  descriptor opened and checked before the fork from the ABSOLUTE path given
+  by the caller, with an EMPTY environment. The helper program
+  (`cpp/worker/stack_worker.cpp`) installs the strict seccomp filter with
+  `NO_NEW_PRIVS` as its first action, before it reads argv, then runs one of
+  the built-in kinds 0 to 6. Tests: `cpp/tests/worker_exec_tests.cpp` (ctest
+  `STACKWorkerExec`): "the caller's memory is not in the worker" (the worker
+  reading the address of a caller global or heap secret faults with SIGSEGV and
+  returns nothing; the control case shows the fork path does expose it),
+  "the environment is empty", "only descriptors 0, 1, 2 and the result pipe are
+  inherited" (listed from inside the worker before its filter: `0,1,2,3,`),
+  "network, exec, fork, ptrace, open and the x32 ABI are denied inside the
+  helper", "the worker dies when its supervisor is killed", "the worker image
+  is checked before anything is forked".
+- implemented, tested: the worker path comes from the caller's configuration
+  only. It must be absolute, a regular file with an exec bit, not
+  world-writable, owned by root or the effective user (checked on the opened
+  file, not the path). Anything else is `-14` and nothing is spawned.
+  `stack-admission` fails closed when it is unset or unusable
+  (`tests/worker_governance.rs`).
+- implemented, tested: result semantics. `Completed` means the worker exited 0
+  before the deadline AND sent a well-formed frame. The bytes are
+  SELF-REPORTED by an untrusted worker and every report says so
+  (`result_self_reported`, 1 on `Completed`, 0 otherwise). Nothing may be
+  inferred from them beyond that. A forged frame then `exit_group(0)` is
+  `Completed`, flagged, and holds no caller memory ("a forged frame then
+  exit_group(0) is Completed but flagged self-reported"). A forged frame then a
+  spin is `TimedOut`; a frame arriving after the deadline is ignored; a
+  malformed, truncated, oversized or doubled frame, a frameless exit 0, and a
+  self SIGKILL are never `Completed`. On any outcome other than `Completed` the
+  bytes the frame parser had written into the caller's buffer are zeroed.
+- implemented, tested: bounded reap (R2-K-12). After SIGKILL the supervisor
+  waits at most `reap_timeout_ns` (default 2 s, at most 60 s; 0 in the C call
+  means the default), re-sending SIGKILL every 100 ms. If the worker is not
+  reaped it reports `TerminationUnconfirmed`, never a success, keeps the pid and
+  pidfd in a table of 64, and every later run first re-kills and reaps them and
+  refuses to spawn when the table is full (`SupervisorError`, errno `EBUSY`).
+  The test seam that simulates an ineffective kill exists only when
+  `-DSTACK_SUPERVISED_TESTING` is defined (CMake targets `stack_worker_reap_tests`
+  and `ffi_supervised_tests`); it is in no shipped build. Tests: `STACKWorkerReap`
+  and "an ineffective kill is TerminationUnconfirmed and audited".
+- implemented, tested: governance before spawn (R2-K-13). Codes of
+  `stack_supervised_run_governed`; nothing is spawned and nothing consumed
+  unless 0:
+
+| Code | Meaning |
+|---|---|
+| 0 | Governance passed. `report->outcome` says how the run ended (any `Outcome`). Tokens are spent when `child_pid != 0`, refunded when nothing was spawned. |
+| -1 | Host not initialized. |
+| -2 | Unknown payload kind (above 6). |
+| -3 | A null pointer, or `out` null with a non-zero capacity. |
+| -4 | Capability validation failed, including a request naming no capability bit. |
+| -5 | Rate limited (also above 100 tokens, domain 16 or more). |
+| -9 | `wall_clock_deadline_ns` was 0. |
+| -12 | Initialization failed (latched). |
+| -13 | A capability change is pending; retry. |
+| -14 | `worker_path` unusable (also: called from a sealed thread, which cannot `open`). |
+| -15 | Other limits invalid (deadline above one hour, output above the buffer or 1 MiB, reap bound above a minute). |
+
+  While a worker runs the call counts as in flight, so `stack_host_set_capabilities`
+  waits for it (at most 500 ms, then `-2`) exactly as for a governed transaction.
+  One audit event records the outcome in the host ring, timeouts included:
+  `SupervisedCompleted`, `SupervisedTimedOut`, `SupervisedFailed` (also written
+  with 0 tokens when nothing was spawned) or `SupervisedTerminationUnconfirmed`.
+  Tests: `cpp/tests/ffi_supervised_tests.cpp` (ctest `STACKFfiSupervised`) and the
+  Rust tests `test_governed_supervised_*`.
+- implemented, tested: SIGCHLD ignored is refused (`SigchldIgnored`, outcome 11)
+  after governance and refunds the tokens ("a run that spawns nothing refunds").
+
+Measured on the development host (four cores, otherwise idle): spin, CPU-bound
+and blocked-syscall workers killed at 300.9 to 301.1 ms for a 300 ms deadline;
+governed timeouts at 40 ms: worst 41.5 to 42.8 ms over 50 runs; at 150 ms: 151
+ms; an ineffective kill reports `TerminationUnconfirmed` at 400.6 ms for a 100
+ms deadline plus a 300 ms bound. These are observations, not guarantees.
+
+Not done, and why:
+
+- planned: no digest or signature pin on the worker image. The check is on the
+  opened file's type, mode and owner; the directory's permissions are the
+  operator's. A worker that is replaced by someone able to write the file
+  before the kernel starts is not detected.
+- not done: compute debt is not charged on the supervised path (the host's
+  tick-based debt is for the in-process path).
+- not done: arguments are not delivered to the worker (`args` in the admission
+  pipeline are digested and ignored; the kind is the whole request).
+- not done: a worker that is a script is not supported (the image descriptor is
+  close-on-exec, so an interpreter could not open it); workers are ELF programs.
+- not defended (unchanged): a kernel bug in seccomp or an allowed syscall; the
+  worker shares the caller's uid, filesystem view and network namespace, and only
+  the filter keeps it from using them; no namespaces, cgroups or chroot.
+- BLOCKED: nothing in decision A is unprovable here, with one exception: the
+  uninterruptible-sleep case behind `TerminationUnconfirmed` cannot be produced
+  without a kernel fault, so only the simulated ineffective kill is tested.
+- aarch64: the helper and the filter compile for it by their `#if`s but only
+  x86_64 was built and run; the x32 test exists for x86_64 only.

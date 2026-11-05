@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stack_admission::{
     Admission, AdmissionResult, BuildError, ExecutionLimits, Executor, ExecutorError, KernelPolicy, Parts, Refused, RunReport,
-    SupervisedExecutor, WorkerKind,
+    SupervisedExecutor, WorkerConfig, WorkerKind,
 };
 use stack_authority::{
     Capability, Digest32, FileUseStore, ManualClock, PublicKey, Purpose, ResourceScope, RevocationList, TrustAnchor,
@@ -31,6 +31,23 @@ use stack_trident::{
     seal_for, EnvelopeDraft, FileStore, GateOutcome, GatePosition, KeyMeta, KeyPurpose, KeyRing, Nonce, SecretKey,
     StartError, StoreError, TridentConfig,
 };
+
+/// The real executor for tests: the worker program this build compiled, the
+/// capability bit granted once for the whole test process (a second change
+/// would make the first one's in-flight runs wait), one token per run.
+pub fn test_executor() -> SupervisedExecutor {
+    static GRANT: std::sync::Once = std::sync::Once::new();
+    let executor = SupervisedExecutor::new(WorkerConfig {
+        worker_path: PathBuf::from(stack_ffi::WORKER_BUILD_PATH),
+        context_id: 0,
+        required_capabilities: 0x01,
+        tokens_per_run: 1,
+        reap_timeout_ns: 0,
+    })
+    .expect("the test worker is usable");
+    GRANT.call_once(|| stack_ffi::host_set_capabilities(0x01, 0, 0, 0).expect("grant the test capability"));
+    executor
+}
 
 /// Start of test time (a fixed Unix ms value).
 pub const T0: u64 = 1_800_000_000_000;
@@ -382,7 +399,7 @@ impl Builder {
     /// Builds the kernel without stepping the clock.
     pub fn build(self) -> Result<Harness, BuildError> {
         let runs = Arc::new(AtomicUsize::new(0));
-        let inner = self.executor.unwrap_or_else(|| Box::new(SupervisedExecutor));
+        let inner = self.executor.unwrap_or_else(|| Box::new(test_executor()));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let executor = Box::new(CountingExecutor {
             inner,

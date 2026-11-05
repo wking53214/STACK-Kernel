@@ -2,11 +2,17 @@
 //!
 //! The pipeline runs a worker through the [`Executor`] trait and reads
 //! back a [`RunReport`]. [`SupervisedExecutor`] is the one real
-//! implementation: the C++ supervised executor (a forked child under a
-//! wall-clock deadline that ends in SIGKILL, a seccomp allowlist and
-//! rlimits) reached through `stack_ffi::supervised_run`. The FFI is
-//! expected to change (host, governor, init); when it does, this file is
-//! the adaptation and nothing else in the crate moves.
+//! implementation: the C++ supervised executor reached through
+//! `stack_ffi::supervised_run_governed`. It runs a separate worker PROGRAM
+//! (fork then exec: the worker has none of this process's memory, an empty
+//! environment and only its result pipe) under a wall-clock deadline that
+//! ends in SIGKILL, a seccomp filter the worker installs first, and rlimits,
+//! after the host's capability and rate-limit checks. The worker program's
+//! absolute path is kernel configuration ([`WorkerConfig`]); with none, or
+//! one that is not an executable regular file, the executor cannot be built
+//! and no run can start. The FFI is expected to change (host, governor,
+//! init); when it does, this file is the adaptation and nothing else in the
+//! crate moves.
 //!
 //! What a report proves: what the supervisor observed. A `Completed`
 //! outcome means the worker exited 0 within the deadline and sent a
@@ -14,7 +20,10 @@
 //! (`cpp/CONTAINMENT.md`), and the receipt records their digest as
 //! self-reported.
 
+use std::ffi::CString;
 use std::fmt;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 /// Longest wall-clock deadline the supervisor accepts: one hour.
 pub const MAX_DEADLINE_NS: u64 = 3_600_000_000_000;
@@ -236,6 +245,16 @@ pub enum ExecutorError {
     /// The underlying call failed before anything was observed.
     #[error("executor call failed: {0}")]
     Call(String),
+    /// The host refused the run before anything was spawned: capability not
+    /// granted, rate limit, a capability change pending, bad limits. Nothing
+    /// ran and no token was spent.
+    #[error("refused before spawn: {0}")]
+    Refused(String),
+    /// The worker program is not configured or not usable: not absolute, not
+    /// a regular executable file, world-writable, or the host would not
+    /// initialize.
+    #[error("worker program unusable: {0}")]
+    WorkerUnavailable(String),
 }
 
 /// Runs one worker under limits and reports what it observed. The
@@ -246,14 +265,86 @@ pub trait Executor: Send + Sync + fmt::Debug {
     fn run(&self, kind: WorkerKind, limits: &ExecutionLimits, args: &[u8]) -> Result<RunReport, ExecutorError>;
 }
 
-/// The real executor: the C++ supervised child behind `stack-ffi`.
+/// Everything the real executor needs from kernel configuration. None of it
+/// comes from a request, a payload or the environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerConfig {
+    /// ABSOLUTE path of the worker program (`stack_worker`).
+    pub worker_path: PathBuf,
+    /// The host rate-limit domain every run is charged to (0..16).
+    pub context_id: u64,
+    /// Capability bits every run requires of the host's active mask. Must
+    /// name at least one bit; the operator grants them with
+    /// `stack_ffi::host_set_capabilities` and may revoke them at any time.
+    pub required_capabilities: u64,
+    /// Tokens each run costs (1..=100).
+    pub tokens_per_run: u32,
+    /// Bound on the wait for a killed worker to be reaped, in nanoseconds;
+    /// 0 means the supervisor's default of 2 s.
+    pub reap_timeout_ns: u64,
+}
+
+/// The real executor: the C++ supervised worker behind `stack-ffi`.
 ///
-/// Argument bytes are accepted and ignored: the built-in payloads take no
+/// Built from a [`WorkerConfig`]; [`SupervisedExecutor::new`] fails closed
+/// when the worker path is not absolute or not an executable regular file.
+/// Every run goes through the host's capability and rate-limit checks before
+/// anything is spawned, so a refused run is `ExecutorError::Refused` and the
+/// pipeline records it as unknown (nothing ran).
+///
+/// Argument bytes are accepted and ignored: the built-in worker kinds take no
 /// arguments, and the FFI carries none. The pipeline still records the
 /// digest of what it would have passed, so a later FFI that delivers
 /// arguments changes only this file.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SupervisedExecutor;
+#[derive(Debug, Clone)]
+pub struct SupervisedExecutor {
+    worker: CString,
+    context_id: u64,
+    required_capabilities: u64,
+    tokens_per_run: u32,
+    reap_timeout_ns: u64,
+}
+
+impl SupervisedExecutor {
+    /// Checks the configuration and initializes the host. Fails closed.
+    pub fn new(config: WorkerConfig) -> Result<Self, ExecutorError> {
+        let path = &config.worker_path;
+        if !path.is_absolute() {
+            return Err(ExecutorError::WorkerUnavailable(format!(
+                "worker path {} is not absolute",
+                path.display()
+            )));
+        }
+        let meta = std::fs::metadata(path)
+            .map_err(|e| ExecutorError::WorkerUnavailable(format!("worker path {}: {e}", path.display())))?;
+        let mode = meta.permissions().mode();
+        if !meta.is_file() || mode & 0o111 == 0 || mode & 0o002 != 0 {
+            return Err(ExecutorError::WorkerUnavailable(format!(
+                "worker path {} is not an executable regular file that is not world-writable",
+                path.display()
+            )));
+        }
+        let worker = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| ExecutorError::WorkerUnavailable("worker path holds a NUL".to_owned()))?;
+        if config.required_capabilities == 0 {
+            return Err(ExecutorError::WorkerUnavailable(
+                "required_capabilities names no bit; the host would pass any mask".to_owned(),
+            ));
+        }
+        if config.tokens_per_run == 0 || config.tokens_per_run > 100 {
+            return Err(ExecutorError::WorkerUnavailable("tokens_per_run must be 1..=100".to_owned()));
+        }
+        stack_ffi::host_initialize()
+            .map_err(|e| ExecutorError::WorkerUnavailable(format!("host initialization failed: {e:?}")))?;
+        Ok(Self {
+            worker,
+            context_id: config.context_id,
+            required_capabilities: config.required_capabilities,
+            tokens_per_run: config.tokens_per_run,
+            reap_timeout_ns: config.reap_timeout_ns,
+        })
+    }
+}
 
 impl WorkerKind {
     const fn ffi_kind(self) -> stack_ffi::PayloadKind {
@@ -282,8 +373,16 @@ impl Executor for SupervisedExecutor {
             file_size_bytes: limits.file_size_bytes,
             nofile: limits.nofile,
         };
-        let report = stack_ffi::supervised_run(kind.ffi_kind(), &ffi_limits, &mut out)
-            .map_err(|e| ExecutorError::Call(format!("{e:?}")))?;
+        let request = stack_ffi::GovernedSupervisedRequest {
+            context_id: self.context_id,
+            required_capability_m0: self.required_capabilities,
+            required_tokens: self.tokens_per_run,
+            kind: kind.ffi_kind(),
+            worker_path: &self.worker,
+            reap_timeout_ns: self.reap_timeout_ns,
+        };
+        let report = stack_ffi::supervised_run_governed(&request, &ffi_limits, &mut out)
+            .map_err(|e| ExecutorError::Refused(format!("{e:?}")))?;
         use stack_ffi::SupervisedOutcome as O;
         let outcome = match report.outcome {
             O::Completed => match usize::try_from(report.result_length).ok().and_then(|n| out.get(..n)) {
@@ -324,6 +423,12 @@ impl Executor for SupervisedExecutor {
             },
             O::SigchldIgnored => RunOutcome::Unknown {
                 reason: "SIGCHLD is ignored in this process; the supervisor refused to run".to_owned(),
+            },
+            O::TerminationUnconfirmed => RunOutcome::TerminationUnconfirmed {
+                reason: format!(
+                    "SIGKILL sent and the worker (pid {}) was not reaped within the bound; it may still be running",
+                    report.child_pid
+                ),
             },
             O::Unrecognized(code) => RunOutcome::Unknown {
                 reason: format!("unrecognized supervisor outcome code {code}"),

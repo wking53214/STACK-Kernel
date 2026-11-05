@@ -9,9 +9,11 @@ Nothing here is a claim beyond those tests.
 | Path | Header | What stops a payload | Status |
 |---|---|---|---|
 | In-process, `GovernedMinotaurHost::ExecuteGovernedTransaction` | `stack_host_binding.hpp`, `posix_deadline_timer_hardened.hpp` | Nothing. A CPU-time timer sets a flag that is read after the payload returns. | Cooperative deadline only. Not isolation. |
-| Supervised child, `stack::supervised::SupervisedExecutor::Run` | `stack_supervised_exec.hpp` | SIGKILL from the parent at a wall-clock deadline; a seccomp filter that kills the child on any unlisted syscall. | Isolation of the payload's syscalls and run time, within the limits in "What it does not do". |
+| Supervised child, `stack::supervised::SupervisedExecutor::Run` (fork of the caller) | `stack_supervised_exec.hpp` | SIGKILL from the parent at a wall-clock deadline; a seccomp filter that kills the child on any unlisted syscall. | Isolation of the payload's syscalls and run time, within the limits in "What it does not do". **NOT for untrusted payloads**: the child is a copy of the caller (see "The clean worker path"). |
+| Supervised worker program, `SupervisedExecutor::RunWorker` (fork + exec) | `stack_supervised_exec.hpp`, `cpp/worker/stack_worker.cpp` | The same kill and filter, from a separate program with none of the caller's memory. | Implemented and tested (decision A, RACE-02). The path for anything not fully trusted. |
 
-A payload that must be stopped goes through the supervised executor. The
+A payload that must be stopped goes through the supervised executor, and a
+payload that is not fully trusted goes through `RunWorker`. The
 in-process path remains for callers that want the governor (tokens, debt,
 capability mask) around a payload they already trust to return.
 
@@ -66,13 +68,53 @@ The FFI (`crates/stack-ffi`) exposes the same executor over a fixed set of
 built-in payloads and its Rust tests repeat the spin, block, crash, abort,
 exit, forbidden-syscall, return-bytes and invalid-limits cases.
 
+## The clean worker path (decision A, RACE-02)
+
+`Run(callable)` is kept and works, but its child is a fork of the caller. Two
+baseline probes on it: a payload that returns the caller's memory
+(`Completed` with the caller's secret) and a payload that writes its own
+well-formed frame then `exit_group(0)` (`Completed` with the forged bytes).
+`RunWorker` closes the first and bounds the second. Labels: implemented and
+tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
+`STACKWorkerExec`, 19 cases) and `cpp/tests/worker_reap_tests.cpp` (`STACKWorkerReap`,
+5 cases); the governed FFI path is `cpp/tests/ffi_supervised_tests.cpp`
+(`STACKFfiSupervised`, 13 cases).
+
+- The worker is a separate program, `stack_worker`, exec'd from an image
+  descriptor opened before the fork from an absolute path given by kernel
+  configuration, never from the payload or the environment. Its environment is
+  empty and it holds only fds 0 to 2 (`/dev/null`) and the result pipe on fd 3.
+  It installs the strict seccomp filter itself, with `NO_NEW_PRIVS`, before it
+  reads argv. The supervisor still enforces the deadline, the rlimits and the
+  exit status from outside and does not trust the filter to have been installed.
+- `Completed` means: exited 0 within the deadline AND sent a well-formed frame.
+  The frame bytes are SELF-REPORTED by an untrusted worker; the report carries
+  `result_self_reported = true` and nothing more may be inferred. A forged frame
+  cannot make a timeout, crash, seccomp kill, non-zero exit or missing frame
+  `Completed`, and cannot expose the caller's memory (it is not mapped in the
+  worker). What it can do is say whatever it likes in a run that really did exit
+  0 in time; that is what "self-reported" means. The receipt layer records it so.
+- The wait after SIGKILL is bounded (`reap_timeout_ns`, default 2 s). A worker
+  that is not reaped in time is `TerminationUnconfirmed`: never a success, still
+  tracked (`UnconfirmedCount`, `ReapUnconfirmed`).
+- Through the FFI the run is governed first: capability mask and rate limit are
+  checked by the initialized host before anything is spawned, and one audit event
+  records the outcome, timeouts included (`crates/stack-ffi/ABI.md`, section 8).
+- Found while testing it, R2-K-19, fixed: the fork-path child never closed the
+  descriptors above the highest one it kept (a signed comparison with -1 in
+  `CloseRange`). The seccomp filter already stopped the payload from using one.
+- Not done: no digest pin on the worker image; no compute-debt charge; no
+  argument delivery; ELF workers only. Still true: same uid, filesystem view and
+  network namespace as the caller.
+
 ## What the executor does not do
 
-- **No namespace, cgroup, user or filesystem isolation.** The child is a
-  fork: same uid, same mount and network namespaces, same view of the
-  filesystem, and a copy of the parent's memory at the moment of the fork.
-  The seccomp filter is what keeps the payload from using any of that; a
-  payload can still read whatever the parent had in memory.
+- **No namespace, cgroup, user or filesystem isolation.** The child has the
+  same uid, mount and network namespaces and view of the filesystem as the
+  caller. On the fork path it is also a copy of the parent's memory at the
+  moment of the fork, and a payload can read whatever the parent had in
+  memory; the worker path (`RunWorker`) does not have that problem. The seccomp
+  filter is what keeps the payload from using the rest.
 - **fork in a multithreaded parent.** Only the forking thread is copied.
   Any lock another thread held at that instant stays held in the child.
   glibc protects its own allocator; a payload that touches another lock can
@@ -94,7 +136,8 @@ exit, forbidden-syscall, return-bytes and invalid-limits cases.
   `RLIMIT_FSIZE` does not apply to pipes.
 - **The result is the payload's claim.** The frame checksum (FNV-1a 64)
   detects truncation and interleaving on the pipe. It is not a MAC and the
-  payload itself can write to the result descriptor.
+  payload itself can write to the result descriptor; reports say so
+  (`result_self_reported`).
 - **Kernel dependence.** `SECCOMP_RET_KILL_PROCESS` needs Linux 4.14,
   `pidfd_open` 5.3 (older kernels fall back to `waitpid` polling at 5 ms),
   `close_range` 5.9 (older kernels close descriptors one by one). A kernel

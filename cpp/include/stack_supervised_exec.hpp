@@ -12,6 +12,17 @@
  * its allowlist lets the payload disarm the timer. That path is a
  * cooperative deadline, not isolation (D-02).
  *
+ * TWO PATHS, AND WHICH ONE TO USE
+ *
+ *   RunWorker(limits, WorkerSpec, ...)   fork + exec of a separate worker
+ *       program (cpp/worker/stack_worker.cpp). The child has none of the
+ *       caller's memory, an empty environment, and only fds 0-2 (/dev/null)
+ *       and the result pipe. USE THIS for anything that is not fully trusted.
+ *   Run(limits, callable, ...) / RunThunk   the payload runs in a fork of the
+ *       caller. It can read and return the caller's memory and can write a
+ *       result frame of its own. NOT FOR UNTRUSTED PAYLOADS (R2-K-08); it is
+ *       kept for in-tree, trusted callables and for the existing tests.
+ *
  * SupervisedExecutor runs the payload in a forked child process and
  * supervises it from the parent with a wall-clock deadline that ends in
  * SIGKILL. A payload cannot block, catch or ignore SIGKILL, so the
@@ -50,15 +61,28 @@
  *     a matching checksum arrived with nothing after it. Any other
  *     combination is one of the failure outcomes; ambiguity never becomes
  *     success.
- *   - The child is always reaped and both parent-side descriptors are
- *     always closed, on every path. There is no heap allocation in the
- *     parent; the result goes into the caller's buffer.
+ *   - The result bytes of a Completed run are SELF-REPORTED: the worker is
+ *     untrusted and wrote them itself, so ExecutionReport::result_self_reported
+ *     is true and nothing beyond "a well-formed frame came from a process that
+ *     exited 0 in time" may be inferred from them. A forged frame cannot turn
+ *     a timeout, a crash, a seccomp kill, a non-zero exit or a missing frame
+ *     into Completed, and (worker path) cannot expose the caller's memory. On
+ *     every outcome other than Completed the bytes the frame parser had
+ *     written into the caller's buffer are zeroed.
+ *   - The wait for the child after SIGKILL is bounded (Limits::reap_timeout_ns,
+ *     2 s by default). If the child is not reaped in time the run is
+ *     TerminationUnconfirmed: not a success, the pid and pidfd stay tracked
+ *     (UnconfirmedCount, ReapUnconfirmed) and the child may still be running.
+ *   - Otherwise the child is reaped and both parent-side descriptors are
+ *     closed, on every path. There is no heap allocation in the parent; the
+ *     result goes into the caller's buffer.
  *
  * WHAT IT DOES NOT DO (read cpp/CONTAINMENT.md)
  *
  *   - No namespaces, no cgroups, no user switch, no chroot: the child
- *     shares the parent's address space contents (it is a fork), its
- *     uid, its filesystem view and its network namespace. The seccomp
+ *     shares the parent's uid, its filesystem view and its network
+ *     namespace; on the fork-of-caller path it also holds a copy of the
+ *     parent's address space (the worker path does not). The seccomp
  *     filter is what keeps the payload from reaching them; a kernel
  *     bug in seccomp or in an allowed syscall is outside this model.
  *   - fork() in a multithreaded parent copies only the calling thread.
@@ -91,6 +115,7 @@
  *     close_range (older kernels close descriptors one by one).
  */
 
+#include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <cstddef>
@@ -106,6 +131,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -127,7 +153,10 @@ enum class Outcome : uint8_t {
     SpawnFailed = 8,      // pipe/fork failed, or the child could not set up its sandbox
     SupervisorError = 9,  // poll/waitpid failure in the parent
     InvalidLimits = 10,   // Limits rejected before anything was spawned
-    SigchldIgnored = 11   // SIGCHLD is ignored in this process; refused before anything was spawned
+    SigchldIgnored = 11,  // SIGCHLD is ignored in this process; refused before anything was spawned
+    // The child was sent SIGKILL and was NOT reaped within Limits::reap_timeout_ns. It may still be
+    // running. Never a success; the pid stays tracked (UnconfirmedCount / ReapUnconfirmed).
+    TerminationUnconfirmed = 12
 };
 
 /** Upper bound on a deadline: one hour. Larger values are InvalidLimits. */
@@ -142,6 +171,16 @@ inline constexpr std::size_t kMaxOutputBytes = 1u << 20;
  * a ResourceLimit instead of the host's memory.
  */
 inline constexpr uint64_t kDefaultAddressSpaceBytes = 4ULL << 30;
+/** The descriptor a worker program finds its result pipe on. 0, 1 and 2 are /dev/null. */
+inline constexpr int kWorkerResultFd = 3;
+/** Default bound on the wait for a killed child to be reaped: 2 s. */
+inline constexpr uint64_t kDefaultReapTimeoutNs = 2'000'000'000ULL;
+/** Upper bound on Limits::reap_timeout_ns: one minute. */
+inline constexpr uint64_t kMaxReapTimeoutNs = 60'000'000'000ULL;
+/** How many killed-but-unreaped children are tracked; at this many, new runs are refused. */
+inline constexpr std::size_t kMaxUnconfirmedChildren = 64;
+/** Longest worker path accepted (bytes, without the terminator). */
+inline constexpr std::size_t kMaxWorkerPathBytes = 4095;
 
 struct Limits {
     /** Required, 1 .. kMaxWallClockDeadlineNs. */
@@ -162,6 +201,12 @@ struct Limits {
     uint32_t nofile = 0;
     /** One descriptor (>= 3) kept open in the child for the payload to read, or -1. */
     int inherit_fd = -1;
+    /**
+     * How long to wait, after SIGKILL, for the child to be reaped: 1 ns ..
+     * kMaxReapTimeoutNs, default kDefaultReapTimeoutNs. When it is not reaped in
+     * time the run is TerminationUnconfirmed, never a success.
+     */
+    uint64_t reap_timeout_ns = kDefaultReapTimeoutNs;
 };
 
 struct ExecutionReport {
@@ -180,6 +225,28 @@ struct ExecutionReport {
     bool deadline_fired = false;
     /** Bytes placed in the caller's buffer; meaningful only on Completed. */
     uint64_t result_length = 0;
+    /**
+     * True whenever result bytes were delivered (Completed). The bytes are the
+     * WORKER'S OWN CLAIM: an untrusted process wrote them, and the supervisor
+     * establishes nothing about them beyond "a well-formed frame arrived from a
+     * process that then exited 0 before the deadline". Never evidence that the
+     * work was done or done correctly.
+     */
+    bool result_self_reported = false;
+};
+
+/**
+ * A worker program for SupervisedExecutor::RunWorker. Everything here is
+ * chosen by kernel configuration, never by the payload or the environment.
+ */
+struct WorkerSpec {
+    /** ABSOLUTE path of the worker executable. The supervisor opens it once, before the fork,
+     *  and executes that open descriptor, so a later swap of the path changes nothing. */
+    const char* executable = nullptr;
+    /** argv[1] as a decimal number: which built-in kind the worker runs. */
+    uint32_t kind = 0;
+    /** Optional argv[2]; used by test workers only. Null for none. */
+    const char* argument = nullptr;
 };
 
 /** Payload entry used by the child: writes up to capacity bytes to out and returns the count. */
@@ -226,6 +293,12 @@ public:
         }
         const uint64_t t0 = MonotonicNs();
         const uint64_t deadline = t0 + limits.wall_clock_deadline_ns;
+        if (ReapUnconfirmed() >= kMaxUnconfirmedChildren) {
+            // Too many children whose death was never confirmed: spawn no more.
+            report.outcome = Outcome::SupervisorError;
+            report.error_number = EBUSY;
+            return report;
+        }
 
         int pipe_fds[2] = {-1, -1};
         if (::pipe2(pipe_fds, O_CLOEXEC) != 0) {
@@ -260,6 +333,147 @@ public:
         // Parent.
         report.child_pid = pid;
         pipe_w.Close();
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity);
+        return report;
+    }
+
+    /**
+     * Runs a worker PROGRAM (fork, then exec of a separate executable) under
+     * the same supervision as RunThunk. Unlike RunThunk the child is not a
+     * copy of the caller: after the exec it has none of the caller's memory,
+     * its environment is empty, and it holds only descriptors 0 to 2
+     * (/dev/null) and the result pipe on kWorkerResultFd. The worker installs
+     * the strict seccomp filter itself as its first action
+     * (InstallWorkerFilter); the supervisor does not trust that and still
+     * enforces the deadline, the rlimits and the exit status from outside.
+     *
+     * Completed means: the worker exited 0 before the deadline AND sent a
+     * well-formed frame. The frame bytes are the worker's own claim.
+     */
+    [[nodiscard]] static ExecutionReport RunWorker(const Limits& limits, const WorkerSpec& spec, uint8_t* result,
+                                                   std::size_t result_capacity) noexcept {
+        ExecutionReport report{};
+        if (!LimitsAreValid(limits, result, result_capacity) || limits.inherit_fd != -1) {
+            report.outcome = Outcome::InvalidLimits;
+            return report;
+        }
+        if (SigchldIsIgnored()) {
+            report.outcome = Outcome::SigchldIgnored;
+            return report;
+        }
+        const uint64_t t0 = MonotonicNs();
+        const uint64_t deadline = t0 + limits.wall_clock_deadline_ns;
+        if (ReapUnconfirmed() >= kMaxUnconfirmedChildren) {
+            // Too many children whose death was never confirmed: spawn no more.
+            report.outcome = Outcome::SupervisorError;
+            report.error_number = EBUSY;
+            return report;
+        }
+
+        // The image is opened and checked before anything is forked, and the
+        // child executes this descriptor, not the path.
+        FdGuard image{-1};
+        {
+            const int err = OpenWorkerImage(spec.executable, image.fd);
+            if (err != 0) {
+                report.outcome = Outcome::SpawnFailed;
+                report.error_number = err;
+                report.elapsed_ns = MonotonicNs() - t0;
+                return report;
+            }
+        }
+        // argv and envp are built here, on the stack: the child allocates nothing.
+        char kind_text[16];
+        FormatDecimal(spec.kind, kind_text);
+        char* argv[4] = {const_cast<char*>(spec.executable), kind_text, const_cast<char*>(spec.argument), nullptr};
+        char* envp[1] = {nullptr};
+
+        int pipe_fds[2] = {-1, -1};
+        if (::pipe2(pipe_fds, O_CLOEXEC) != 0) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+        FdGuard pipe_r{pipe_fds[0]};
+        FdGuard pipe_w{pipe_fds[1]};
+        if (!pipe_r.RaiseAbove(2) || !pipe_w.RaiseAbove(2) || !image.RaiseAbove(2)) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+
+        const pid_t parent_pid = ::getpid();
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            report.outcome = Outcome::SpawnFailed;
+            report.error_number = errno;
+            report.elapsed_ns = MonotonicNs() - t0;
+            return report;
+        }
+        if (pid == 0) {
+            ::close(pipe_r.fd);
+            WorkerChildMain(limits, image.fd, argv, envp, pipe_w.fd, parent_pid);  // never returns
+        }
+
+        report.child_pid = pid;
+        pipe_w.Close();
+        image.Close();
+        Supervise(report, limits, pid, pipe_r, t0, deadline, result, result_capacity);
+        return report;
+    }
+
+    /**
+     * Checks a worker path the way RunWorker does before it forks (absolute,
+     * opens, regular, executable, not world-writable, owned by root or the
+     * effective user) and closes it again. Returns 0 or an errno. For a caller
+     * that wants to refuse a request before it spends anything on it.
+     */
+    [[nodiscard]] static int CheckWorkerImage(const char* path) noexcept {
+        int fd = -1;
+        const int err = OpenWorkerImage(path, fd);
+        if (err == 0) ::close(fd);
+        return err;
+    }
+
+    /**
+     * For a worker program: installs the filter the fork path installs (x32
+     * and foreign architectures killed; read only on fd 0; write only on 1,
+     * 2 and the result pipe; anonymous non-executable mmap; no open, socket,
+     * clone, execve, ptrace), with NO_NEW_PRIVS. Call it first, before the
+     * worker reads anything. Irreversible.
+     */
+    [[nodiscard]] static bool InstallWorkerFilter(int result_fd) noexcept {
+        return InstallFilter(result_fd, -1, ::getpid());
+    }
+
+    /** For a worker program: writes one result frame (magic, length, bytes, checksum) to fd. */
+    [[nodiscard]] static bool WriteResultFrame(int fd, const uint8_t* body, std::size_t len) noexcept {
+        return WriteFrame(fd, body, len);
+    }
+
+    [[nodiscard]] static bool LimitsAreValid(const Limits& limits, const uint8_t* result,
+                                             std::size_t result_capacity) noexcept {
+        if (limits.wall_clock_deadline_ns == 0 || limits.wall_clock_deadline_ns > kMaxWallClockDeadlineNs) return false;
+        if (limits.max_output_bytes > kMaxOutputBytes) return false;
+        if (limits.max_output_bytes > result_capacity) return false;
+        if (result == nullptr && limits.max_output_bytes > 0) return false;
+        if (limits.inherit_fd < -1 || (limits.inherit_fd >= 0 && limits.inherit_fd < 3)) return false;
+        if (limits.reap_timeout_ns == 0 || limits.reap_timeout_ns > kMaxReapTimeoutNs) return false;
+        return true;
+    }
+
+private:
+    struct FdGuard;
+    struct FrameParser;
+
+    // The parent half of a run, shared by the fork-of-caller path and the
+    // worker path: watch the child until it exits or the deadline passes,
+    // kill it, reap it, and classify what was seen. pipe_r is the read end of
+    // the result pipe (the write end is already closed here).
+    static void Supervise(ExecutionReport& report, const Limits& limits, pid_t pid, FdGuard& pipe_r, uint64_t t0,
+                          uint64_t deadline, uint8_t* result, std::size_t result_capacity) noexcept {
         (void)::setpgid(pid, pid);  // the child does the same; whichever runs first wins
         (void)::fcntl(pipe_r.fd, F_SETFL, O_NONBLOCK);
         FdGuard pidfd{PidfdOpen(pid)};
@@ -339,19 +553,32 @@ public:
 
         // Once the waitpid fallback has reaped the child its pid is free to be
         // reused, so nothing may be signaled by that number any more.
+        bool killed = false;
         if ((report.deadline_fired || poll_failed) && !reaped) {
             KillChild(pid, pidfd.fd);
+            killed = true;
         }
-        // Always reap. With the waitpid fallback the child may be reaped already.
+        // Always reap, but never wait without a bound (R2-K-12). With the waitpid
+        // fallback the child may be reaped already.
         if (!reaped) {
-            for (;;) {
-                const pid_t w = ::waitpid(pid, &status, 0);
-                if (w == pid) break;
-                if (w < 0 && errno == EINTR) continue;
+            const int rc = ReapBounded(pid, pidfd.fd, limits.reap_timeout_ns, status, killed);
+            if (rc == 0) {
+                // SIGKILL did not take effect in time. The child may still be
+                // running: say so, keep tracking it, report no success.
+                KillChild(pid, pidfd.fd);
+                TrackUnconfirmed(pid, pidfd);
+                report.outcome = Outcome::TerminationUnconfirmed;
+                report.error_number = ETIMEDOUT;
+                report.elapsed_ns = MonotonicNs() - t0;
+                ScrubResult(result, parser);
+                return;
+            }
+            if (rc < 0) {
                 report.outcome = Outcome::SupervisorError;
                 report.error_number = errno;
                 report.elapsed_ns = MonotonicNs() - t0;
-                return report;
+                ScrubResult(result, parser);
+                return;
             }
         }
         // Whatever the child wrote before dying is in the pipe; take it, bounded.
@@ -359,20 +586,113 @@ public:
 
         report.elapsed_ns = MonotonicNs() - t0;
         Classify(report, status, parser, poll_failed, poll_errno);
-        return report;
+        // Bytes the caller's buffer received from a run that did not complete are
+        // not a result; do not leave them there to be mistaken for one.
+        if (report.outcome != Outcome::Completed) ScrubResult(result, parser);
     }
 
-    [[nodiscard]] static bool LimitsAreValid(const Limits& limits, const uint8_t* result,
-                                             std::size_t result_capacity) noexcept {
-        if (limits.wall_clock_deadline_ns == 0 || limits.wall_clock_deadline_ns > kMaxWallClockDeadlineNs) return false;
-        if (limits.max_output_bytes > kMaxOutputBytes) return false;
-        if (limits.max_output_bytes > result_capacity) return false;
-        if (result == nullptr && limits.max_output_bytes > 0) return false;
-        if (limits.inherit_fd < -1 || (limits.inherit_fd >= 0 && limits.inherit_fd < 3)) return false;
-        return true;
+    static void ScrubResult(uint8_t* result, const FrameParser& parser) noexcept {
+        if (result != nullptr && parser.body_n > 0) std::memset(result, 0, parser.body_n);
     }
+
+    // ------------------------------------------------------------------
+    // Bounded reap and the children that could not be confirmed dead.
+    // ------------------------------------------------------------------
+
+    // Waits for pid to be reaped, at most bound_ns, re-sending SIGKILL every
+    // 100 ms while it waits (when `resend`). Returns 1 reaped (status set),
+    // 0 not reaped in time, -1 waitpid failed (errno set).
+    [[nodiscard]] static int ReapBounded(pid_t pid, int pidfd, uint64_t bound_ns, int& status, bool resend) noexcept {
+        const uint64_t end = MonotonicNs() + bound_ns;
+        uint64_t next_kill = MonotonicNs() + 100'000'000ULL;
+        for (;;) {
+            const pid_t w = ::waitpid(pid, &status, WNOHANG);
+            if (w == pid) return 1;
+            if (w < 0 && errno != EINTR) return -1;
+            const uint64_t now = MonotonicNs();
+            if (now >= end) return 0;
+            if (resend && now >= next_kill) {
+                KillChild(pid, pidfd);
+                next_kill = now + 100'000'000ULL;
+            }
+            uint64_t ms = (end - now + 999'999ULL) / 1'000'000ULL;
+            if (ms > 10) ms = 10;
+            if (ms < 1) ms = 1;
+            if (pidfd >= 0) {
+                pollfd p{pidfd, POLLIN, 0};
+                (void)::poll(&p, 1, static_cast<int>(ms));
+            } else {
+                (void)::poll(nullptr, 0, 1);
+            }
+        }
+    }
+
+    // Slot states in unconfirmed_pid_: 0 free, > 0 a tracked pid, kSlotBusy being edited.
+    static constexpr pid_t kSlotBusy = -2;
+    static inline std::atomic<pid_t> unconfirmed_pid_[kMaxUnconfirmedChildren]{};
+    static inline int unconfirmed_fd_[kMaxUnconfirmedChildren]{};
+
+    // Takes over the pidfd (the guard no longer closes it). If every slot is
+    // taken the pid is untracked (callers refuse new runs before that happens).
+    static void TrackUnconfirmed(pid_t pid, FdGuard& pidfd) noexcept {
+        for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
+            pid_t expected = 0;
+            if (unconfirmed_pid_[i].compare_exchange_strong(expected, kSlotBusy, std::memory_order_acq_rel)) {
+                unconfirmed_fd_[i] = pidfd.fd;
+                pidfd.fd = -1;
+                unconfirmed_pid_[i].store(pid, std::memory_order_release);
+                return;
+            }
+        }
+    }
+
+public:
+    /** Children that were sent SIGKILL and not yet confirmed reaped. */
+    [[nodiscard]] static std::size_t UnconfirmedCount() noexcept {
+        std::size_t n = 0;
+        for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
+            if (unconfirmed_pid_[i].load(std::memory_order_acquire) != 0) ++n;
+        }
+        return n;
+    }
+
+    /**
+     * Re-sends SIGKILL to each tracked child that is still there and reaps the
+     * ones that have gone. Returns how many remain unconfirmed. Called at the
+     * start of every run; a monitor may call it too.
+     */
+    static std::size_t ReapUnconfirmed() noexcept {
+        for (std::size_t i = 0; i < kMaxUnconfirmedChildren; ++i) {
+            pid_t p = unconfirmed_pid_[i].load(std::memory_order_acquire);
+            if (p <= 0) continue;
+            if (!unconfirmed_pid_[i].compare_exchange_strong(p, kSlotBusy, std::memory_order_acq_rel)) continue;
+            int status = 0;
+            const pid_t w = ::waitpid(p, &status, WNOHANG);
+            if (w == p || (w < 0 && errno == ECHILD)) {
+                if (unconfirmed_fd_[i] >= 0) ::close(unconfirmed_fd_[i]);
+                unconfirmed_fd_[i] = -1;
+                unconfirmed_pid_[i].store(0, std::memory_order_release);
+            } else {
+                KillChild(p, unconfirmed_fd_[i]);
+                unconfirmed_pid_[i].store(p, std::memory_order_release);
+            }
+        }
+        return UnconfirmedCount();
+    }
+
+#ifdef STACK_SUPERVISED_TESTING
+    /**
+     * Test seam, compiled only with -DSTACK_SUPERVISED_TESTING (never in a
+     * shipped build): a function that replaces the kill. Return true to say
+     * "handled" and suppress the real SIGKILL, which simulates a kill that
+     * does not take effect. Pass nullptr to restore the real kill.
+     */
+    using KillHook = bool (*)(pid_t pid, int pidfd);
+    static void SetKillHookForTesting(KillHook hook) noexcept { kill_hook_ = hook; }
+#endif
 
 private:
+
     // ------------------------------------------------------------------
     // Result frame: magic "STKR", u32 length, bytes, u64 FNV-1a of bytes.
     // ------------------------------------------------------------------
@@ -473,7 +793,8 @@ private:
         kExitSeccomp = 124,
         kExitChildMemory = 125,     // output buffer or payload stack could not be mapped
         kExitResultOverflow = 126,  // payload claimed more than kMaxOutputBytes
-        kExitResultWrite = 127
+        kExitResultWrite = 127,
+        kExitExec = 128             // worker path: execveat of the opened image failed
     };
 
     [[nodiscard]] static uint64_t MonotonicNs() noexcept {
@@ -496,7 +817,13 @@ private:
     // process group, which the child leads) cannot have been reused. With a
     // pidfd the child itself is signaled through the descriptor, which names
     // that process and no other.
+#ifdef STACK_SUPERVISED_TESTING
+    static inline KillHook kill_hook_ = nullptr;
+#endif
     static void KillChild(pid_t pid, int pidfd) noexcept {
+#ifdef STACK_SUPERVISED_TESTING
+        if (kill_hook_ != nullptr && kill_hook_(pid, pidfd)) return;
+#endif
         (void)::kill(-pid, SIGKILL);
         if (pidfd >= 0 && PidfdSendKill(pidfd)) return;
         (void)::kill(pid, SIGKILL);
@@ -572,11 +899,12 @@ private:
         }
         if (!WIFEXITED(status)) { report.outcome = Outcome::SupervisorError; return; }
         const int code = WEXITSTATUS(status);
-        if (code >= kExitParentGone && code <= kExitResultWrite) { report.outcome = Outcome::SpawnFailed; return; }
+        if (code >= kExitParentGone && code <= kExitExec) { report.outcome = Outcome::SpawnFailed; return; }
         if (code != 0) { report.outcome = Outcome::ExitedNonZero; return; }
         if (parser.state == FrameParser::State::Done) {
             report.outcome = Outcome::Completed;
             report.result_length = parser.body_len;
+            report.result_self_reported = true;
             return;
         }
         report.outcome = Outcome::ResultMissing;
@@ -632,6 +960,97 @@ private:
         ::_exit(0);
     }
 
+    // ------------------------------------------------------------------
+    // Worker path.
+    // ------------------------------------------------------------------
+
+    // Opens the worker image and checks the OPEN file, not the path: a
+    // regular file, executable, not world-writable, owned by root or by this
+    // process's effective user. Returns 0 or an errno. The descriptor is
+    // close-on-exec, which is also why a script (shebang) worker cannot be
+    // executed: the interpreter would not find the descriptor. Workers are
+    // ELF programs.
+    [[nodiscard]] static int OpenWorkerImage(const char* path, int& fd_out) noexcept {
+        fd_out = -1;
+        if (path == nullptr || path[0] != '/') return EINVAL;
+        std::size_t n = 0;
+        while (path[n] != '\0') {
+            if (++n > kMaxWorkerPathBytes) return ENAMETOOLONG;
+        }
+        const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return errno;
+        struct stat st{};
+        if (::fstat(fd, &st) != 0) {
+            const int e = errno;
+            ::close(fd);
+            return e;
+        }
+        int err = 0;
+        if (!S_ISREG(st.st_mode)) err = EACCES;
+        else if ((st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0) err = EACCES;
+        else if ((st.st_mode & S_IWOTH) != 0) err = EACCES;
+        else if (st.st_uid != 0 && st.st_uid != ::geteuid()) err = EACCES;
+        if (err != 0) {
+            ::close(fd);
+            return err;
+        }
+        fd_out = fd;
+        return 0;
+    }
+
+    static void FormatDecimal(uint32_t v, char (&out)[16]) noexcept {
+        char tmp[12];
+        std::size_t n = 0;
+        do {
+            tmp[n++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        } while (v != 0);
+        std::size_t i = 0;
+        while (n > 0) out[i++] = tmp[--n];
+        out[i] = '\0';
+    }
+
+    // Child side of RunWorker. Raw syscalls only; every exit is _exit.
+    [[noreturn]] static void WorkerChildMain(const Limits& limits, int image_fd, char* const argv[], char* const envp[],
+                                             int result_fd, pid_t parent_pid) noexcept {
+        (void)::setpgid(0, 0);
+        (void)::prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+        if (::getppid() != parent_pid) ::_exit(kExitParentGone);
+        if (!ResetSignals()) ::_exit(kExitSignalReset);
+        if (!WorkerDescriptors(result_fd, image_fd)) ::_exit(kExitDescriptors);
+        if (!ApplyRlimits(limits, image_fd)) ::_exit(kExitRlimits);
+#ifdef __NR_execveat
+        (void)::syscall(__NR_execveat, image_fd, "", argv, envp, AT_EMPTY_PATH);
+#else
+        (void)argv;
+        (void)envp;
+#endif
+        ::_exit(kExitExec);
+    }
+
+    // Leaves exactly: 0, 1, 2 on /dev/null, the result pipe on kWorkerResultFd
+    // (inheritable), and the image descriptor (close-on-exec, moved to 4 or
+    // above). Everything else is closed. image_fd is updated if it moved.
+    [[nodiscard]] static bool WorkerDescriptors(int result_fd, int& image_fd) noexcept {
+        if (image_fd <= kWorkerResultFd) {
+            const int moved = ::fcntl(image_fd, F_DUPFD_CLOEXEC, kWorkerResultFd + 1);
+            if (moved < 0) return false;
+            ::close(image_fd);
+            image_fd = moved;
+        }
+        if (result_fd != kWorkerResultFd && ::dup2(result_fd, kWorkerResultFd) != kWorkerResultFd) return false;
+        if (::fcntl(kWorkerResultFd, F_SETFD, 0) != 0) return false;
+        const int devnull = ::open("/dev/null", O_RDWR);  // not close-on-exec: dup2 onto itself would keep that
+        if (devnull < 0) return false;
+        for (int fd = 0; fd <= 2; ++fd) {
+            if (devnull != fd && ::dup2(devnull, fd) != fd) return false;
+        }
+        if (devnull > 2 && devnull != image_fd) ::close(devnull);
+        CloseRange(kWorkerResultFd + 1, image_fd - 1);
+        CloseRange(image_fd + 1, ~0);
+        return true;
+    }
+
     static constexpr std::size_t kPayloadStackBytes = 8u << 20;
     static constexpr std::size_t kGuardBytes = 1u << 16;
 
@@ -685,7 +1104,8 @@ private:
     }
 
     static void CloseRange(int first, int last) noexcept {
-        if (first > last) return;
+        // last == ~0 means "to the end": compare it as unsigned, not as -1 (R2-K-19).
+        if (last != ~0 && first > last) return;
 #ifdef __NR_close_range
         if (::syscall(__NR_close_range, static_cast<unsigned>(first), static_cast<unsigned>(last), 0) == 0) return;
 #endif

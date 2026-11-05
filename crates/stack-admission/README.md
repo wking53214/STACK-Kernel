@@ -29,7 +29,7 @@ payload = { "subject":    { CNS content, integers only },
 | 3 binding | the kernel recomputes the subject digest (`cns-digest/1`, restricted v1) and the decision root; every verdict must carry that digest and name one subject; the roster must hold exactly one bound PASS per seat the KERNEL POLICY requires, at the position (`seat_positions`: alpha or omega) the policy states for it, with no two seats sharing a gate name | `Refused { stage: Binding }`, `proposed` then `rejected` recorded |
 | 4 authorization | the operation must be in the kernel's map; then `Authority::authorize` with an `ActionRequest` built from the kernel's own recomputed values, audience and clock, with the durable use store | `Refused { stage: Authorization }`, recorded |
 | 5 write-ahead | `authorized` then `attempted` (operation, resource, SHA-256 of the argument bytes) made durable before the executor is called | no attempt record, no execution: `Refused { stage: Attempt }` |
-| 6 execution | the `Executor` seam; the real implementation is the supervised C++ executor behind `stack-ffi`, under the kernel's limits | the outcome as the executor observed it |
+| 6 execution | the `Executor` seam; the real implementation is the supervised C++ worker program behind `stack-ffi` (fork then exec of an absolute path from `WorkerConfig`, after the host's capability and rate-limit checks), under the kernel's limits | the outcome as the executor observed it |
 | 7 terminal | the terminal event from the observed outcome; `Completed` only for a `Completed` report; a report that contradicts itself is `Unknown` | `AdmissionResult::TerminalLost`, attempt left open |
 | 8 result | `AdmissionResult::Success` only for a `Completed` whose terminal record is durable | every other ending is `Unsuccessful`, `TerminalLost` or `Refused` |
 
@@ -57,7 +57,7 @@ itself said `allowed: true` for that decision).
 |---|---|---|
 | Stages 1 to 8 | implemented | `tests/admission.rs`, `tests/execution.rs`, `tests/adversarial.rs` |
 | Kernel policy (seats, operation map, limits, provenance) | implemented, validated | `config::tests` |
-| Executor seam over the supervised C++ executor | implemented | `tests/smoke.rs`; the only file naming `stack-ffi` is `src/executor.rs` |
+| Executor seam over the supervised C++ worker program, fail-closed when the worker path is unset or unusable, governed before spawn | implemented | `tests/smoke.rs`, `tests/worker_governance.rs`; the only file naming `stack-ffi` is `src/executor.rs` |
 | Independent verification of the log | implemented in tests, with fresh trusted keys and the auditor's own expectations | `tests/execution.rs` |
 | Fixtures from the real CNS SuperGate (8 cases) | committed, regenerates byte for byte | `tests/fixtures/gen_cns_governed_decisions.py` |
 | Capability issuer | EXPERIMENTAL: exists only as a test helper with fixture seeds | `tests/common/mod.rs` (the only signing path in the crate) |
@@ -124,9 +124,10 @@ numbers, not a guarantee.
   kernel on the same files does not start. Two hosts cannot agree on what
   was accepted, and nothing here simulates that. BLOCKED.
 * **Results are self-reported.** `Completed` means the worker exited 0
-  within the deadline with a well-formed frame. The worker is a fork of
-  the kernel process and can write a frame itself (`cpp/CONTAINMENT.md`,
-  R2-K-08). The receipt records the digest and the verifier lists
+  within the deadline with a well-formed frame. The worker is a separate
+  program that writes its frame itself and can write any bytes it likes
+  (`cpp/CONTAINMENT.md`, R2-K-08); since decision A it holds none of the kernel
+  process's memory, but the bytes are still its own claim. The receipt records the digest and the verifier lists
   `result_is_self_reported` on every completion.
 * **Symmetric Trident HMAC.** A handoff proves possession of a shared
   key, not an identity, and any receiver holding the key could have sealed
@@ -165,9 +166,11 @@ numbers, not a guarantee.
   root.** The false claimed root is a binding finding in the rejection
   reason, not written into the proposal, so a refusal does not make the
   log read as tampered.
-* **Lock descriptors are inherited by workers.** A supervised worker is a
-  fork of the whole process; it holds a copy of every advisory-lock
-  descriptor until its setup closes them. A restart that races a worker
+* **Lock descriptors are inherited by workers.** A supervised worker is
+  forked from the whole process before it execs; between the fork and its
+  descriptor clean-up it holds a copy of every advisory-lock descriptor (after
+  the exec it holds none, tested: only fds 0 to 2 and the result pipe). The
+  window is unchanged by decision A and not claimed fixed. A restart that races a worker
   still setting up can find a store locked and fails closed (R2-X-01).
 * **Clock and keys are trusted.** One clock serves the Trident, the
   authority and the recorder. The Trident's external high-water mark

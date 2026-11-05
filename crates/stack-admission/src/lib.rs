@@ -60,6 +60,6 @@ pub use clock::KernelClock;
 pub use config::{ConfigError, KernelPolicy};
 pub use payload::{DecisionClaim, PayloadError, Request};
 pub use executor::{
-    ExecutionLimits, Executor, ExecutorError, LimitsError, RunOutcome, RunReport, SupervisedExecutor, WorkerKind,
+    ExecutionLimits, Executor, ExecutorError, LimitsError, RunOutcome, RunReport, SupervisedExecutor, WorkerConfig, WorkerKind,
     MAX_DEADLINE_NS, MAX_OUTPUT_BYTES, RETURN_BYTES_RESULT,
 };
