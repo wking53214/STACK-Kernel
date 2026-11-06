@@ -498,6 +498,7 @@ pub struct Admission {
     cancellable: Option<Box<dyn CancellableExecutor>>,
     registry: Arc<InFlightRegistry>,
     clock: Arc<dyn Clock>,
+    recovered: Vec<ExecutionId>,
 }
 
 /// Text a receipt record can carry: at most [`MAX_TEXT_BYTES`], cut at a
@@ -558,6 +559,10 @@ impl Admission {
             policy.provenance.clone(),
             Box::new(KernelClock::new(Arc::clone(&clock))),
         )?;
+        // Before the kernel can take any work, close in the log every execution
+        // an earlier run left open. If this fails the kernel does not start:
+        // new work would be written after records nobody has accounted for.
+        let recovered = recorder.recover_open_executions()?;
         let registry = Arc::new(InFlightRegistry::default());
         let hook_registry = Arc::clone(&registry);
         authority.set_change_hook(move |a| {
@@ -574,7 +579,15 @@ impl Admission {
             cancellable: None,
             registry,
             clock,
+            recovered,
         })
+    }
+
+    /// The executions an earlier run left open, which this kernel closed in
+    /// the log with a `Recovered` record when it started. Empty after a clean
+    /// shutdown. For an operator to report; it changes nothing.
+    pub fn recovered_executions(&self) -> &[ExecutionId] {
+        &self.recovered
     }
 
     /// Runs workers through `executor` instead of the one in [`Parts`], so

@@ -118,6 +118,10 @@ additionally reads the receipt FILE from inside the executor call.
 | execution timeout is `TimedOut`, not success | `an_execution_timeout_is_a_timed_out_receipt_and_not_success` |
 | non-returning payload terminated within a measured bound | `a_non_returning_payload_is_terminated_within_a_measured_bound` (prints the measurement) |
 | kernel killed during execution | `a_kernel_killed_during_execution_leaves_an_incomplete_unknown_execution` |
+| restart closes the execution a crash left open, before new work | `a_restarted_kernel_closes_the_open_execution_before_it_takes_any_work` (`tests/recovery.rs`), the second half of the kernel-killed test above |
+| recovery does not repeat; a clean shutdown recovers nothing | `recovery_does_not_repeat_on_the_next_restart`, `a_kernel_that_shut_down_cleanly_recovers_nothing_and_writes_nothing` |
+| an execution that never attempted is closed with no unknown outcome | `an_authorized_but_never_attempted_execution_is_closed_without_an_unknown_outcome` |
+| a kernel that cannot write its recovery records does not start | `a_kernel_that_cannot_write_its_recovery_records_does_not_start` |
 | terminal write failure | `a_terminal_that_cannot_be_recorded_is_a_typed_non_success_and_leaves_the_attempt_open` |
 | attempted write failure means no execution | `an_attempt_that_cannot_be_recorded_does_not_run` |
 | ordering authorization < attempt < execution | `authorization_precedes_the_attempt_and_the_attempt_precedes_execution` |
@@ -172,6 +176,20 @@ numbers, not a guarantee.
   refusal (including a replay) or an unparseable payload is returned to
   the caller but not written to the receipt log: there is no subject to
   record. An auditor reading the log alone does not see them (R2-X-03).
+* **A restart closes crashed executions without knowing how they ended.**
+  `Admission::new` closes, in the receipt log, every execution an earlier run left
+  open, with a `Recovered` record naming the last stage found, before the kernel
+  takes any work (`Admission::recovered_executions` lists them). It records no
+  outcome. For an execution last seen `attempted` the payload may have run to
+  completion, been cut off, or never started: the verifier reports the outcome
+  `unknown` with the limitation `execution_recovered_outcome_unknown`, and the
+  log's state is `VERIFIED_WITH_LIMITATIONS`, not `INCOMPLETE`, so a consumer
+  must read `execution.outcome`, not the state alone. If the log cannot list its
+  records or a recovery record cannot be written, the kernel does not start
+  (`BuildError::Recorder`). The kernel relies on the receipt log's exclusive lock
+  to know no other process is still running those executions. It does not
+  recover work or retry it, and the recovered execution's one-time capability
+  stays spent. Receipt format version 3 (`crates/stack-receipt/RECEIPT.md`).
 * **A one-time capability is consumed at authorization.** If the
   `authorized` or `attempted` record then cannot be written, nothing runs
   and the capability stays spent.

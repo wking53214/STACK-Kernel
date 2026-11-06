@@ -318,6 +318,9 @@ impl ReceiptLog for FailingFileLog {
     fn is_durable(&self) -> bool {
         self.inner.is_durable()
     }
+    fn acknowledged_records(&self) -> Result<Vec<stack_receipt::SignedRecord>, stack_receipt::LogError> {
+        self.inner.acknowledged_records()
+    }
 }
 
 // ---------------------------------------------------------------------------
