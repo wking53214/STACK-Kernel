@@ -36,7 +36,7 @@ use stack_authority::{Digest32, UseEvidence};
 use crate::cns::{subject_digest, CnsValue};
 use crate::decision::{check_authorized_decision, DecisionFinding, RosterPolicy};
 use crate::encode::genesis_hash;
-use crate::log::{parse_log, LogError};
+use crate::log::{parse_log, Head, LogError};
 use crate::record::{Event, ExecutionId, Observed, Outcome, OutcomeKind, Stage};
 use crate::sign::{ResolveError, SignedRecord, TrustedReceiptKeys};
 
@@ -116,6 +116,8 @@ pub enum Check {
     NativeDigestMatchesExpected,
     /// A durable use record's position and hashes are well formed.
     UseEvidenceWellFormed,
+    /// The log still holds the record the auditor anchored.
+    AnchorHeld,
 }
 
 impl Check {
@@ -141,6 +143,7 @@ impl Check {
             Self::WorkerLimitsMatchExpected => "worker_limits_match_expected",
             Self::NativeDigestMatchesExpected => "native_digest_matches_expected",
             Self::UseEvidenceWellFormed => "use_evidence_well_formed",
+            Self::AnchorHeld => "anchor_held",
         }
     }
 }
@@ -356,6 +359,12 @@ pub enum FindingCode {
     TornTailDiscarded,
     /// A complete unacknowledged frame was adopted (informational).
     TrailingFrameAdopted,
+    /// The auditor's anchor names a sequence the log does not reach: the log
+    /// was cut short or rolled back.
+    LogDoesNotReachAnchor,
+    /// The record at the anchored sequence is not the anchored record: the
+    /// history was replaced.
+    AnchorMismatch,
 }
 
 impl FindingCode {
@@ -426,6 +435,8 @@ impl FindingCode {
             Self::UseEvidenceMalformed => "use_evidence_malformed",
             Self::TornTailDiscarded => "torn_tail_discarded",
             Self::TrailingFrameAdopted => "trailing_frame_adopted",
+            Self::LogDoesNotReachAnchor => "log_does_not_reach_anchor",
+            Self::AnchorMismatch => "anchor_mismatch",
         }
     }
 }
@@ -474,6 +485,14 @@ pub struct Expectations<'a> {
     /// Sentinel ledger row hash it holds). Compared with the record's
     /// `native_digest`, never with the CNS subject digest.
     pub native_digest: Option<&'a crate::record::NativeDigest>,
+    /// A [`Head`] the auditor saved earlier somewhere the log's writer cannot
+    /// reach (for example the `head()` of the log, written down off the
+    /// machine). The log must still hold the record at that sequence with
+    /// that hash. This catches a log cut short or rolled back below the
+    /// anchor, and a log whose history was replaced. It cannot catch a
+    /// rollback to a point at or after the anchor, so the limitation
+    /// [`Limitation::LogRollbackNotDetectableWithoutAnchor`] is still listed.
+    pub anchor: Option<&'a Head>,
 }
 
 /// What the execution's records say happened.
@@ -544,8 +563,14 @@ fn verify_chain(records: &[SignedRecord], trusted: &TrustedReceiptKeys, exp: &Ex
     scope.check(Check::Signatures);
     scope.limit(Limitation::LogRollbackNotDetectableWithoutAnchor);
     scope.limit(Limitation::TimestampsAreWriterClaims);
+    if exp.anchor.is_some() {
+        scope.check(Check::AnchorHeld);
+    }
     if records.is_empty() {
         findings.push(Finding::new(FindingCode::EmptyLog, None, "no records"));
+        if let Some(anchor) = exp.anchor {
+            check_anchor(records, anchor, &mut findings);
+        }
         return (findings, scope);
     }
     let kernel_id = exp
@@ -597,7 +622,31 @@ fn verify_chain(records: &[SignedRecord], trusted: &TrustedReceiptKeys, exp: &Ex
             }
         }
     }
+    if let Some(anchor) = exp.anchor {
+        check_anchor(records, anchor, &mut findings);
+    }
     (findings, scope)
+}
+
+/// The anchor check: the log must still hold the anchored record. An anchor
+/// at sequence 0 is the head of an empty log, which every log extends.
+fn check_anchor(records: &[SignedRecord], anchor: &Head, findings: &mut Vec<Finding>) {
+    if anchor.sequence == 0 {
+        return;
+    }
+    match records.iter().find(|s| s.record().sequence == anchor.sequence) {
+        None => findings.push(Finding::new(
+            FindingCode::LogDoesNotReachAnchor,
+            Some(anchor.sequence),
+            "the log has no record at the anchored sequence; it was cut short or rolled back",
+        )),
+        Some(s) if *s.hash() != anchor.hash => findings.push(Finding::new(
+            FindingCode::AnchorMismatch,
+            Some(anchor.sequence),
+            "the record at the anchored sequence is not the anchored record; the history was replaced",
+        )),
+        Some(_) => {}
+    }
 }
 
 /// The order of stages for "furthest stage reached".
