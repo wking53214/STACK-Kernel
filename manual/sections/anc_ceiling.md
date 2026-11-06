@@ -305,6 +305,8 @@ The 10 unit tests, the leak guard and both telemetry tests passed every time the
 
 ### What this does not guarantee
 
+- **Current record.** The residual measured in November 2026 is about 2 to 3 ns between classes, not the 22 to 24 ns gap and 1.9 to 4.7 µs flag threshold quoted below, which come from an earlier run and do not match. The top-level README section "Accepted timing residual (ANC strategy 1)" is the current record, including attacker-cost estimates and what is not claimed.
+
 - **It is not a proof.** A pass means no detectable leak at about 100,000 per class on one virtual machine. The smallest mean shift these runs could flag was 1.9 to 4.7 µs, about 80 to 210 times the 22 to 24 ns gap.
 - **The stronger evidence is the design.** The release time is computed from `start` alone, and Spin and Hybrid class medians matched within 4 ns. Those two facts, not the t-test alone, carry the claim.
 - **Sleep mode has an unexplained gap.** Its class medians differed by 154 to 274 ns, with class A later in all 3 runs. No test flagged it, and 3 runs cannot separate it from chance, so measure Sleep at a larger n before relying on it.
