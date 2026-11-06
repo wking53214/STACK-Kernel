@@ -161,6 +161,12 @@ These use the standard detection rule (|t| of at least 4.5) and assume independe
 - **Four connections, loopback:** about 70,000 requests per class (about 140,000 total), roughly 2 seconds at about 67,000 requests per second. The per-request noise drops under concurrency, probably because server threads stop sleeping between requests.
 - **A network adds noise.** Real networks are noisier than loopback, which raises these numbers. We have not measured a real network, so the attack cost on one is unknown.
 
+**Measured again, November 6, 2026 (loopback, client and server in one process, 2-vCPU machine).** These replace the estimates above where they conflict.
+
+- **One connection:** median round trip about 83 µs, middle-50% noise about 1.1 to 1.4 µs per request. Seven runs (100,000 to 600,000 requests each) gave gap estimates (class A minus B) of -22.6, -19.2, +5.7, -15.3, +11.3, +4.2 and -21.5 ns. Their spread (about 14 ns) is far larger than the sampling error within a run (about 3 ns). Run-to-run drift dominates, so a 2.8 ns residual cannot be read from one run, and the average across runs is about -8 ns with no reliable sign.
+- **Four connections:** on this machine the noise rose to about 23 µs per request, because four client threads and four server threads share two vCPUs. Overruns appeared (about 24 per 600,000). The 70,000 figure above was not reproduced here, and it is not comparable, because it came from a 4-vCPU machine whose noise we did not measure.
+- **What this means:** on this machine, a network attacker cannot reliably see the residual. The limiting factor is run-to-run drift, not per-request noise. This is one machine, so the 4-vCPU figures are not overturned, only left unverified.
+
 Loopback is the most favorable channel for an attacker. If a real deployment is slower to attack than these figures, that is a property of the network, not of the padding.
 
 ### What we tried and why it is not a fix
@@ -178,7 +184,7 @@ Loopback is the most favorable channel for an attacker. If a real deployment is 
 ### What is not claimed
 
 - That the two paths take the same time. They do not: by roughly 0.3 to 3 ns across our runs, with the sign not stable in every setup.
-- That the residual is zero, or that the test `calibrated_spin_padding_hides_the_early_exit` proves it. That test checks for a measurable difference under its own rules. It is non-blocking in CI, and it has failed on recent CI runs. Its cropped checks flag the residual only intermittently: without calibration, 13 of 30 in-process runs had some crop above the line of 10; with calibration, the lower-half check stayed within 3.2 in all 10 runs measured. The CI failure values (14 to 85) were not reproduced locally.
+- That the residual is zero, or that the test `calibrated_spin_padding_hides_the_early_exit` proves it. That test checks for a measurable difference under its own rules. It is non-blocking in CI, and it has failed on recent CI runs. Its cropped checks flag the residual only intermittently: without calibration, 13 of 30 in-process runs had some crop above the line of 10; with calibration, the lower-half check stayed within 3.2 in all 10 runs measured. In CI itself (November 6, 2026), the cropped check on the leaky validator was above 10 in 7 of 9 runs (5 earlier logs, 2 of 3 diagnostic reruns on the same commit). The no-op operation, measured in the same runs with the same calibration, was never above 2.1. The sign of the leaky crops changed from run to run, which fits run-to-run drift rather than a fixed class offset. Locally, with the calibration step, the test passed 60 of 60 runs, so CI's environment is the one that exposes it.
 - Attackers on the same physical core, through shared cache, or through a sibling hardware thread (SMT). These are outside the threat model.
 - Any real network, any production load pattern, or any second machine.
 - That the sign of the residual is fixed across all setups. In the baseline runs it was negative in every run we kept, except one subagent session. With the barrier added, it was mixed.
