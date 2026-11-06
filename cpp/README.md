@@ -37,38 +37,39 @@ stricter filter in the child at runtime.
 ## Tests
 
 All of these are registered in `CMakeLists.txt` and run under `ctest`
-(eleven entries). The C++ job in `.github/workflows/ci.yml` runs them.
+(26 entries in this build). The C++ job in `.github/workflows/ci.yml` runs 25 of them; `STACKWorkerReapPidReuse` is root-only and is left out.
 
 - `tests/tests_all_components.cpp` (Catch2, `stack_tests`): governor, timer,
   arena, audit, debt refund, the real BPF jump-offset check in a forked
   child, capability race cases, per-thread sealing, the D-01 hard-timeout
   expiry on a sealed thread, zero-timeout refusal and fail-closed arming.
-  One pre-existing case is scheduling dependent; see `CONTAINMENT.md`.
+  Its "Capability Mutation Race Fix" Test 2 was scheduling dependent until RACE-02 step 5b made it deterministic (two `layer2_redteam` tests were fixed the same way); see `CONTAINMENT.md`.
 - `tests/worker_exec_tests.cpp`, `tests/worker_reap_tests.cpp`, `tests/ffi_supervised_tests.cpp`
   (Catch2; ctest `STACKWorkerExec`, `STACKWorkerReap`, `STACKFfiSupervised`): the clean worker path,
   bounded reap and governance before spawn; see `CONTAINMENT.md`, "The clean worker path".
 - `tests/supervised_exec_tests.cpp` (Catch2, `stack_supervised_exec_tests`):
-  the supervised executor, 15 cases (plus the waitpid-fallback program); every hostile payload runs in a child.
+  the supervised executor, 15 cases (the waitpid fallback has its own program, `tests/supervised_fallback_tests.cpp`); every hostile payload runs in a child.
 - `tests/tests_production_hardened.cpp` (Catch2): five checks in one case;
   its banner covers that case only.
 - Red-team programs (plain `main`, exit non-zero on failure):
   `layer2_redteam`, `layer4_redteam`, `layer5_redteam`, `layer6_redteam`,
   `layer6_wraparound_redteam`, `layer8_redteam`,
-  `p3_audit_trail_signing_redteam`, `p3_per_domain_rate_limiting_redteam`.
+  `p3_audit_trail_signing_redteam`, `p3_per_domain_rate_limiting_redteam`,
+  `ffi_init_redteam` (built with `STACK_FFI_TESTING=1`, registered as `STACKRedteam_ffi_init`).
 
 ## Build
 
-Requires a C++23 compiler (g++ 13 or later), CMake 3.22 or later, Catch2 3
+Requires a C++23 compiler (tested with g++ 13.3; older versions are untested), CMake 3.22 or later, Catch2 3
 and Linux with seccomp and POSIX timers. The project flags are
 `-fno-exceptions -fno-rtti -Wall -Wextra -Werror -mavx2`.
 
 ```bash
 cmake -S cpp -B build/cpp
 cmake --build build/cpp -j"$(nproc)"
-ctest --test-dir build/cpp --output-on-failure
+ctest --test-dir build/cpp --output-on-failure -LE needs-root
 ```
 
-Only x86_64 has been built and run. The aarch64 tables compile-check
+The `-LE needs-root` option leaves out the root-only entry (`STACKWorkerReapPidReuse`), which fails at once without root by design. Only x86_64 has been built and run, and CI runs only x86_64. The aarch64 tables compile-check
 against `__NR_*` by `static_assert`, but no aarch64 build has been done.
 
 ## Fixes recorded in the sources
@@ -76,10 +77,7 @@ against `__NR_*` by `static_assert`, but no aarch64 build has been done.
 Each of these is described at the place it applies, with the test that
 pins it:
 
-- RT-01 to RT-10 (governor refill wrap, rollback, counter wrap, fences,
-  saturating debt, `sival_ptr` routing, signal-mask immutability, timer
-  reuse, flag-only handler, idempotent timer init) in
-  `stack_kinetic_governor.hpp` and `posix_deadline_timer_hardened.hpp`.
+- Fix comments at the code they touch, for example the "LAYER 6 P1 FIX" on the arena's 64-bit generation counter.
 - D-01, D-03 (`rt_sigreturn` on the allowlist; zero hard timeout refused;
   arm failure fails closed) in `stack_host_binding.hpp`.
 - D-02 (payload cannot be stopped in process) by `stack_supervised_exec.hpp`.
@@ -89,7 +87,4 @@ pins it:
 `crates/stack-ffi` wraps `GovernedMinotaurHost` (in-process path, with
 distinct failure codes) and `SupervisedExecutor` (`supervised_run`, over a
 fixed set of built-in payloads). Its host instance is
-`GovernedMinotaurHost<64, 100, 1000, 100, 16>`, whose `Reserved` (100)
-exceeds `MaxCapacity` (64); every Standard-priority transaction through it
-is rate limited. This is recorded in the crate's tests and not changed in
-Phase 6.
+`GovernedMinotaurHost<1000, 100, 100, 2100000, 16>`: capacity 1000 tokens, 100 reserved, 100 largest request, 2,100,000 ticks per token, 16 domains. The reserved floor plus the largest request fits inside the capacity (see the comment in `crates/stack-ffi/src/ffi_wrapper.cpp`). An earlier instance with capacity 64 and reserved 100 rate-limited every Standard-priority transaction; that was fixed as R2-K-01 and is covered by the `[I-01]` cases in `tests/tests_all_components.cpp`.
