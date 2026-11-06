@@ -75,7 +75,7 @@ computed. `cns_digest::subject_digest` called directly accepts depth
 `crates/stack-trident/tests/cns_digest.rs`. A deployment that configures a
 different `max_depth` moves this boundary; the vectors cover the default only.
 
-Envelope size (65,536 canonical JSON bytes) and value count (16,384) are
+Envelope size (65,536 canonical JSON bytes) and node count (`max_nodes`, 16,384) are
 transport caps of a deployment, not part of the digest domain; every
 `restricted_v1` vector and case seals and verifies within them at the
 defaults (tested).
@@ -95,7 +95,7 @@ object with `{`, so the two hash different byte strings for every content.
 | file in CNS | vendored here | contents |
 |---|---|---|
 | `contracts/digest-vectors.json` | `crates/stack-sentinel/tests/fixtures/cns-digest-vectors.json` | 38 named vectors (27 `restricted_v1`), 7 refusals, the domain |
-| `contracts/digest-differential.json` | `crates/stack-sentinel/tests/fixtures/digest-differential.json` | 400 cases from `random.Random(20261104)` (283 `restricted_v1`) |
+| `contracts/digest-differential.json` | `crates/stack-sentinel/tests/fixtures/digest-differential.json` | 400 cases from `random.Random(20261104)` in `cns_composition/digest_differential.py` (283 `restricted_v1`). The file's own note says to regenerate with `digest_vectors --write`; the seed and the generator are in `digest_differential.py` |
 
 Each vector and case carries `content`, `rendering`, `digest` and
 `restricted_v1`. The flag is computed by CNS's generator, never written by

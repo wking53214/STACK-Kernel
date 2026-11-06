@@ -4,6 +4,8 @@ Status: requirements only. No issuer exists in this repository. Every capability
 
 Evidence labels: INSPECTED means read in the source named. DECISION means the repository owner must decide it; nothing here decides it.
 
+Identifiers such as `D-19` refer to a project decision register that is not in this repository.
+
 ## 1. What the kernel already checks, so the issuer need not duplicate it
 
 `Authority::authorize` (`crates/stack-authority/src/authority.rs`) checks, in the order the code does:
@@ -44,12 +46,12 @@ MUST means the kernel's claims do not hold without it.
 - R-4 (MUST). The issuer derives `audience`, `subject_digest` and `decision_root` from sources it verified. It does not copy them from the requester.
 - R-5 (MUST). The issuer verifies the CNS decision (section 2) before signing. It applies the same required roster and seat positions as the kernel's `KernelPolicy`, from one shared source, so the two cannot drift.
 - R-6 (MUST). Operations and resources are the minimum needed. No wildcard resource scope such as `Prefix("/")` unless the owner has accepted that breadth in writing.
-- R-7 (SHOULD). `one_time` is true unless a documented reason says otherwise. The kernel's `require_one_time_capabilities` is set to true (`crates/stack-admission/README.md`, section 6).
+- R-7 (SHOULD). `one_time` is true unless a documented reason says otherwise. The kernel's `require_one_time_capabilities` defaults to true (`crates/stack-admission/src/config.rs`).
 - R-8 (SHOULD). Lifetimes are minutes, far under the 24-hour cap.
 - R-9 (MUST). `cap_id` and `nonce` are unique and drawn from a cryptographically secure source.
 
 **Arguments, worker kind and limits (known gaps)**
-- R-10 (MUST until the format changes). The capability does not bind `args`, the worker kind or the execution limits. The kernel's `refuse_arguments` is set to true, and the issuer issues capabilities only for operations that take no arguments. Binding an arguments digest means a new capability format version, which is a wire-format change and an owner decision.
+- R-10 (MUST until the format changes). The capability does not bind `args`, the worker kind or the execution limits. The kernel's `refuse_arguments` defaults to true (`config.rs`), and the issuer issues capabilities only for operations that take no arguments. Binding an arguments digest means a new capability format version, which is a wire-format change and an owner decision.
 - R-11 (MUST). The operation-to-worker map lives in the kernel's `KernelPolicy.operations`. The issuer and the kernel operator agree on what each operation name runs.
 
 **Revocation and rotation**
@@ -69,7 +71,7 @@ MUST means the kernel's claims do not hold without it.
 
 ## 4. What would show the issuer meets this
 
-Each is a test or a procedure someone can run:
+These are acceptance criteria for a future issuer. None is implemented or run today, because no issuer exists:
 
 - It refuses to sign when the CNS decision is forged, lacks a required seat, has a seat at the wrong position, or does not match the subject content.
 - It refuses requester-supplied digests that differ from the ones it derived.
@@ -83,7 +85,7 @@ Each is a test or a procedure someone can run:
 ## 5. Decisions for the owner (not made here)
 
 - Who operates the issuer, and on what key-custody system.
-- Whether the Python `cns_interop` Ed25519 signing code (register D-19) becomes the issuer, or a new service does. Whichever it is, CNS must not become an authorization or execution authority; the issuer must stay separate from CNS's contract role.
+- Whether the Python `cns_interop` Ed25519 signing code (register D-19, not in this repository) becomes the issuer, or a new service does. Whichever it is, CNS must not become an authorization or execution authority; the issuer must stay separate from CNS's contract role.
 - Whether to add a capability format version that binds an arguments digest (and optionally the worker kind and limits). This changes the wire format.
 - The revocation transport and its maximum staleness.
 - The maximum lifetime and whether any reusable capability is ever acceptable.

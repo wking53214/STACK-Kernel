@@ -1,6 +1,6 @@
 # CNS and STACK-Kernel: integration specification
 
-Matrix version: **1** (2026-11-05). Companion to
+Matrix version: **2** (2026-11-06). Companion to
 [`cns-digest-contract.md`](cns-digest-contract.md), which is the contract
 for the subject digest alone. This page is the contract for the whole
 chain from a CNS decision to a kernel receipt, as implemented and tested
@@ -8,11 +8,13 @@ by `crates/stack-admission` (`crates/stack-admission/README.md` is its
 status page). Where this page and a named test disagree, the test is right
 and this page is a defect.
 
+Identifiers such as `D-11`, `R2-E-06` and `R2-X-05` refer to a project decision register that is not in this repository.
+
 Pinned against:
 
 | What | Value |
 |---|---|
-| CNS package | 2.3.0, commit `4acd8f958a091900d43f553eba7fe83f7d33c4d6` (branch `ccr-2a7ddb2d-fccloq`); also reproduced on CNS main `221c5c91690e933fdccb4f42641b6336a441c0f4` (fixtures identical apart from the recorded commit) |
+| CNS package | version 2.3.0, commit `4acd8f958a091900d43f553eba7fe83f7d33c4d6` (on CNS `origin/main`). The version string reads 2.3.0 at this commit, but the `v2.3.0` tag points at `41592fb7b6735abe140f745353c09ba3eed8e7a2`, a different commit. Also reproduced at CNS `origin/main` head `0fdbb19deee1f7aa7c01503d2f95d5d1e2da84b7` (2026-11-05): the governed fixture regenerates identically except `cns_commit`, and the vendored digest vectors and differential corpus are byte-identical to that head |
 | Digest | `cns-digest/1`, restricted v1 (vectors schema `cns-digest-vectors/2`) |
 | Capability | `stack-capability/1` (`stack-authority`) |
 | Receipt | `stack-receipt/1`, log `stack-receipt/log/1` (`stack-receipt`) |
@@ -53,22 +55,26 @@ signed decision proves a decision was signed, not that anything executed.
  ═══════════════════════▼═══════════ STACK-Kernel: stack-admission ═══════
   1 Trident verify (Production, Assurance::Production, sender claim PASS)
         │ refuse: typed, not recorded (no subject yet)
-  2 strict payload parse (six fields, bounds, lowercase hex)
+  2 strict payload parse (six fields plus optional `native_digest`; bounds; lowercase hex)
         │ refuse: typed, not recorded
   3 kernel recomputes  subject_digest = cns-digest/1(subject)
-                       decision_root  = cns-digest/1({seats, verdicts})
+                       decision_root  = cns-digest/1({seats, verdicts})  (no context; section 4)
         records `proposed` (claimed seats and verdicts, kernel root)
         checks: root, every verdict bound to the digest, one identity,
                 non-empty roster, KERNEL-POLICY seats present and PASS
         │ refuse: `rejected` recorded
-  4 operation in kernel map?  then
+  4 operation in kernel map?  (else `rejected`)  then
         Authority::authorize(capability,
             ActionRequest{ kernel digest, kernel root, operation,
                            resource }, kernel audience, kernel clock,
             durable use store)  ──►  AuthorizedAction   (the only permission)
+        default policy: a capability that is not one-time is refused
+        (`rejected`) before `authorized` is written
         records `authorized`        │ refuse: `rejected` recorded
   5 records `attempted`  ◄─ durable BEFORE the worker starts
         │ cannot record: nothing runs
+  5b revocation re-check: a failed re-check closes the attempt as
+     `Interrupted`; nothing runs
   6 Executor seam ──► supervised C++ child (deadline, seccomp, rlimits)
   7 records terminal from the OBSERVED outcome
         │ cannot record: TerminalLost, attempt stays open
@@ -91,13 +97,19 @@ signed decision proves a decision was signed, not that anything executed.
   "capability": "<lowercase hex of the stack-capability/1 wire bytes>",
   "operation":  "<name>",
   "resource":   "/absolute/path",
-  "args":       <JSON value inside restricted v1> }
+  "args":       <JSON value inside restricted v1>,
+  "native_digest": <optional: { "label": "...", "digest": "<64 lowercase hex>" }> }
 ```
 
-Exactly these fields; an extra or missing field, a float, an integer
-beyond 2^53 - 1, a duplicate key, upper-case hex or an unknown outcome or
-position is refused (`payload::tests::every_shape_violation_is_refused`,
-`a_malformed_payload_is_refused_before_anything_is_recorded`).
+Exactly these six fields, plus the optional seventh, `native_digest`. An
+extra or missing field, upper-case hex, or an unknown outcome or position
+is refused by the payload parser before anything is recorded
+(`payload::tests::every_shape_violation_is_refused`,
+`a_malformed_payload_is_refused_before_anything_is_recorded`). A float, an
+integer beyond 2^53 - 1, or a duplicate key is refused earlier, by the
+Trident's canonical parser at step 1, which records nothing
+(`stack-trident/src/cns_digest.rs::floats_and_out_of_range_integers_are_refused`,
+`stack-trident/src/canonical.rs::duplicate_keys_refused`).
 The verdict key `digest` is CNS's `GateResult.subject_digest`.
 `GateResult.reason` is not in the payload, not in the root and not read.
 
@@ -108,6 +120,15 @@ The verdict key `digest` is CNS's `GateResult.subject_digest`.
 | subject digest | `hex(SHA-256(rendering(subject)))`, `cns-digest/1` | `stack_trident::cns_digest` (restricted domain) | the shared vectors (`stack-trident/tests/cns_digest.rs`); agreement with the receipt crate's independent implementation (`binding::tests::the_two_digest_implementations_agree_on_restricted_content`); the fixtures (`the_kernel_recomputes_what_cns_bound_exactly`) |
 | decision root | `subject_digest({"seats": [..], "verdicts": [{"gate","position","outcome","subject","digest"}, ..]})` | `stack_receipt::decision_root` | seven roots from the real SuperGate (`stack-receipt/tests/decision.rs`) and eight more here (`tests/fixtures/cns-governed-decisions.json`) |
 | verdict to seat | a verdict belongs to the seat whose text after the last `:` is its `gate` | `stack_receipt::seat_gate` | `retry_terminal_breach_unbound_and_empty_decisions_are_refused` |
+
+The root above is the one for a decision made without a context. CNS's
+`decide()` can take a `context` (for example the action, the tenant or the
+policy version). Its root then also covers `"context": <digest>`
+(`super_gate.py::_root`). The payload has no context field, and the
+kernel's root content has no context input, so such a root does not match
+the kernel's recomputation and the decision is refused as a root mismatch.
+This follows from reading the code. No kernel test exercises a
+context-bearing decision. Such decisions are not supported (section 8).
 
 Not recomputable by the kernel: `Decision.proof` (an HMAC under a key local
 to the CNS process) and the decision's `nonce`, `issued_at` and
@@ -129,6 +150,7 @@ refuses, it does not accept something different.
 | `subject_digest` rendering, `cns-digest/1` | `cns/gate.py::_canonical`, `subject_digest`; `contracts/digest-vectors.json` | `stack_trident::cns_digest`, `stack_receipt::cns` | the vendored vectors, `stack-trident/tests/cns_digest.rs`, `stack-sentinel/tests/cns_vectors.rs` | A change to any digest valid today needs a new `digest_version`, and the Trident, the receipt crate and the Sentinel change with it; the capability's `subject_digest` is then a different value and issuers must reissue. `cns-digest-contract.md` states the procedure. |
 | `restricted_v1` domain (no float, integers within 2^53 - 1, depth 31) | `cns_composition/digest_vectors.py` | the Trident's parser; the payload's `subject` and `args` must lie inside it | `stack-trident/tests/cns_digest.rs`; the fixtures' subject is integer-only | CNS content with a float or a larger integer cannot be admitted: the Trident refuses the envelope. Widening is a kernel review (`cns-digest-contract.md`). A governed subject must be modelled with integers (for example minor units) to cross. |
 | Decision root | `super_gate.py::_root` | `stack_receipt::decision_root` | as above | See `GateResult` fields. |
+| `context` digest in the root (CNS `decide(context=...)`) | `super_gate.py::_root`, `digest_context` | none: the payload has no context, and the kernel recomputes the root without one | none | Not supported. A context-bearing decision is refused as a root mismatch. Supporting it needs a payload field, a root input and fixtures, and is a kernel feature with its own review. FC. |
 | Roster `Decision.seats` as `repository:gate` | `SuperGate.seats` | `DecisionEvidence.seats`; matched to `KernelPolicy::required_seats` | `a_missing_required_gate_is_refused_whatever_the_capability_says` | A renamed repository or gate means the kernel's configured required seats no longer match: FC (`RequiredSeatMissing`). Update `KernelPolicy`, a configuration change, not a code change. |
 | The required roster | CNS `required=` argument | NOT consumed from CNS: a CNS root does not commit to it (register D-11) | the missing-seat fixture is `allowed: true` in CNS and is refused here | None, by design. The kernel's policy is the source. A CNS that required fewer seats still cannot lower the kernel's requirement. |
 | `CNS:same_subject` pseudo seat (added by `SuperGate` when `same_subject=` is given) | `super_gate.py::SubjectAgreement` | refused today: its verdict names `same_subject` as its subject and binds `subject_digest({"identity","digest","seats"})`, not the content, so `binding::check` reports `VerdictNotBoundToSubject` and `IdentityDisagreement` | `a_real_decision_that_carries_the_same_subject_seat_is_refused_today` (R2-X-05) | Rosters used with this kernel must not use `same_subject=` until the kernel learns to recompute that verdict (it can: identity, the kernel's digest and the other seats are all known to it). That is a kernel feature with its own review, not a configuration change. FC. |
@@ -194,6 +216,7 @@ result is genuine.
 | A payload version field | PLANNED (R2-X-04) |
 | Delivery and authorization of `args` | PLANNED (R2-X-02) |
 | Receipt record of Trident refusals | PLANNED (R2-X-03) |
+| Decisions made with a CNS `context` | NOT SUPPORTED: refused as a root mismatch; no test (section 4) |
 
 ## 9. Change procedure
 
