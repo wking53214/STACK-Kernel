@@ -45,6 +45,8 @@ This is a new design. No TACK repository has a Trident today; of the seven compo
 | `payload` | The content the sender's gate judged, any JSON |
 | `mac` | HMAC-SHA256 tag over the other nine fields |
 
+The parser reads the envelope as strict JSON and the MAC covers its canonical form, so an envelope need not arrive in canonical spelling: a character may be sent raw or as a `\u` escape. One spelling difference is refused, because it would let a single flipped bit produce a second valid copy of the same envelope: hex digits in a `\u` escape must be lowercase (`\u001a`, not `\u001A`), as the encoder writes them. A sender whose JSON library writes uppercase escapes (some Java and .NET serializers do) must lowercase them or send the canonical form. This was found by the envelope property test (`flipping_any_byte_of_the_encoded_envelope_is_rejected`) and is pinned by `unicode_escapes_accept_only_lowercase_hex`.
+
 A fingerprint is the SHA-256 of `stack-trident/fingerprint/v1`, a newline and the key bytes. That fixed prefix is a domain separator: it stops a hash made for one purpose from matching a hash made for another. The MAC input likewise starts with `stack-trident/mac/v1` and a newline.
 
 **Four stages.** The receiver runs four stages in order. The first two are cheap, depend only on public facts and return early. The prongs then always run in full.

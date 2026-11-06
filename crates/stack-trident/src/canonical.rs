@@ -369,8 +369,10 @@ impl Parser<'_> {
             let b = self.bump().ok_or(CanonicalError::Malformed)?;
             let d = match b {
                 b'0'..=b'9' => b - b'0',
+                // Lowercase only, as the encoder writes it: an uppercase digit
+                // is a second spelling of the same text, and the MAC covers the
+                // canonical form, so it would verify.
                 b'a'..=b'f' => b - b'a' + 10,
-                b'A'..=b'F' => b - b'A' + 10,
                 _ => return Err(CanonicalError::Malformed),
             };
             v = (v << 4) | u32::from(d);
@@ -714,6 +716,24 @@ mod tests {
         let b = parse("{\"k\":\"é/\\u0041\"}").unwrap();
         assert_eq!(canon(&a), canon(&b));
         assert_eq!(canon(&a), "{\"k\":\"é/A\"}");
+    }
+
+    #[test]
+    fn unicode_escapes_accept_only_lowercase_hex() {
+        // Found by the envelope property test: flipping the case of a hex digit
+        // in a \u escape produced a second spelling of the same envelope that
+        // the MAC (over the canonical form) could not tell apart.
+        assert_eq!(parse(r#""\u001a""#).unwrap(), Value::String("\u{1a}".into()));
+        assert_eq!(parse(r#""\u00e9""#).unwrap(), Value::String("\u{e9}".into()));
+        assert_eq!(parse(r#""\u001A""#), Err(CanonicalError::Malformed));
+        assert_eq!(parse(r#""\u00E9""#), Err(CanonicalError::Malformed));
+        // Surrogate pairs: both halves are held to the same rule.
+        assert_eq!(parse(r#""\ud83d\ude00""#).unwrap(), Value::String("\u{1f600}".into()));
+        assert_eq!(parse(r#""\uD83D\ude00""#), Err(CanonicalError::Malformed));
+        assert_eq!(parse(r#""\ud83d\uDE00""#), Err(CanonicalError::Malformed));
+        // Digits and the raw forms are unaffected.
+        assert_eq!(parse(r#""\u0041""#).unwrap(), Value::String("A".into()));
+        assert_eq!(parse("\"\u{e9}\"").unwrap(), Value::String("\u{e9}".into()));
     }
 
     #[test]
