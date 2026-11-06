@@ -4,7 +4,7 @@ Reference implementation of the ≡TACK governance kernel, written in Rust and C
 
 These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](https://github.com/wking53214/CNS), Apache-2.0). Several source comments reference that contract.
 
-`stack-sentinel` reproduces CNS's subject digest (`cns.gate.subject_digest`) in Rust, and it is held to CNS's own answer key: `crates/stack-sentinel/tests/fixtures/cns-digest-vectors.json` is a copy of CNS's `contracts/digest-vectors.json` (contents and the digest CNS gives each, chosen to catch near-misses), and `cargo test -p stack-sentinel --test cns_vectors` recomputes every one. CNS checks this copy against its own, so a stale one is reported there.
+`stack-sentinel` reproduces CNS's subject digest (`cns.gate.subject_digest`) in Rust, and it is held to CNS's own answer key: `crates/stack-sentinel/tests/fixtures/cns-digest-vectors.json` is a copy of CNS's `contracts/digest-vectors.json` (the inputs and the digest CNS gives each), and `cargo test -p stack-sentinel --test cns_vectors` recomputes every one. According to CNS's workflow as of CNS commit `4acd8f9`, CNS runs these tests against its own copy, so a stale copy here is reported there.
 
 ## What is here
 
@@ -24,6 +24,7 @@ These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](http
 | `_warm` | Dependency warm-up crate, not part of the kernel |
 
 C++ headers (kernel layers 1-6) in `cpp/include/`:
+
 | File | Component |
 |---|---|
 | `stack_kernel.hpp` | Foundation: CNS compatibility layer |
@@ -35,13 +36,14 @@ C++ headers (kernel layers 1-6) in `cpp/include/`:
 
 `manual/sections/` holds the manual's sections as markdown. `manual/measurements/`
 holds the raw timing runs the ANC sections quote. `manual/review/` holds the
-final reviewer's findings. Not all of them are applied to the manual yet.
+final reviewer's findings. Whether each finding is reflected in the manual has not been checked.
 
 ## Build and test
 
 Rust 1.95 or newer is required (`rust-version` in `Cargo.toml`). The CI clippy job pins
-Rust 1.99.0; the other CI jobs use the stable toolchain. Dependencies are limited to the
-workspace list in `Cargo.toml`.
+Rust 1.99.0; the other CI jobs use the stable toolchain. Most external dependencies come
+from the workspace list in `Cargo.toml`. A few crates, such as `stack-p3-2` and `stack-ffi`,
+declare their own external crates in their `Cargo.toml` files.
 
 ```
 cargo clippy --workspace --all-targets -- -D warnings
@@ -55,8 +57,8 @@ time. `anc` runs every test except the wall-clock ones. It has no `continue-on-e
 so a failure fails the job; whether that blocks a merge depends on branch protection,
 which this review did not check.
 `anc-wall-clock` runs exactly the wall-clock ones, named with the reason for
-each in `ANC_WALL_CLOCK_TESTS` in `.github/workflows/ci.yml`, on every push
-and pull request. It is marked `continue-on-error` because a shared runner
+each in `ANC_WALL_CLOCK_TESTS` in `.github/workflows/ci.yml`, on pushes to `main`
+and on every pull request. It is marked `continue-on-error` because a shared runner
 can fail them with no code change, so read its result before merging ANC
 changes.
 
@@ -85,7 +87,7 @@ A second test in the same file, `live_edge_cases_differ_only_as_documented`, fee
 
 ## Design Analogy: The Flywheel
 
-≡TACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
+≡TACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution (a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded), that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
 
 ### The River and Its Banks
 
@@ -99,7 +101,7 @@ Neither the water nor the banks are static. They are in constant conversation.
 2. **Boundary enforces**: deadline fires, quota exhausted, capability revoked, memory exceeded
 3. **Trap event is logged** with full execution context
 4. **Sentinel observes** patterns in trap logs and asks: which boundaries catch most, why, in what states?
-5. **Boundaries reorganize** based on patterns—tighter deadlines for chronic overruns, reduced quotas for quota-busters
+5. **Boundaries reorganize** based on patterns, such as tighter deadlines for chronic overruns, reduced quotas for quota-busters
 6. **Next transaction** loads reorganized boundaries
 7. The flywheel turns: **traps → learning → reorganization → tighter boundaries → new traps**
 
@@ -115,7 +117,7 @@ Neither the water nor the banks are static. They are in constant conversation.
 | 6: Isolation | Memory boundary isolation (arena) |
 | P3.2: Hard Preemption | Hybrid model: signal sets flag + context-local state → trap events logged for Sentinel |
 
-Every enforcement event is a data point. Sentinel runs offline analysis (Q1-Q6 queries on trap_events table) to identify which boundaries trap most, which agents trigger most traps, what patterns emerge. Based on patterns, boundaries are reorganized for next execution.
+Every enforcement event is a data point. The intended design has Sentinel run offline analysis (Q1-Q6 queries on a `trap_events` table) to identify which boundaries trap most, which agents trigger most traps, and what patterns emerge. Based on patterns, boundaries would be reorganized for the next execution. This repository records `TrapEvent`s in `stack-p3-2`, but it does not implement the table or the Q1-Q6 analyses; those are specified in `manual/sections/p3.2_schema_design.md`.
 
 **Anti-isolation principle**: The system cannot hide enforcement from itself. Enforcement is the primary input to governance learning.
 
@@ -163,10 +165,10 @@ Loopback is the most favorable channel for an attacker. If a real deployment is 
 ### What is not claimed
 
 - That the two paths take the same time. They do not, by about 2 to 3 ns in our runs.
-- That the residual is zero, or that the test `calibrated_spin_padding_hides_the_early_exit` proves it. That test checks for a measurable difference under its own rules. It is non-blocking in CI and fails under load.
+- That the residual is zero, or that the test `calibrated_spin_padding_hides_the_early_exit` proves it. That test checks for a measurable difference under its own rules. It is non-blocking in CI, and it has failed on recent CI runs.
 - Attackers on the same physical core, through shared cache, or through a sibling hardware thread (SMT). These are outside the threat model.
 - Any real network, any production load pattern, or any second machine.
-- That the sign of the residual is fixed across all setups. It was negative in every run we kept, with one unexplained exception.
+- That the sign of the residual is fixed across all setups. In the baseline runs it was negative in every run we kept, except one subagent session. With the barrier added, it was mixed.
 
 ### How this was accepted
 
