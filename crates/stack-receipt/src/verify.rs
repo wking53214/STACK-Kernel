@@ -37,7 +37,7 @@ use crate::cns::{subject_digest, CnsValue};
 use crate::decision::{check_authorized_decision, DecisionFinding, RosterPolicy};
 use crate::encode::genesis_hash;
 use crate::log::{parse_log, Head, LogError};
-use crate::record::{Event, ExecutionId, Observed, Outcome, OutcomeKind, Stage};
+use crate::record::{Event, ExecutionId, LastStage, Observed, Outcome, OutcomeKind, Recovered, Stage};
 use crate::sign::{ResolveError, SignedRecord, TrustedReceiptKeys};
 
 /// The verdict on a receipt as evidence. See the module documentation.
@@ -118,6 +118,8 @@ pub enum Check {
     UseEvidenceWellFormed,
     /// The log still holds the record the auditor anchored.
     AnchorHeld,
+    /// A `Recovered` record names the stage the chain shows the execution at.
+    RecoveryClaimMatchesChain,
 }
 
 impl Check {
@@ -144,6 +146,7 @@ impl Check {
             Self::NativeDigestMatchesExpected => "native_digest_matches_expected",
             Self::UseEvidenceWellFormed => "use_evidence_well_formed",
             Self::AnchorHeld => "anchor_held",
+            Self::RecoveryClaimMatchesChain => "recovery_claim_matches_chain",
         }
     }
 }
@@ -203,6 +206,10 @@ pub enum Limitation {
     /// The use was recorded by a non-durable store: it proves nothing about
     /// the use across a restart.
     UseEvidenceNonDurable,
+    /// A restarted kernel closed this execution without knowing how it ended:
+    /// its last record was `Attempted`, so the payload may have completed, may
+    /// have been cut off, or may never have started. The outcome is unknown.
+    ExecutionRecoveredOutcomeUnknown,
 }
 
 impl Limitation {
@@ -228,6 +235,7 @@ impl Limitation {
             Self::UseEvidenceNotRecorded => "use_evidence_not_recorded",
             Self::UseEvidenceNotProvidedByStore => "use_evidence_not_provided_by_store",
             Self::UseEvidenceNonDurable => "use_evidence_non_durable",
+            Self::ExecutionRecoveredOutcomeUnknown => "execution_recovered_outcome_unknown",
         }
     }
 }
@@ -365,6 +373,11 @@ pub enum FindingCode {
     /// The record at the anchored sequence is not the anchored record: the
     /// history was replaced.
     AnchorMismatch,
+    /// A restarted kernel found this execution open and closed it with a
+    /// `Recovered` record (informational; the limitation says what is unknown).
+    RecoveredAfterRestart,
+    /// A `Recovered` record names a last stage the chain does not show.
+    RecoveredStageMismatch,
 }
 
 impl FindingCode {
@@ -376,7 +389,8 @@ impl FindingCode {
             | Self::ExecutionNotFound
             | Self::TornTailDiscarded
             | Self::TrailingFrameAdopted
-            | Self::WorkerMayStillBeRunning => Severity::Info,
+            | Self::WorkerMayStillBeRunning
+            | Self::RecoveredAfterRestart => Severity::Info,
             _ => Severity::Reject,
         }
     }
@@ -437,6 +451,8 @@ impl FindingCode {
             Self::TrailingFrameAdopted => "trailing_frame_adopted",
             Self::LogDoesNotReachAnchor => "log_does_not_reach_anchor",
             Self::AnchorMismatch => "anchor_mismatch",
+            Self::RecoveredAfterRestart => "recovered_after_restart",
+            Self::RecoveredStageMismatch => "recovered_stage_mismatch",
         }
     }
 }
@@ -655,7 +671,7 @@ const fn stage_rank(s: Stage) -> u8 {
         Stage::Proposed => 0,
         Stage::Authorized => 1,
         Stage::Attempted => 2,
-        Stage::Rejected | Stage::Terminal => 3,
+        Stage::Rejected | Stage::Terminal | Stage::Recovered => 3,
     }
 }
 
@@ -727,11 +743,14 @@ fn verify_execution(
     let mut at = At::Start;
     let (mut proposed, mut authorized, mut attempted, mut terminal) = (None, None, None, None);
     let mut observed: Option<&Observed> = None;
+    let mut recovered: Option<&Recovered> = None;
     for s in records {
         let r = s.record();
         let seq = Some(r.sequence);
         let stage = r.stage();
-        if summary.stage_reached.is_none_or(|prev| stage_rank(stage) > stage_rank(prev)) {
+        // `Recovered` closes an execution without being a stage it reached, so
+        // the furthest stage stays what the run actually got to.
+        if stage != Stage::Recovered && summary.stage_reached.is_none_or(|prev| stage_rank(stage) > stage_rank(prev)) {
             summary.stage_reached = Some(stage);
         }
         match (&r.event, at) {
@@ -756,6 +775,15 @@ fn verify_execution(
                         at = At::Authorized;
                     }
                     Event::Rejected(_) => at = At::Closed,
+                    Event::Recovered(rec) => {
+                        recovered = Some(rec);
+                        findings.push(Finding::new(
+                            FindingCode::RecoveredStageMismatch,
+                            seq,
+                            "Recovered names a last stage, but the execution has no record before it",
+                        ));
+                        at = At::Closed;
+                    }
                     Event::Attempted(a) => {
                         findings.push(Finding::new(FindingCode::AttemptedWithoutAuthorized, seq, "no Authorized"));
                         attempted = Some(a);
@@ -773,7 +801,10 @@ fn verify_execution(
                 }
             }
             (_, At::Closed) => {
-                let code = if matches!(r.event, Event::Terminal(_) | Event::TerminalObserved(_) | Event::Rejected(_)) {
+                let code = if matches!(
+                    r.event,
+                    Event::Terminal(_) | Event::TerminalObserved(_) | Event::Rejected(_) | Event::Recovered(_)
+                ) {
                     FindingCode::DuplicateTerminal
                 } else {
                     FindingCode::EventAfterTerminal
@@ -785,6 +816,32 @@ fn verify_execution(
                 at = At::Authorized;
             }
             (Event::Rejected(_), At::Proposed | At::Authorized) => {
+                at = At::Closed;
+            }
+            (Event::Recovered(rec), At::Proposed | At::Authorized | At::Attempted) => {
+                scope.check(Check::RecoveryClaimMatchesChain);
+                let actual = match at {
+                    At::Authorized => LastStage::Authorized,
+                    At::Attempted => LastStage::Attempted,
+                    _ => LastStage::Proposed,
+                };
+                if rec.last_stage != actual {
+                    findings.push(Finding::new(
+                        FindingCode::RecoveredStageMismatch,
+                        seq,
+                        format!(
+                            "Recovered says the execution was last at {}, but the chain shows {}",
+                            rec.last_stage.as_str(),
+                            actual.as_str()
+                        ),
+                    ));
+                }
+                findings.push(Finding::new(
+                    FindingCode::RecoveredAfterRestart,
+                    seq,
+                    format!("a restart found this execution open after {} and closed it", actual.as_str()),
+                ));
+                recovered = Some(rec);
                 at = At::Closed;
             }
             (Event::Attempted(a), At::Authorized) => {
@@ -823,7 +880,15 @@ fn verify_execution(
     // Outcome and completeness.
     match (at, terminal) {
         (At::Closed, Some(t)) => summary.outcome = Some(t.outcome.kind()),
-        (At::Closed, None) => summary.outcome = None,
+        (At::Closed, None) => {
+            summary.outcome = match recovered {
+                Some(rec) if rec.last_stage == LastStage::Attempted => {
+                    scope.limit(Limitation::ExecutionRecoveredOutcomeUnknown);
+                    Some(OutcomeKind::Unknown)
+                }
+                _ => None,
+            };
+        }
         (At::Attempted, _) => {
             summary.outcome = Some(OutcomeKind::Unknown);
             findings.push(Finding::new(

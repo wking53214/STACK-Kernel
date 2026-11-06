@@ -39,8 +39,8 @@ use stack_authority::{Digest32, UseEvidence};
 use crate::record::{
     check_text, Action, ActualAction, AppliedLimits, Assurance, Attempted, Authorized, CapabilityBinding, DecisionEvidence, Event,
     ExecutionId, ExitObserved, FieldName, FrameStatus, GateOutcome, GatePosition, Handoff, NativeDigest, Observed,
-    Outcome, Proposed, Provenance, ReceiptKeyId, Record, Rejected, Subject, Terminal, TerminalObserved,
-    ValidationError, Verdict, WorkerBinding, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES,
+    LastStage, Outcome, Proposed, Provenance, ReceiptKeyId, Record, Recovered, Rejected, Subject, Terminal,
+    TerminalObserved, ValidationError, Verdict, WorkerBinding, MAX_ID_BYTES, MAX_OPERATION_BYTES, MAX_SEATS, MAX_TEXT_BYTES,
 };
 
 /// The domain and version tag every canonical record starts with (format
@@ -50,6 +50,10 @@ pub const DOMAIN_TAG: &[u8; 16] = b"stack-receipt/1\n";
 /// supervisor-observed facts. Only that event is written or accepted under it,
 /// so a record still has exactly one encoding.
 pub const DOMAIN_TAG_V2: &[u8; 16] = b"stack-receipt/2\n";
+/// The tag of format version 3: a `Recovered` record, written by a restarted
+/// kernel for an execution it found open. Only that event is written or
+/// accepted under it.
+pub const DOMAIN_TAG_V3: &[u8; 16] = b"stack-receipt/3\n";
 /// Domain separator for record hashes.
 pub const RECORD_HASH_DOMAIN: &[u8] = b"stack-receipt/record-hash/1\n";
 /// Domain separator for the genesis hash.
@@ -69,6 +73,12 @@ const TAG_TERMINAL_OBSERVED: u8 = 6;
 const TAG_AUTHORIZED_EVIDENCED: u8 = 7;
 /// `Attempted` with the worker binding appended (format version 2).
 const TAG_ATTEMPTED_WORKER: u8 = 8;
+/// `Recovered` (format version 3).
+const TAG_RECOVERED: u8 = 9;
+
+const LAST_PROPOSED: u8 = 1;
+const LAST_AUTHORIZED: u8 = 2;
+const LAST_ATTEMPTED: u8 = 3;
 
 const USE_NOT_PROVIDED: u8 = 1;
 const USE_NON_DURABLE_MEMORY: u8 = 2;
@@ -199,7 +209,9 @@ pub fn canonical_bytes(record: &Record) -> Result<Vec<u8>, ValidationError> {
     let mut e = Encoder {
         buf: Vec::with_capacity(512),
     };
-    e.raw(if record.event.is_v2() {
+    e.raw(if matches!(record.event, Event::Recovered(_)) {
+        DOMAIN_TAG_V3
+    } else if record.event.is_v2() {
         DOMAIN_TAG_V2
     } else {
         DOMAIN_TAG
@@ -314,6 +326,14 @@ fn encode_event(e: &mut Encoder, event: &Event) -> Result<(), ValidationError> {
         Event::Rejected(r) => {
             e.u8(TAG_REJECTED);
             e.text("rejected.reason", &r.reason, 1, MAX_TEXT_BYTES)?;
+        }
+        Event::Recovered(r) => {
+            e.u8(TAG_RECOVERED);
+            e.u8(match r.last_stage {
+                LastStage::Proposed => LAST_PROPOSED,
+                LastStage::Authorized => LAST_AUTHORIZED,
+                LastStage::Attempted => LAST_ATTEMPTED,
+            });
         }
         Event::Attempted(a) => {
             e.u8(if a.worker.is_some() { TAG_ATTEMPTED_WORKER } else { TAG_ATTEMPTED });
@@ -504,10 +524,12 @@ pub fn decode_record(bytes: &[u8]) -> Result<Record, DecodeError> {
     }
     let mut d = Decoder { b: bytes, pos: 0 };
     let tag = d.take(DOMAIN_TAG.len())?;
-    let v2 = if tag == DOMAIN_TAG {
-        false
+    let version: u8 = if tag == DOMAIN_TAG {
+        1
     } else if tag == DOMAIN_TAG_V2 {
-        true
+        2
+    } else if tag == DOMAIN_TAG_V3 {
+        3
     } else {
         return Err(DecodeError::BadTag);
     };
@@ -522,7 +544,7 @@ pub fn decode_record(bytes: &[u8]) -> Result<Record, DecodeError> {
         version: d.id("provenance.version")?,
         host_id: d.id("provenance.host_id")?,
     };
-    let event = decode_event(&mut d, v2)?;
+    let event = decode_event(&mut d, version)?;
     if d.pos != bytes.len() {
         return Err(DecodeError::TrailingBytes(d.pos));
     }
@@ -580,14 +602,29 @@ fn decode_decision(d: &mut Decoder<'_>) -> Result<DecisionEvidence, DecodeError>
     Ok(DecisionEvidence { root, seats, verdicts })
 }
 
-fn decode_event(d: &mut Decoder<'_>, v2: bool) -> Result<Event, DecodeError> {
+fn decode_event(d: &mut Decoder<'_>, version: u8) -> Result<Event, DecodeError> {
     let tag = d.u8()?;
     // A record has exactly one encoding: format version 2 holds only the
-    // events that carry version 2 additions, and version 1 never holds them.
-    if v2 != matches!(tag, TAG_TERMINAL_OBSERVED | TAG_AUTHORIZED_EVIDENCED | TAG_ATTEMPTED_WORKER) {
+    // events that carry version 2 additions, version 3 holds only `Recovered`,
+    // and version 1 holds none of them.
+    let tag_version = match tag {
+        TAG_TERMINAL_OBSERVED | TAG_AUTHORIZED_EVIDENCED | TAG_ATTEMPTED_WORKER => 2,
+        TAG_RECOVERED => 3,
+        _ => 1,
+    };
+    if version != tag_version {
         return Err(DecodeError::BadTagByte("event", tag));
     }
     match tag {
+        TAG_RECOVERED => {
+            let last_stage = match d.u8()? {
+                LAST_PROPOSED => LastStage::Proposed,
+                LAST_AUTHORIZED => LastStage::Authorized,
+                LAST_ATTEMPTED => LastStage::Attempted,
+                other => return Err(DecodeError::BadTagByte("recovered.last_stage", other)),
+            };
+            Ok(Event::Recovered(Recovered { last_stage }))
+        }
         TAG_PROPOSED => {
             let subject = Subject {
                 identity: d.text("subject.identity", 1, MAX_TEXT_BYTES)?,
@@ -725,7 +762,7 @@ fn decode_event(d: &mut Decoder<'_>, v2: bool) -> Result<Event, DecodeError> {
                 completed_at_ms: d.u64()?,
                 elapsed_ns: d.u64()?,
             };
-            if !v2 {
+            if version != 2 {
                 return Ok(Event::Terminal(terminal));
             }
             let exit = match d.u8()? {
@@ -760,8 +797,8 @@ fn decode_event(d: &mut Decoder<'_>, v2: bool) -> Result<Event, DecodeError> {
 /// present disagree with what a writer at `sequence` after `prev` would
 /// have written, and `Some(bytes present)` otherwise.
 pub fn prefix_consistent(bytes: &[u8], sequence: u64, prev: &[u8; 32]) -> bool {
-    // Either format version's tag may start the record being written.
-    [DOMAIN_TAG, DOMAIN_TAG_V2].into_iter().any(|tag| {
+    // Any format version's tag may start the record being written.
+    [DOMAIN_TAG, DOMAIN_TAG_V2, DOMAIN_TAG_V3].into_iter().any(|tag| {
         let mut expected = Vec::with_capacity(FIXED_PREFIX_BYTES);
         expected.extend_from_slice(tag);
         expected.extend_from_slice(&sequence.to_be_bytes());

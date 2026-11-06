@@ -172,6 +172,15 @@ pub trait ReceiptLog: Send + fmt::Debug {
 
     /// Whether what `append` returned `Ok` for survives a restart.
     fn is_durable(&self) -> bool;
+
+    /// Every acknowledged record, in order. A restarted kernel reads this once,
+    /// before it accepts work, to find executions a crash left open
+    /// ([`crate::Recorder::recover_open_executions`]). A log that cannot list its
+    /// records refuses, so a kernel over it cannot start: it fails closed
+    /// rather than leaving open executions unexamined.
+    fn acknowledged_records(&self) -> Result<Vec<SignedRecord>, LogError> {
+        Err(LogError::BadConfig("this log cannot list its records"))
+    }
 }
 
 /// A log that keeps records in memory only. For tests and simulations:
@@ -221,6 +230,10 @@ impl ReceiptLog for MemoryReceiptLog {
 
     fn is_durable(&self) -> bool {
         false
+    }
+
+    fn acknowledged_records(&self) -> Result<Vec<SignedRecord>, LogError> {
+        Ok(self.records.clone())
     }
 }
 
@@ -771,6 +784,13 @@ impl ReceiptLog for FileReceiptLog {
 
     fn is_durable(&self) -> bool {
         true
+    }
+
+    fn acknowledged_records(&self) -> Result<Vec<SignedRecord>, LogError> {
+        if self.poisoned {
+            return Err(LogError::Poisoned);
+        }
+        Ok(Self::read_file(&self.path)?.records)
     }
 }
 

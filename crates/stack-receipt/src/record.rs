@@ -862,6 +862,41 @@ pub struct TerminalObserved {
     pub observed: Observed,
 }
 
+/// The last stage an execution reached before a restart found it open. Only
+/// the three stages an open execution can be at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastStage {
+    /// The request was recorded; nothing was decided.
+    Proposed,
+    /// The authorization was recorded; nothing ran.
+    Authorized,
+    /// The attempt was recorded; the payload may have started.
+    Attempted,
+}
+
+impl LastStage {
+    /// Machine-readable spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Authorized => "authorized",
+            Self::Attempted => "attempted",
+        }
+    }
+}
+
+/// A restarted kernel's statement that it found this execution open and
+/// closed it in the log without knowing how it ended. It claims nothing about
+/// the run: if the last stage was `Attempted`, the payload may have run to
+/// completion, may have been cut off, or may never have started, and the
+/// outcome stays unknown. Format version 3. Written by the kernel's recovery
+/// step before it accepts new work, never by the verifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recovered {
+    /// The last record of the execution that the restart found.
+    pub last_stage: LastStage,
+}
+
 /// One event in an execution's life.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -877,6 +912,8 @@ pub enum Event {
     Terminal(Terminal),
     /// See [`TerminalObserved`]. Format version 2; stage [`Stage::Terminal`].
     TerminalObserved(TerminalObserved),
+    /// See [`Recovered`]. Format version 3.
+    Recovered(Recovered),
 }
 
 impl Event {
@@ -903,6 +940,8 @@ pub enum Stage {
     Attempted,
     /// See [`Terminal`].
     Terminal,
+    /// See [`Recovered`].
+    Recovered,
 }
 
 impl Stage {
@@ -914,6 +953,7 @@ impl Stage {
             Self::Rejected => "rejected",
             Self::Attempted => "attempted",
             Self::Terminal => "terminal",
+            Self::Recovered => "recovered",
         }
     }
 }
@@ -926,6 +966,7 @@ impl Event {
     pub const fn is_v2(&self) -> bool {
         match self {
             Self::TerminalObserved(_) => true,
+            Self::Recovered(_) => false,
             Self::Authorized(a) => a.use_evidence.is_some(),
             Self::Attempted(a) => a.worker.is_some(),
             _ => false,
@@ -940,6 +981,7 @@ impl Event {
             Self::Rejected(_) => Stage::Rejected,
             Self::Attempted(_) => Stage::Attempted,
             Self::Terminal(_) | Self::TerminalObserved(_) => Stage::Terminal,
+            Self::Recovered(_) => Stage::Recovered,
         }
     }
 
@@ -966,6 +1008,7 @@ impl Event {
             Self::Attempted(a) => a.action.validate(),
             Self::Terminal(t) => t.outcome.validate(),
             Self::TerminalObserved(t) => t.terminal.outcome.validate(),
+            Self::Recovered(_) => Ok(()),
         }
     }
 }

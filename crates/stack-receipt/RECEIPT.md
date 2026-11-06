@@ -39,6 +39,7 @@ One log per kernel. One execution has events in this order and no other
 | terminal | the run ended | outcome, completed-at, monotonic elapsed | yes |
 | `interrupted` (an outcome) | the kernel stopped the run before any kill | reason | yes |
 | `unknown` (an outcome) | the kernel could not observe the end | reason | yes |
+| `recovered` | a restarted kernel found the execution open (its last record was `proposed`, `authorized` or `attempted`), before it accepts any work | the last stage it found | yes |
 
 Terminal outcomes: `completed`, `terminated` (kill sent and confirmed),
 `termination_unconfirmed` (kill sent, worker not confirmed dead: it may
@@ -131,7 +132,7 @@ A terminal event may carry the two facts the supervisor observed
 A record has one encoding: the decoder refuses a version 2 body under the
 version 1 tag and the reverse (`tests/observed_v2.rs`
 `a_record_has_one_encoding_so_the_version_and_the_event_must_agree`), and a tag
-it does not know (`stack-receipt/3`) is `BadTag`. A log may hold both versions.
+it does not know (`stack-receipt/4`) is `BadTag`. A log may hold both versions.
 
 Compatibility: a version 1 log verifies unchanged. `tests/fixtures/v1_log.bin` was
 written by the version 1 writer before this format existed; `tests/compat_v1.rs`
@@ -195,6 +196,55 @@ limitation `use_evidence_not_recorded`, `not_provided` as
 `use_evidence_malformed`. The evidence is what the store REPORTED. It is not
 checked against the store file here, and two executions claiming the same
 position are not cross-checked (planned).
+
+### Format version 3: recovery after a restart (I-6)
+
+Status: implemented and tested in this crate and in `stack-admission`, which writes it when it starts.
+
+A crash leaves an execution open: its last record is `proposed`, `authorized` or
+`attempted` and nothing closes it, so the verifier reports the whole log
+`INCOMPLETE` for as long as the log exists. A kernel that starts over a log
+closes those executions with one `Recovered` record each, written before it
+accepts any work (`Recorder::recover_open_executions`, called from
+`Admission::new`).
+
+| | Version 3 |
+|---|---|
+| record tag | `stack-receipt/3\n` |
+| event | only tag 9 (`Event::Recovered`): one byte, the last stage found (1 `proposed`, 2 `authorized`, 3 `attempted`) |
+| written by | `Recorder::recover_open_executions` |
+
+The record claims one thing: that a restart found the execution open at that
+stage. It does not claim an outcome. If the last stage was `attempted`, the
+payload may have run to completion, may have been cut off, or may never have
+started, and the verifier reports `execution.outcome` as `unknown` and lists the
+limitation `execution_recovered_outcome_unknown`. It never reports such an
+execution as `completed`, `timed_out` or any other outcome. If the last stage
+was `proposed` or `authorized` nothing ran, and the execution has no outcome.
+
+The verifier does not take the record's word for the stage. It compares the
+named stage with the stage the chain shows (`recovery_claim_matches_chain`); a
+mismatch is the reject finding `recovered_stage_mismatch`, so a record cannot
+hide that a payload may have run. A terminal, a rejection or a second recovery
+after a `Recovered` record is `duplicate_terminal`. Each recovery is also an
+info finding, `recovered_after_restart`, so a consumer sees that the execution
+was closed by a restart and not by the run.
+
+Effect on the log's state: the recovered execution no longer holds the log
+`INCOMPLETE`. A log whose only open executions were recovered verifies
+`VERIFIED_WITH_LIMITATIONS`, as every log does. The unknown outcome is carried
+by `execution.outcome` and the limitation, not by the state, so a consumer that
+reads only the state sees an intact log and must still read
+`execution.outcome` (see "What a consumer must not infer").
+
+Recovery relies on a single writer: it assumes no other process is still driving
+the executions it finds open. `FileReceiptLog` holds an exclusive advisory lock,
+so a second kernel over the same file is refused. A log type that cannot list its
+records (`ReceiptLog::acknowledged_records`, which refuses by default) makes the
+kernel fail to start rather than skip recovery. If a write fails partway through,
+the kernel does not start; the records already written stay, and the next start
+recovers the rest. The tests are `tests/recovered.rs` (this crate) and
+`crates/stack-admission/tests/recovery.rs`.
 
 ### Which native component each digest refers to (G-4, R-6)
 
@@ -266,7 +316,7 @@ D-07).
 | `VERIFIED` | every check this verifier can perform passed AND `scope.not_checked` is empty |
 | `VERIFIED_WITH_LIMITATIONS` | every check performed passed; `scope.not_checked` lists what was not |
 | `REJECTED` | at least one check failed; the receipt is not evidence of what it claims |
-| `INCOMPLETE` | the chain is intact but the execution has no terminal event, or never reached an attempt |
+| `INCOMPLETE` | the chain is intact but the execution has no terminal event and no `Recovered` record, or never reached an attempt |
 | `UNKNOWN` | nothing to judge: no record carries the execution id, or the log is empty |
 
 `VERIFIED` is defined strictly and is never produced in practice:
@@ -278,7 +328,9 @@ a `timed_out`, `terminated` or rejected execution verifies as well as a
 `completed` one, because the receipt is honest about what happened. The
 state is about the evidence; the outcome is about the action. An
 attempt with no terminal event is `INCOMPLETE` with outcome `unknown`
-and is never success. `REJECTED` dominates `INCOMPLETE`.
+and is never success. Once a restart has closed it with a `Recovered` record
+(format version 3) the state is no longer `INCOMPLETE`, but the outcome is still
+`unknown` and it is still never success. `REJECTED` dominates `INCOMPLETE`.
 
 ### Scope
 
@@ -291,7 +343,8 @@ before omega; for `authorized` executions), `roster_policy` (policy
 supplied), `capability_binding_consistent`, `action_consistent`
 (proposed, authorized and actual agree), `audience` (expected audience
 supplied), `outcome_consistent_with_stage_order`,
-`result_digest_recomputed` (result bytes supplied).
+`result_digest_recomputed` (result bytes supplied),
+`recovery_claim_matches_chain` (a `Recovered` record is present).
 
 `not_checked`: `action_legitimacy_not_established` (always),
 `capability_signature_not_rechecked`,
@@ -303,7 +356,9 @@ supplied), `outcome_consistent_with_stage_order`,
 `log_rollback_not_detectable_without_anchor`, `torn_tail_ignored`,
 `supervisor_observed_facts_not_recorded`, `worker_identity_not_recorded`,
 `worker_expectation_not_supplied`, `use_evidence_not_recorded`,
-`use_evidence_not_provided_by_store`, `use_evidence_non_durable`.
+`use_evidence_not_provided_by_store`, `use_evidence_non_durable`,
+`execution_recovered_outcome_unknown` (an execution a restart closed after its
+`attempted` record).
 
 ### Findings
 
@@ -323,10 +378,11 @@ content. Reject: `log_corrupt`, `sequence_gap`, `prev_hash_mismatch`,
 `capability_decision_root_mismatch`,
 `capability_subject_mismatch`, `authorized_action_differs_from_proposed`,
 `actual_action_differs_from_authorized`, `audience_mismatch`,
-`subject_digest_mismatch`, `result_digest_mismatch`. Incomplete:
+`subject_digest_mismatch`, `result_digest_mismatch`,
+`recovered_stage_mismatch`. Incomplete:
 `terminal_missing`, `not_attempted`, `not_authorized`. Info:
 `empty_log`, `execution_not_found`, `worker_may_still_be_running`,
-`torn_tail_discarded`, `trailing_frame_adopted`.
+`torn_tail_discarded`, `trailing_frame_adopted`, `recovered_after_restart`.
 
 ### What a consumer must not infer
 
@@ -341,6 +397,10 @@ content. Reject: `log_corrupt`, `sequence_gap`, `prev_hash_mismatch`,
   CNS root does not commit to it (register D-11).
 * A missing finding is not a passed check. Read `scope.checked`.
 * An intact chain is not a current chain. See rollback below.
+* A log that verifies `VERIFIED_WITH_LIMITATIONS` after a restart is not "every
+  run in it finished". An execution a restart closed has outcome `unknown`: the
+  payload may have run. Read `execution.outcome` and the limitation
+  `execution_recovered_outcome_unknown`, not the state alone.
 
 ### The tamper matrix (`tests/tamper.rs` unless noted)
 
@@ -452,6 +512,7 @@ Execution<AuthorizedStage>::attempt(self, ActualAction, started_at_ms: u64) -> R
 Execution<AuthorizedStage>::reject(self, &str) -> Result<Closed, RecordError>
 Execution<AttemptedStage>::finish(self, Terminal) -> Result<Closed, TerminalUnrecorded>
 Recorder::head(&self) -> Result<Head, RecordError>
+Recorder::recover_open_executions(&self) -> Result<Vec<ExecutionId>, RecordError>
 
 // Verifier
 TrustedReceiptKeys::new(max) ; insert(ReceiptKeyAnchor::new(kernel_id, ReceiptPublicKey, not_before_ms, not_after_ms)?) ; revoke(&ReceiptKeyId)

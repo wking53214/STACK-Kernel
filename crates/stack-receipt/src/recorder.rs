@@ -28,8 +28,8 @@ use stack_authority::{AuthorizedAction, Clock};
 
 use crate::log::{Head, LogError, ReceiptLog};
 use crate::record::{
-    Action, ActualAction, Attempted, Authorized, CapabilityBinding, Event, ExecutionId, Observed, Outcome, Proposed,
-    Provenance, Record, Rejected, Terminal, TerminalObserved, ValidationError, WorkerBinding,
+    Action, ActualAction, Attempted, Authorized, CapabilityBinding, Event, ExecutionId, LastStage, Observed, Outcome,
+    Proposed, Provenance, Record, Recovered, Rejected, Terminal, TerminalObserved, ValidationError, WorkerBinding,
 };
 use crate::sign::{ReceiptSigner, SignError, SignedRecord};
 
@@ -145,6 +145,54 @@ impl Recorder {
     pub fn is_durable(&self) -> Result<bool, RecordError> {
         let inner = self.inner.lock().map_err(|_| RecordError::Unavailable)?;
         Ok(inner.log.is_durable())
+    }
+
+    /// Closes, in the log, every execution that an earlier run left open.
+    ///
+    /// Call it once after construction and before any new execution is
+    /// proposed. For each execution whose last record is `Proposed`,
+    /// `Authorized` or `Attempted` it appends a `Recovered` record (format
+    /// version 3) naming that last stage, and returns the execution ids in the
+    /// order their first records appear. It records no outcome: for an
+    /// execution last seen `Attempted` the payload may have run, so the
+    /// verifier reports the outcome as unknown with a named limitation.
+    ///
+    /// It fails if the log cannot list its records or a write fails. The caller
+    /// must then not accept work: some executions may be recovered and some
+    /// not, and calling it again picks up the rest, because an execution that
+    /// already has a `Recovered` record is closed.
+    ///
+    /// It relies on the log refusing a second writer (the file log holds an
+    /// exclusive lock), so no execution it finds open is still being driven by
+    /// another process.
+    pub fn recover_open_executions(&self) -> Result<Vec<ExecutionId>, RecordError> {
+        let mut inner = self.inner.lock().map_err(|_| RecordError::Unavailable)?;
+        let records = inner.log.acknowledged_records()?;
+        // Execution ids in first-seen order, each with its last stage, or
+        // `None` once closed.
+        let mut order: Vec<ExecutionId> = Vec::new();
+        let mut state: std::collections::HashMap<ExecutionId, Option<LastStage>> = std::collections::HashMap::new();
+        for s in &records {
+            let r = s.record();
+            let entry = state.entry(r.execution_id).or_insert_with(|| {
+                order.push(r.execution_id);
+                None
+            });
+            *entry = match &r.event {
+                Event::Proposed(_) => Some(LastStage::Proposed),
+                Event::Authorized(_) => Some(LastStage::Authorized),
+                Event::Attempted(_) => Some(LastStage::Attempted),
+                Event::Rejected(_) | Event::Terminal(_) | Event::TerminalObserved(_) | Event::Recovered(_) => None,
+            };
+        }
+        let mut recovered = Vec::new();
+        for id in order {
+            if let Some(Some(last_stage)) = state.get(&id).copied() {
+                inner.append(id, Event::Recovered(Recovered { last_stage }))?;
+                recovered.push(id);
+            }
+        }
+        Ok(recovered)
     }
 
     /// Records that a request arrived. The first event of an execution.
