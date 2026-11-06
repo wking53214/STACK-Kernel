@@ -57,7 +57,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets --no-fail-fast
 ```
 
-Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. The test `shedding_reflects_load_only_for_balanced_dummy` (ANC Strategy 3) records an open finding. Its observed results conflict across two notes in the repo. This README reports 2 of 2 debug runs failing and 1 of 1 release run passing. The CI note on `ANC_WALL_CLOCK_TESTS` reports 5 of 5 debug runs and 2 of 5 release runs failing. Treat it as a timing-sensitive signal, not a settled result, until the runs are reconciled. The Summary section lists the open ANC limits.
+Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. The test `shedding_reflects_load_only_for_balanced_dummy` (ANC Strategy 3) records an open finding. It is marked `#[ignore]` (run with `--ignored`) because it asserts a property the brief's design does not have. Measured November 6, 2026 on a 2-vCPU machine: class A was shed more in all 14 runs (sign positive), by about 0.5 to 1.2 percentage points. |t| reached 4.5 in 3 of 14 runs, at 1.5 million probes (6 runs) or 6 million (8 runs). The older notes (8 of 8 detections in the manual; 2 of 2 debug failures) were not reproduced here, and their setup is not recorded. The Summary section lists the open ANC limits.
 
 CI tests the four ANC crates in two jobs, both in release and one test at a
 time. `anc` runs every test except the wall-clock ones. It has no `continue-on-error`,
