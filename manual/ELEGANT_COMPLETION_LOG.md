@@ -4,7 +4,7 @@
 
 **Author**: William N. King  
 **Date**: 2026-10-02  
-**Status**: Defect-fixing phase COMPLETE  
+**Status**: Defect-fixing phase COMPLETE when written; see the note at the top for what later review found  
 **Validation**: All red-team checks passed; kernel hardened
 
 ---
@@ -277,7 +277,7 @@ bba99f3 Layer 1 - HardwareClock - Fail on unknown architecture
 
 ---
 
-**Status**: ≡TACK Kernel defect-fixing phase COMPLETE. Kernel hardened and ready for production deployment.
+**Status**: ≡TACK Kernel defect-fixing phase was recorded as COMPLETE when this log was written. The claim "ready for production deployment" is superseded: no real capability issuer exists, the per-source guard is not wired into a service, and the timing residual is accepted and documented in the README.
 
 **Authorization**: William N. King, Principal Architect  
 **Validation**: Red-team audit (comprehensive), ghost_tools serum (mutation testing), CNS SSOT verification

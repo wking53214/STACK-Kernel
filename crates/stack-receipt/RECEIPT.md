@@ -2,7 +2,7 @@
 
 Status: new crate, Phase 4b of CNS-KERNEL-INTEGRATION-HARDENING, under
 decision C (a versioned receipt and verifier in STACK-Kernel; the
-sentinel_os ledger untouched). Nothing outside this crate calls it yet.
+sentinel_os ledger untouched). `stack-admission` uses it; no service calls the admission pipeline yet.
 Every claim below names the test that proves it; anything not tested is
 listed as a limitation.
 
@@ -300,7 +300,10 @@ supplied), `outcome_consistent_with_stage_order`,
 `subject_content_not_supplied`, `roster_policy_not_supplied`,
 `audience_not_supplied`, `result_bytes_not_supplied`,
 `result_is_self_reported` (every `completed`), `timestamps_are_writer_claims`,
-`log_rollback_not_detectable_without_anchor`, `torn_tail_ignored`.
+`log_rollback_not_detectable_without_anchor`, `torn_tail_ignored`,
+`supervisor_observed_facts_not_recorded`, `worker_identity_not_recorded`,
+`worker_expectation_not_supplied`, `use_evidence_not_recorded`,
+`use_evidence_not_provided_by_store`, `use_evidence_non_durable`.
 
 ### Findings
 
@@ -406,12 +409,21 @@ tested through a failing log wrapper at the trait (see section 6).
   while old records remain.
 * One active writer per log, enforced by an advisory lock that a process
   ignoring it can bypass.
-* Rollback to an earlier committed state (both header slots rewritten
-  consistently, or the newest slot and the last frame both removed) is
-  undetectable from the file alone
-  (`log::rollback_to_an_earlier_committed_state_is_not_detected_by_the_file_alone`);
-  `Recorder::head()` and `FileReceiptLog::head()` expose the chain head
-  for an external anchor. Same class as D-09 and D-28.
+* Rollback to an earlier committed state (a valid header slot rewritten,
+  and the frames after it removed) is undetectable from the file alone
+  (`log::rollback_to_an_earlier_committed_state_is_not_detected_by_the_file_alone`).
+  A zeroed or invalid slot is detected: the log reports corruption.
+  `Recorder::head()` and `FileReceiptLog::head()` expose the chain head. An
+  auditor who saved a `Head` earlier, somewhere the writer cannot reach, can
+  pass it as `Expectations::anchor`. The verifier then rejects a log that no
+  longer holds that record (`log_does_not_reach_anchor`, `anchor_mismatch`;
+  `tests/anchor.rs`). A rollback to a point at or after the anchor stays
+  undetectable, so the limitation is still listed. Same class as D-09 and D-28.
+* A log file that is deleted or truncated to zero length is created again as
+  a new, empty log at the next open, with no error and no marker that an
+  earlier log existed.
+* `MAX_LOG_BYTES` (1 GiB) is checked when a log is opened or parsed, not when a
+  record is appended. A log can grow past it and then fail to reopen.
 * A holder of the receipt key can write any consistent history,
   including back-dated records; the key's trust window bounds the
   claimed times, not the real ones. Every timestamp is a writer claim.

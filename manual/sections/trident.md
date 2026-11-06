@@ -64,7 +64,7 @@ pub fn parse_strict(input: &[u8], limits: &Limits) -> Result<Value, CanonicalErr
     let text = std::str::from_utf8(input).map_err(|_| CanonicalError::Malformed)?;
 ```
 
-The hand-written parser then counts nesting and values, and stops the moment either cap is passed. It refuses floats, `NaN`, `Infinity`, integers beyond 2^53 - 1, duplicate keys, lone surrogates, leading zeros, a byte-order mark and trailing bytes. A payload bomb, an input built to exhaust memory or stack, therefore costs one bounded pass and no hashing.
+The hand-written parser then counts nesting and values, and stops the moment either cap is passed. It refuses floats, `NaN`, `Infinity`, integers beyond 2^53 - 1, duplicate keys, lone surrogates, leading zeros, a byte-order mark and trailing bytes. A payload bomb, an input built to exhaust memory or stack, therefore costs one bounded pass, plus one SHA-256 of the raw input for the log line when the input is within the size cap.
 
 Integers only, within 2^53 - 1, keeps the encoding identical to RFC 8785 (the JSON Canonicalization Scheme) and safe for JavaScript readers. Duplicate keys are refused because two parsers may keep different copies of the key. That disagreement is the root of a parser-differential attack.
 
@@ -161,7 +161,7 @@ The replay and sequence results are always computed, but reported only when pron
         }
 ```
 
-It then confirms the sender's key is still in the current ring; a key revoked mid-verification yields `unknown_sender`. `operator_halt`, `replace_keyring` and breaker trips take the same lock. Once any of them returns, no verification already in flight can commit an acceptance that contradicts it.
+It then confirms the sender's key is still in the current ring; a key removed from the ring mid-verification yields `unknown_sender`; one whose status or window changed yields `key_not_yet_valid`, `key_expired`, `key_retired` or `key_revoked`. `operator_halt`, `replace_keyring` and breaker trips take the same lock. Once any of them returns, no verification already in flight can commit an acceptance that contradicts it.
 
 **Circuit breaker.** A circuit breaker counts a sender's failures and isolates the sender after too many. Five counted terminal breaches inside 60,000 ms quarantine the sender until an operator calls `release`. Which breaches count is a setting (src/trident.rs):
 
@@ -216,6 +216,8 @@ Each reason maps to one CNS outcome. TERMINAL_BREACH means the envelope proves a
 | Breaker trip: 5 counted breaches from one sender in 60,000 ms | TERMINAL_BREACH | quarantine | Under the default attribution, repeated authenticated breaches mark the key holder as hostile or broken. The quarantine survives `operator_reset` and `replace_keyring`. A full sender table drops the breach and counts it in `stack_trident_breaker_untracked_total`. |
 | `malformed_sender`, `malformed_mac` | RETRY | reject | Encoding bugs. The HMAC still runs, with a throwaway key or against zeros, so the work is equal. |
 | `unknown_sender` | TERMINAL_BREACH | reject | No sender correction repairs it. It costs the same HMAC work as a known sender. |
+| `key_not_yet_valid` | RETRY | reject | The sender's key is not valid yet, usually clock drift or a rotation published early. The envelope is treated as unauthenticated, so the breaker does not count it. |
+| `key_expired`, `key_retired`, `key_revoked` | TERMINAL_BREACH | reject | The key is known but outside its window or withdrawn. The envelope is treated as unauthenticated, so the breaker does not count it. An honest sender behind a rotation sees these too, so read them with the key lifecycle and not as proof of hostility. |
 | `mac_mismatch` | TERMINAL_BREACH | reject | An integrity failure. The default breaker ignores it, so forgeries naming a sender cannot get that sender quarantined. |
 | `unsupported_version`, `unknown_gate_position`, `unknown_gate_outcome` | RETRY | reject | Closed vocabularies matching CNS. A newer producer can downgrade. |
 | `malformed_digest` | RETRY | reject | An encoding bug. The payload is still hashed, so the work is equal. |
@@ -227,6 +229,7 @@ Each reason maps to one CNS outcome. TERMINAL_BREACH means the envelope proves a
 | `sequence_not_increasing` | RETRY | reject | Out-of-order sends from an honest sender are plausible. The sender re-issues with the next sequence. |
 | `replay_cache_full`: full of live entries, sender at its fair share | RETRY | reject | The sender is at its fair share (capacity divided by ring size), so it waits and cannot starve other senders. Senders under their share evict the largest holder's oldest entry instead. |
 | `sender_table_full`: full, with no idle entry to evict | RETRY | reject | Bounded state. Only ring members ever get entries. |
+| `state_unavailable` | RETRY | reject | The replay store could not record the acceptance, or reported a conflict with no cause. The Trident fails closed and refuses the envelope. The sender can re-issue when the store is back. |
 | Accepted, but the sender's `gate_outcome` is `retry` or `terminal_breach` | RETRY or TERMINAL_BREACH | none: accepted, freshness state advances | The Trident vouches that the claim is authentic and fresh, not that the subject is good. |
 
 Rollback is never produced. Freshness state changes only after every check has passed, in one critical section, so there is nothing partial to undo. A reject leaves freshness state untouched; a counted breach adds only a timestamp to the sender's breaker history.
@@ -248,7 +251,7 @@ Metrics go through the `metrics` facade, and every label value comes from a clos
 | `stack_trident_quarantined_senders` | gauge | none | Senders currently quarantined. |
 | `stack_trident_replay_cache_entries` | gauge | none | Replay cache size; 0 after a reset. |
 | `stack_trident_replay_evictions_total` | counter | none | Entries evicted so a sender under its fair share could be accepted. |
-| `stack_trident_halts_total` | counter | `cause` (poisoned, operator) | Transitions into the halted state, once per transition. |
+| `stack_trident_halts_total` | counter | `cause` (poisoned, operator, store_failure) | Transitions into the halted state, once per transition. |
 | `stack_trident_operator_resets_total` | counter | none | Calls to `operator_reset`. |
 | `stack_trident_breaker_untracked_total` | counter | none | Counted breaches not recorded because the sender table was full. |
 

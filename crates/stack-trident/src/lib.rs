@@ -36,8 +36,9 @@
 //!    floats, `NaN`/`Infinity`, integers beyond 2^53 - 1, duplicate keys and
 //!    anything else outside strict JSON. Then the object must have exactly
 //!    the ten fields with the right JSON types. Nothing in this stage
-//!    touches a key or a hash, so a payload bomb costs the receiver at most
-//!    one bounded pass over bounded input.
+//!    touches a key. The only hash is a SHA-256 of the raw input for the log
+//!    line, taken only when the input is within the size cap, so a payload
+//!    bomb costs the receiver at most one bounded pass over bounded input.
 //! 2. **Custody** (early exit). If the Trident is halted, or the claimed
 //!    sender is quarantined, the envelope is refused. Both facts are public
 //!    state, so returning early leaks nothing. This is a fast path: both
