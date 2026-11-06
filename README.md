@@ -147,6 +147,12 @@ Status: accepted, documented, not eliminated. The padded response still has a sm
 
 In the baseline runs (no barrier), the sign was negative in every run we kept, except one subagent session of 10 runs that reported the opposite sign for the same seeds. We have not reproduced that session and don't know its cause. With the barrier added in the server, the sign was mixed (pooled +0.39 ns, not significant).
 
+**Re-measured November 6, 2026 (in-process, large n).** Two runs of 2,000,000 padded calls per class, random class order, one seed each. Full-distribution means are not usable here: the per-request spread is about 21 to 28 µs, so the mean's error is tens of nanoseconds, and the same setup gave a gap of 2.4 ns in one run and 30 ns in the other. The middle-50% estimator used in the table above gave a gap of -0.5 ns and -0.3 ns (class A minus B), with a per-request spread of about 80 ns. So the in-process gap measured here is smaller than the 2.8 ns in the table, and it is not stable across setups: lower-half comparisons with and without the test's calibration step gave values from -1.5 to +1.6 ns and from -0.5 to +3.3 ns, with the sign varying.
+
+Samples needed to reach |t| of 4.5 with this estimator, per class, for a caller that can time the padded function directly: about 33,000 for a 2.8 ns gap, and about 1.0 to 3.5 million for the 0.3 to 0.5 ns gap measured here. At 50 µs per call, the second figure is roughly 2 to 6 minutes of calls. This does not describe a network attacker, whose cost depends on network noise, which we have not measured.
+
+The class-variance gap noted in an earlier review was noise, not evidence of a leak. A no-op operation with no secret-dependent work gave class variance ratios from 0.09 to 38 across seeds. Do not use class variance comparisons as evidence on this machine.
+
 ### What an attacker needs (estimates, not measurements on a real network)
 
 These use the standard detection rule (|t| of at least 4.5) and assume independent noise, which is the attacker's best case.
@@ -171,8 +177,8 @@ Loopback is the most favorable channel for an attacker. If a real deployment is 
 
 ### What is not claimed
 
-- That the two paths take the same time. They do not, by about 2 to 3 ns in our runs.
-- That the residual is zero, or that the test `calibrated_spin_padding_hides_the_early_exit` proves it. That test checks for a measurable difference under its own rules. It is non-blocking in CI, and it has failed on recent CI runs.
+- That the two paths take the same time. They do not: by roughly 0.3 to 3 ns across our runs, with the sign not stable in every setup.
+- That the residual is zero, or that the test `calibrated_spin_padding_hides_the_early_exit` proves it. That test checks for a measurable difference under its own rules. It is non-blocking in CI, and it has failed on recent CI runs. Its cropped checks flag the residual only intermittently: without calibration, 13 of 30 in-process runs had some crop above the line of 10; with calibration, the lower-half check stayed within 3.2 in all 10 runs measured. The CI failure values (14 to 85) were not reproduced locally.
 - Attackers on the same physical core, through shared cache, or through a sibling hardware thread (SMT). These are outside the threat model.
 - Any real network, any production load pattern, or any second machine.
 - That the sign of the residual is fixed across all setups. In the baseline runs it was negative in every run we kept, except one subagent session. With the barrier added, it was mixed.

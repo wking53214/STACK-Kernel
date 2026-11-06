@@ -305,7 +305,7 @@ The unit tests (17 `#[test]` functions by count in this review), the leak guard 
 
 ### What this does not guarantee
 
-- **Current record.** The residual measured in November 2026 is about 2 to 3 ns between classes, not the 22 to 24 ns gap and 1.9 to 4.7 µs flag threshold quoted below, which come from an earlier run and do not match. The top-level README section "Accepted timing residual (ANC strategy 1)" is the current record, including attacker-cost estimates and what is not claimed.
+- **Current record.** The residual measured in November 2026 is about 0.3 to 3 ns between classes, depending on the setup (re-measured November 6, 2026; see the README section), not the 22 to 24 ns gap and 1.9 to 4.7 µs flag threshold quoted below, which come from an earlier run and do not match. The top-level README section "Accepted timing residual (ANC strategy 1)" is the current record, including attacker-cost estimates and what is not claimed.
 
 - **It is not a proof.** A pass means no detectable leak at about 100,000 per class on one virtual machine. The smallest mean shift these runs could flag was 1.9 to 4.7 µs, about 80 to 210 times the 22 to 24 ns gap.
 - **The stronger evidence is the design.** The release time is computed from `start` alone, and Spin and Hybrid class medians matched within 4 ns. Those two facts, not the t-test alone, carry the claim.
