@@ -1,8 +1,8 @@
 ## 2. Inter-Agent Trident
 
-The Inter-Agent Trident accepts a handoff only when all three of its checks pass, and refuses everything else with one of 28 typed reasons.
+The Inter-Agent Trident accepts a handoff only when all three of its checks pass, and refuses everything else with one of 33 typed reasons.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
 ### Metaphor and goal
 
@@ -240,7 +240,7 @@ Metrics go through the `metrics` facade, and every label value comes from a clos
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
 | `stack_trident_verifications_total` | counter | `outcome` (pass, retry, terminal_breach), `resolution` (accept, reject, quarantine, halt) | One per `verify` or `verify_wire` call. `outcome` is the Trident's own result. |
-| `stack_trident_check_failures_total` | counter | `check` (six groups), `reason` (28 spellings) | One per reported reason. Masked freshness results are not counted. |
+| `stack_trident_check_failures_total` | counter | `check` (six groups), `reason` (33 spellings) | One per reported reason. Masked freshness results are not counted. |
 | `stack_trident_verify_duration_seconds` | histogram | `outcome` | Wall time from call entry to verdict, admission included. |
 | `stack_trident_hashed_bytes_total` | counter | none | Bytes fed to the prong 1 HMAC and the prong 2 SHA-256. Stays 0 for early admission and custody refusals. |
 | `stack_trident_quarantine_trips_total` | counter | none | Senders quarantined by the breaker. |
@@ -333,7 +333,7 @@ A prototype gate that holds pieces until a whole puzzle is present and inspected
 
 ### Red-team results
 
-The red team wrote 22 attacks as tests in `tests/redteam.rs`. Against the first build, 13 broke and 9 held. After the fixes, all 22 pass.
+The red team wrote 23 attacks as tests in `tests/redteam.rs`. Against the first build, 13 broke and 9 held. The fix record reports them passing; this review did not re-run them.
 
 TOCTOU (time of check to time of use) names a check that goes stale before the action it guards. The red team forced these races by pausing a verifying thread inside a metrics call, then changing receiver state from another thread.
 
@@ -367,14 +367,14 @@ Two red-team tests had their setup changed, not their assertions. `rt_cross_rece
 Known limitations that remain:
 
 - **Symmetric keys.** HMAC keys are shared secrets, so any receiver holding a sender's key can forge as that sender. Only per-pair keys or signatures would stop that.
-- **In-memory state.** Replay cache, sequences and quarantines live in process memory. Quarantines are lost on restart, and several replicas need shared replay state or sender affinity.
+- **In-memory state.** The default `MemoryStore` keeps the replay cache, sequences and quarantines in process memory, so they are lost on restart. A durable store (`src/store.rs`) persists them, and the production profile requires one. Several replicas still need shared replay state or sender affinity.
 - **Ring membership leak.** `unknown_sender` versus `mac_mismatch` reveals whether a fingerprint is in the ring. Fingerprints are public identifiers, so this was accepted.
 - **Key zeroing.** `SecretKey` zeroes its bytes on drop as a best effort only, because the write cannot be volatile without `unsafe`.
 - **Timing evidence.** Equal work is shown by hashed-byte counts, not by a wall-clock measurement.
 
 Three property tests ran 512 cases each: a one-byte flip of a sealed envelope is refused, sealed envelopes pass, and re-encoding is stable. `cargo clippy -p stack-trident --all-targets -- -D warnings` exits 0 with no warnings.
 
-The final run of `cargo test -p stack-trident --all-targets` passed 93 tests in five binaries: unit, properties, redteam, telemetry and trident, in that order.
+The last recorded run of `cargo test -p stack-trident --all-targets` passed 93 tests in five binaries (not re-run for this review; the crate now has more test files than that run covered): unit, properties, redteam, telemetry and trident, in that order.
 
 ```text
 test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s

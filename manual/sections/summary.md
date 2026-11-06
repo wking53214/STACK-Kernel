@@ -1,8 +1,8 @@
 ## Summary
 
-TACK checks fail closed (682 of 692 tests pass); ANC bounds timing leaks but cannot zero them, and a t-test cannot prove one absent.
+TACK checks fail closed (682 of 692 tests passed in the last recorded run, not re-run for this review); ANC bounds timing leaks but cannot zero them, and a t-test cannot prove one absent.
 
-*Exists today in sentinel_os: the Sentinel Hash-Chain only. New design: everything else, reference implementations compiled and tested on Rust 1.94.*
+*Exists today in sentinel_os: the Sentinel Hash-Chain only. New design: everything else, reference implementations compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README).*
 
 Fail closed means a check refuses what it cannot judge instead of passing it. Red-team tests, attacks written by separate agents, probed this in ten of the eleven crates. ANC (Active Timing Cancellation) defends against attackers who time replies to learn secrets; a t-test asks whether two groups of times differ on average.
 
@@ -20,4 +20,4 @@ Fail closed means a check refuses what it cannot judge instead of passing it. Re
 | ANC Strategy 3: `constant_time` compare | New | 39 of 45 | 6 of 17 failed, all minor and not yet fixed; 11 of 17 pass | The no-branch property belongs to one binary; a compiler or target change can undo it |
 | ANC measurement harness | New, test tooling | 23 of 23 | No red team; 0 of 50 A/A calibration runs flagged | A pass means no leak detected at that sample size, never proof of none |
 
-All 11 crates compile on Rust 1.94 and pass clippy with warnings denied. Of 194 red-team tests, 104 failed against the first builds and 10 still fail, all in the three ANC strategy crates. The ANC strategies were measured in release builds, about 100,000 requests per class, on one shared 4-vCPU KVM virtual machine (Intel Xeon, 2.10 GHz).
+The 11 crates were last recorded compiling on Rust 1.94 and passing clippy with warnings denied (the workspace now requires 1.95, and CI's clippy job pins 1.99.0). Of 194 red-team tests, 104 failed against the first builds and 10 still fail, all in the three ANC strategy crates. The ANC strategies were measured in release builds, about 100,000 requests per class, on one shared 4-vCPU KVM virtual machine (Intel Xeon, 2.10 GHz).

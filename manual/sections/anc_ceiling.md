@@ -253,9 +253,9 @@ A Kolmogorov-Smirnov (KS) test, which compares the whole shape of two distributi
 
 | Layer | Runs in CI | Build | n per class | What it checks |
 |---|---|---|---|---|
-| `tests/leak.rs` | Yes, in `cargo test --all-targets` | Debug | 20,000 | Calibration, then Spin at a 50 µs ceiling; about 2.4 s |
+| `tests/leak.rs` | Yes, in CI jobs `anc` and `anc-wall-clock` | Release | 20,000 | Calibration, then Spin at a 50 µs ceiling; about 2.4 s |
 | `tests/behaviour.rs`, `tests/redteam.rs`, `tests/telemetry.rs` | Yes | Debug | Not statistical | Never early, overrun rounding, drop cost absorbed, budget fallback, shedding, metrics firing under a test recorder |
-| `examples/verify.rs` | No; CI only compiles it | Release | 100,000 | The reported numbers below; about 4 minutes per run |
+| `examples/verify.rs` | No; CI does not run it | Release | 100,000 | The reported numbers below; about 4 minutes per run |
 
 The CI guard's assertions follow, from `tests/leak.rs`; crops are held to the looser line of 10 used by dudect, a published timing-test tool. Debug-build timings are a regression guard, not evidence.
 
@@ -291,17 +291,17 @@ Overruns were rare: 9 released late and 3 RETRYs in 1.8 million padded requests.
 
 **Red team and test status.** A red-team pass wrote 17 attack tests against the first build: 9 broke it, 1 partly broke it, and 7 held. The fixes made all 9 pass, though rt04 is now flaky.
 
-One pre-existing async test had its upper bound raised from 50 ms to 300 ms for the new retry window. The final re-run for this manual of `cargo test -p stack-anc-ceiling --all-targets` ended with this summary line:
+One pre-existing async test had its upper bound raised from 50 ms to 300 ms for the new retry window. The last recorded run (not re-run for this review) of `cargo test -p stack-anc-ceiling --all-targets` ended with this summary line:
 
 ```text
 test result: FAILED. 15 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s
 ```
 
-The failures were rt10, the open finding below, and rt04. Over 12 full runs, rt10 failed every time. The fix record called the suite stable over 4 runs, but these runs were not.
+The failures were rt10, the open finding below, and rt04. Over 12 full runs, rt10 failed every time before the slot-hold fix below; after that fix it passes. The fix record called the suite stable over 4 runs, but these runs were not.
 
 Three timing tests failed intermittently on this shared host: rt04 in 3 of 12 runs, rt15 in 2, and `hard_overrun_is_retry_released_on_a_boundary_not_at_completion` in 2. Test rt15 hit an unplanned overrun, and in rt04's captured failures the later class switched between runs, with outliers up to 41.7 ms. The behaviour test passed 20 of 20 runs on its own.
 
-The 10 unit tests, the leak guard and both telemetry tests passed every time they ran.
+The unit tests (17 `#[test]` functions by count in this review), the leak guard and both telemetry tests passed every time they ran.
 
 ### What this does not guarantee
 
@@ -312,7 +312,7 @@ The 10 unit tests, the leak guard and both telemetry tests passed every time the
 - **Sleep mode has an unexplained gap.** Its class medians differed by 154 to 274 ns, with class A later in all 3 runs. No test flagged it, and 3 runs cannot separate it from chance, so measure Sleep at a larger n before relying on it.
 - **Work past the ceiling leaks.** Each overrun can reveal up to log2(H + 1) bits, where H is `hard_ceiling_buckets`, while work plus drop ends inside W. In the blocking API, each further W of work time t adds one more release time: log2(H + ceil(t / W)) bits.
 - **Fast lane (opt-in, `LanedPad`).** Two gates, each its own pad with its own slots, spin budget, scaling and spillway. Handlers do not choose a gate per request: each route is wired to one gate at startup (`lanes.standard()` or `lanes.fast()`), so a sender cannot pick a lane. The fast gate is for operations of fixed, known cost that never touch a secret, and gives them a much shorter fixed time. It has no input method, a hard ceiling of exactly one ceiling (an operation that runs long is discarded and answered with a RETRY, never released late), and a ceiling strictly shorter than the standard one. Every fast-lane overrun is counted (`fast_overruns()`, should stay zero) and the first is logged at warn level; a nonzero count means a mislabeled operation. A flood on one lane does not shed the other. Each lane has its own timing test (`the_fast_lane_hides_the_cost_of_cheap_operations`, `the_standard_lane_hides_the_cost_of_cheap_operations`). The pad cannot prove an operation is fixed-cost: choosing what goes on the fast gate is a code-review decision. Strategy 2 (`stack-anc-adaptive`) has no lanes, because its time is chosen by a controller rather than fixed.
-- **Extra slots on backlog and a spillway (opt-in).** Set `scaling.max_slots` above `max_concurrent` and the pad opens `step` more slots after any window of `scaling.reaction_delay` in which an arrival found every open slot held, then closes `step` after `scaling.cooldown_windows` quiet windows in a row, never outside `max_concurrent ..= max_slots`. Set `scaling.spillway_size` above zero and that many arrivals that find every slot held wait exactly `scaling.spillway_wait`, then try once more. Both use only arrival times, never work times: the slots-taken test reads the held times (arrival plus a constant), and a shed caused by the backstop is deliberately not counted as backlog because it depends on when requests returned. A full spillway sheds at once. Both are off by default. Red-team tests `rt20 and rt21` and the slot unit tests show the open-slot count, the spillway wait and the verdict are the same whichever way a victim's secret work went. `slots_open()` reports the current count. Open item: no metric yet exports the open-slot count.
+- **Extra slots on backlog and a spillway (opt-in).** Set `scaling.max_slots` above `max_concurrent` and the pad opens `step` more slots after any window of `scaling.reaction_delay` in which an arrival found every open slot held, then closes `step` after `scaling.cooldown_windows` quiet windows in a row, never outside `max_concurrent ..= max_slots`. Set `scaling.spillway_size` above zero and that many arrivals that find every slot held wait exactly `scaling.spillway_wait`, then try once more. Both use only arrival times, never work times: the slots-taken test reads the held times (arrival plus a constant), and a shed caused by the backstop is deliberately not counted as backlog because it depends on when requests returned. A full spillway sheds at once. Both are off by default. Red-team tests `rt20 and rt21` and the slot unit tests show the open-slot count, the spillway wait and the verdict are the same whichever way a victim's secret work went. `slots_open()` reports the current count.
 - **Slot hold time (fixed in this version).** Every admitted request holds its slot for one fixed time, the hard ceiling (`ceiling x hard_ceiling_buckets`), counted from admission, whatever its work time. A probe is shed or served by arrival times alone, so a third party can no longer tell whether a victim overran (red-team test rt10 now passes). The cost is capacity: each slot admits one request per hard ceiling, so throughput is at most `max_concurrent / hard ceiling`. Raise `max_concurrent` to compensate. The hard ceiling is the posted speed limit and is a placeholder until measured work times set it. A backstop of `4 x max_concurrent` requests inside the pad bounds requests stuck past the hold; it leaks only after an attacker has already pushed requests over the limit.
 - **A RETRY is visible as content.** An overrun RETRY reads differently from a value. It is counted, not hidden.
 - **Service under flood is not protected.** The cap bounds CPU but lets the flood starve legitimate clients.

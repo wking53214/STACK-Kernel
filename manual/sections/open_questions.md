@@ -1,6 +1,6 @@
 ## Open questions
 
-65 decisions remain; the one that touches most components is who owns per-sender quotas, since no component keeps honest clients served under flood.
+63 decisions remain (the checklist has 63 open items); the one that touches most components is who owns per-sender quotas, since no component keeps honest clients served under flood.
 
 *New design decisions, except the six Sentinel items, which concern sentinel_os as it exists today*
 

@@ -1,5 +1,7 @@
 # Elegant Defect-Fixing Completion: ≡TACK Kernel
 
+> **Note (November 2026, accuracy review):** this log was checked against the repository. Commit hashes that do not exist here are unverifiable: 2f7c9e1, 3a9f2c5, 4d8e7b6, 5e6a9d3, 6f0b2e4, 7g1c3h2 and 8h2d4i3. Commit c4b56d8 does not have the subject this log gives it. The class in the code is `VolumeCounter`, not `TokenBucketCounter`. Results attributed to an external `ghost_tools` repository were not checked here. The status lines describe the time they were written.
+
 **Author**: William N. King  
 **Date**: 2026-10-02  
 **Status**: Defect-fixing phase COMPLETE  
@@ -76,7 +78,7 @@ All six layers of the ≡TACK Kernel have completed beautification, rewriting, a
 ### Layer 3: RateLimiting (HIGH)
 
 **Defect 1**: SlidingWindowRing is single counter, not sliding window.
-- **Fix**: Renamed to TokenBucketCounter; documented limitation in comment.
+- **Fix**: Renamed to VolumeCounter; documented limitation in comment.
 
 **Defect 2**: Debt check occurs after CAS (race condition window).
 - **Fix**: Re-order checks; validate before incrementing.
@@ -93,7 +95,7 @@ All six layers of the ≡TACK Kernel have completed beautification, rewriting, a
 - Edge cases: Zero-token requests, overflow conditions ✓
 
 **Commits**:
-- `c4b56d8`: Layer 3 - RateLimiting - Rename SlidingWindowRing to TokenBucketCounter
+- `c4b56d8`: Layer 3 - RateLimiting - Rename SlidingWindowRing to VolumeCounter (this hash's subject in the repository differs; see the note at the top)
 - `2f7c9e1`: Layer 3 - RateLimiting - Fix debt check race and remove unused params
 
 ---
@@ -246,7 +248,7 @@ f62cf3f Step P3.2 - Hard Preemption - Schema design + implementation
 4d8e7b6 Layer 4 - Orchestration - Add lifecycle guards to capability mutation
 3a9f2c5 Layer 4 - Orchestration - Extract gates into separate methods
 2f7c9e1 Layer 3 - RateLimiting - Fix debt check race and remove unused params
-c4b56d8 Layer 3 - RateLimiting - Rename SlidingWindowRing to TokenBucketCounter
+c4b56d8 Layer 3 - RateLimiting - Rename SlidingWindowRing to VolumeCounter (this hash's subject in the repository differs; see the note at the top)
 781c53d Layer 2 - Preemption - Clear flag after disarm with release semantics
 1d59c17 Clean up gitignore
 bba99f3 Layer 1 - HardwareClock - Fail on unknown architecture

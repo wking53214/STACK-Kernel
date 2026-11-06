@@ -2,7 +2,7 @@
 
 Elastic Bumpers absorbs small parameter drift before work starts, at most 3 counted corrections per request by default, and refuses everything else.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
 ### Metaphor and goal
 
@@ -189,7 +189,7 @@ Copies are bounded too. Enum text longer than the longest declared name is refus
 | Number out of range | Dropped; the engine treats the signal as absent | Clamped inside the soft-to-hard margin, refused past the hard edge |
 | NaN, infinity or non-numeric | Dropped | Refused with a verdict, never dropped |
 | Key with no declared bounds | Passed through unchanged | RETRY `unknown_param` |
-| Record of changes | Free-text notes. The one production call site, line 1435, binds them to `_context_notes` and never reads them. | A typed `Correction` list, returned to the caller and counted in metrics |
+| Record of changes | Free-text notes. The one production call site, line 1473 of `observe_consolidated.py` in the observe-perceive repository, binds them to `_context_notes` and never reads them. | A typed `Correction` list, returned to the caller and counted in metrics |
 | Raw input in records | Notes include the dropped value | Never; byte length and full SHA-256 only |
 
 Dropping suits a consumer that already handles absence well, as the observe-perceive engine does. It loses information, though: a reading of 101 against a limit of 100 becomes no reading. Clamping keeps the signal but changes it, so it is safe only inside a declared band with every change visible.
