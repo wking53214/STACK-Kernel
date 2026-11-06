@@ -91,7 +91,7 @@ authorize and spawn, revoked while running, unrelated capability unaffected,
 unreadable revocation list fails closed). Implemented and tested with a test
 executor, and with the real worker: `SupervisedExecutor` implements the stop
 hook, so a signed capability revoked while a 3 s spin worker runs kills that
-worker (measured 58 ms from revocation to a recorded, dead worker, asserted
+worker (measured 27 ms on 2026-11-06 from revocation to a recorded, dead worker, asserted
 under 1 s), the receipt terminal is a non-success `Terminated`, and an unrelated
 run is unaffected (`stack-admission/tests/revocation_real_worker.rs`).
 
@@ -126,8 +126,8 @@ Nothing may follow the signature. The parser refuses truncation at every
 length, trailing bytes, a wrong domain tag, an unsupported version,
 out-of-bounds lengths on every field, invalid UTF-8, control characters,
 empty sets, unsorted or duplicate members, bad scope kinds and booleans,
-bad paths and inverted windows (`tests/capability.rs`). It never
-allocates for a declared length before the bytes are present, and a
+bad paths and inverted windows (`tests/capability.rs`). Declared counts are
+capped by fixed maximums before any allocation, and truncation at any length is refused. A
 single-bit mutation sweep over the whole wire never panics.
 
 The capability digest is SHA-256 over `stack-authority/capability-digest/1\n`
@@ -340,14 +340,14 @@ process (D2-C) is deferred and NOT implemented; see `crates/stack-ffi/ABI.md`.
 2. Where does `decision_root` come from? CNS `super_gate._root` lives in
    Python. `stack-receipt` reimplements it in Rust (`decision_root`), checked
    against committed CNS vectors, and `stack-admission` recomputes it before
-   it asks this crate to authorize (register D-11, D-12).
+   it asks this crate to authorize (register D-11, D-12, kept outside this repo).
 3. How does Trident's verified envelope combine with this crate? The
    natural seam is: Trident admits the envelope, the boundary derives the
    `ActionRequest` from the verified handoff, and this crate authorizes.
    Whether an `Assurance` flag or outcome on the Trident side should gate
    the call, or be recorded beside the `AuthorizedAction`, is undecided.
 4. Issuer side: no issuer exists. `cns_interop` holds Ed25519 signing in
-   Python (register D-19); whether it becomes the issuer of this format is
+   Python (register D-19, kept outside this repo); whether it becomes the issuer of this format is
    a human decision.
 5. Receipt home (decision C): `AuthorizedAction` is the input; the
    receipt type and verifier are Phase 4.
