@@ -158,8 +158,8 @@ jobs:
   crosscheck:
     # Runs the real Python verifier (sentinel_os tools/verify_receipts.py) and the Rust stack-sentinel-verify
     # binary on the same inputs and fails on any difference that is not listed in
-    # crates/stack-sentinel/tests/crosscheck.rs. sentinel_os is private, so the job needs a read-only token
-    # for it in the repository secret SENTINEL_OS_TOKEN. Without the secret the job is skipped and passes;
+    # crates/stack-sentinel/tests/crosscheck.rs. sentinel_os is public (checked November 2026), so the checkout needs no token. The job still
+    # reads the repository secret SENTINEL_OS_TOKEN and is skipped without it, so it can pass having checked nothing;
     # it then checks nothing, so do not make it a required check until the secret is set. The skip is
     # reported as a warning annotation and a step summary line so that it does not read as a clean pass.
     # It is not made a failure here because pull requests from forks never receive the secret.

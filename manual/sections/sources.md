@@ -28,7 +28,7 @@ Five web pages and twelve local files were opened; seven papers the network bloc
 | `sentinel_os/tools/verify_receipts.py` | The offline command and its six verdicts. |
 | `sentinel_os/APPLY_verdict_receipts.md` | Section 6, the service-key holder limitation. |
 | `sentinel_os/sentinel_os/rate_limiter_v2.py` | A Redis token bucket that fails open. |
-| `sentinel_os/sentinel_os/queue_schema.py` | One Redis list per queue, and `TransmissionQueue`. |
+| `sentinel_os/sentinel_os/queue_schema.py` | The Redis queue layout and `TransmissionQueue`. |
 | `sentinel_os/CLAUDE.md` | Rule 4: never truncate a hash. |
 | [stack-anc-harness victim.rs](../../crates/stack-anc-harness/src/victim.rs) | The early-exit victim `leaky_validate` and the constant-time control `ct_validate`, over a 32-byte token. |
 

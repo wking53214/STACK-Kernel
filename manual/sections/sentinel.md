@@ -1,6 +1,6 @@
 ## 7. Sentinel Hash-Chain
 
-Edits to hashed fields, deleted rows, and tails cut past the latest anchor in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in all 211 cases.
+Edits to hashed fields, deleted rows, and tails cut past the latest anchor in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in 210 of the 211 recorded cases, and the one remaining difference is listed in the test.
 
 *Exists today in sentinel_os. The Rust verifier, stack-sentinel, is a new design: reference implementation compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
