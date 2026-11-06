@@ -152,6 +152,7 @@
 pub mod clock;
 pub mod config;
 pub mod outcome;
+pub mod source_guard;
 pub mod telemetry;
 pub mod wait;
 
