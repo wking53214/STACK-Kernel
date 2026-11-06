@@ -2212,11 +2212,18 @@ mod tests {
             // Nothing above spent a token: the domain still serves its full 9.
             let (ok, ms) = served_runs(&path, 4);
             assert!(ok >= 9 && ok <= 9 + (ms / 100) as u32 + 1, "served {ok} in {ms} ms");
-            // Exhausted now: refused, and the audit ring says so.
-            assert_eq!(
-                supervised_run_governed(&req(0x01), &lim, &mut out).unwrap_err(),
-                GovernedSupervisedError::RateLimited
-            );
+            // Exhausted now: refused, and the audit ring says so. The bucket refills continuously
+            // (about one token per millisecond), so a slow machine can refill past the threshold in
+            // the gap since `served_runs` stopped. That can let ONE more run through; it spends the
+            // tokens again, so the next call must be refused.
+            let mut refused = None;
+            for _ in 0..2 {
+                if let Err(e) = supervised_run_governed(&req(0x01), &lim, &mut out) {
+                    refused = Some(e);
+                    break;
+                }
+            }
+            assert_eq!(refused, Some(GovernedSupervisedError::RateLimited));
             assert!(audit_count(4, HostAuditEvent::RateLimitTriggered) >= 1);
             return;
         }
