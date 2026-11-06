@@ -19,7 +19,7 @@ must be stopped goes through `stack_supervised_run` (see `cpp/CONTAINMENT.md`).
 
 ## 1. ABI delta, base to HEAD
 
-Base is `ccr-2a7ddb2d-fccloq`. Symbol names and signatures of every symbol
+Base is commit `2fcefff` (the merge of PR #56; its head branch, `ccr-2a7ddb2d-fccloq`, has since been deleted). Symbol names and signatures of every symbol
 that existed before are unchanged. Additions and changes of meaning:
 
 | Step | Symbol | Change |
@@ -37,7 +37,7 @@ that existed before are unchanged. Additions and changes of meaning:
 | 4 | `stack_execute_governed_transaction` | NEW -13: a capability change is pending; nothing ran, nothing was consumed; retry. |
 | 5a | Rust `audit_read_slot` | Result flipped to what its documentation said: `Some` for a written slot, `None` for an empty one. The C symbol `stack_audit_read_slot` is unchanged. |
 | A3 | `int stack_supervised_run_governed(context_id, required_capability_m0, required_tokens, payload_kind, worker_path, limits, reap_timeout_ns, out, out_capacity, report)` | NEW. Capability and rate-limit checks through the initialized host BEFORE a clean worker program is spawned. Codes in section 8. |
-| R2-K-20 | `stack_execute_governed_transaction`, `stack_supervised_run_governed` | Behaviour: `required_tokens == 0` is now -5 (rate limited), audited as a rate-limit event, nothing consumed, nothing run or spawned. Before, a zero-token request passed the governor's floor check for free (`available >= Reserved + 0`) and was accepted without limit (2000 of 2000 governed runs at 0 tokens, against 9 of 30 at 100 tokens). A caller that passed 0 must pass at least 1. |
+| R2-K-20 | `stack_execute_governed_transaction`, `stack_supervised_run_governed` | Behaviour: `required_tokens == 0` is now -5 (rate limited), audited as a rate-limit event, nothing consumed, nothing run or spawned. Before, a zero-token request passed the governor's floor check for free (`available >= Reserved + 0`) and was accepted without limit (figures from the test comment in `cpp/tests/ffi_supervised_tests.cpp`: 2000 of 2000 governed runs at 0 tokens, against 9 of 30 at 100 tokens). A caller that passed 0 must pass at least 1. |
 | R2-K-21 | `int stack_supervised_run_governed(context_id, required_capability_m0, required_tokens, payload_kind, worker_path, worker_sha256, limits, reap_timeout_ns, out, out_capacity, report)` | SIGNATURE CHANGE relative to the previous commit of this series (the symbol is NEW relative to the base, so no base caller breaks): `const uint8_t* worker_sha256` (32 bytes) inserted after `worker_path`. REQUIRED. NULL is -16 (fail closed); an image that does not hash to it is -17. New -14 causes: a symlink in the path, setuid, setgid or group-writable image. |
 | R2-K-21 | `int stack_supervised_image_sha256(const char* path, uint8_t out[32])` | NEW. SHA-256 of a file, for provisioning and for tests. 0, a positive errno, or -3 for a null argument. No trust policy. |
 | R2-K-24 | `stack_host_set_capabilities`, `stack_supervised_run_governed` | A pending change now TERMINATES governed supervised workers in flight instead of waiting for them; the run's `report->outcome` is NEW value 13 `Terminated`. Section 5. |
@@ -300,8 +300,8 @@ and the worker ran to its deadline with the revoked capability still in force.
   registered but not yet forked when the request came is not spawned and is
   refused with -13, tokens refunded.
 - tested: with two 3 s workers (a spinner and a blocked one) in flight the
-  change applied after 0.5 to 0.6 ms (measured, development host, five runs;
-  asserted below 1 s) with both workers dead and reaped when it returned, both
+  change applied after 0.5 to 0.6 ms (measured once in an earlier development run, not re-measured for this document;
+  the test asserts `applied_ms < 1000`) with both workers dead and reaped when it returned, both
   outcomes `Terminated` with `elapsed_ns` below 1 s, a later run with the revoked
   capability -4 with nothing spawned, and the terminated run's 100 tokens still
   spent. Tests: `ffi_supervised_tests.cpp` "a pending revocation terminates
@@ -360,10 +360,12 @@ builds of the same tests. No Rust test runs under the sanitizer.
 - No isolation on the in-process path. `-6` is detected after the payload
   returns; a payload that never returns, or blocks in a syscall, is not stopped.
   The deadline signal can also arrive late under CPU contention (R2-K-16, up to
-  182 ms of CPU time into a 50 ms budget in the probe, four cores, six busy
+  182 ms of CPU time into a 50 ms budget in an external probe (not in this repo, not re-run here), four cores, six busy
   loops); see `cpp/CONTAINMENT.md`.
-- The audit ring's seqlock is single-writer (R2-K-10); the host ring is written
-  from many threads. Not changed here.
+- The audit ring's slot protocol assumes one writer per slot at a time (R2-K-10).
+  The host ring is pushed to from many threads, and the header comment at `Push`
+  says concurrent pushes are safe, so this is an open question, not a verified
+  guarantee. Not changed here.
 - aarch64: the wrapper includes `<x86intrin.h>` unconditionally (R2-E-10);
   only x86_64 is built and tested.
 
@@ -518,7 +520,7 @@ What is now done (each statement names its test):
 - implemented, tested: SIGCHLD ignored is refused (`SigchldIgnored`, outcome 11)
   after governance and refunds the tokens ("a run that spawns nothing refunds").
 
-Measured on the development host (four cores, otherwise idle): spin, CPU-bound
+Measured in an earlier run on the development host (four cores, otherwise idle; not re-measured for this document): spin, CPU-bound
 and blocked-syscall workers killed at 300.9 to 301.1 ms for a 300 ms deadline;
 governed timeouts at 40 ms: worst 41.5 to 42.8 ms over 50 runs; at 150 ms: 151
 ms; an ineffective kill reports `TerminationUnconfirmed` at 400.6 ms for a 100
