@@ -21,6 +21,11 @@ These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](http
 | `stack-anc-adaptive` | ANC strategy 2: adaptive rolling-average blinding |
 | `stack-anc-pipeline` | ANC strategy 3: instruction-level pipeline padding |
 | `stack-anc-harness` | Timing measurement harness (Welch t-test), test tooling |
+| `stack-admission` | End-to-end admission chain: a CNS decision and capability in, a signed receipt out |
+| `stack-authority` | Verify-only authorization boundary: capabilities, scope, revocation |
+| `stack-receipt` | Execution receipts and their independent verifier |
+| `stack-bumpers` | Elastic Bumpers: a new design, see the crate's own status note |
+| `stack-ffi` | C++/Rust FFI bridge to the containment stack |
 | `_warm` | Dependency warm-up crate, not part of the kernel |
 
 C++ headers (kernel layers 1-6) in `cpp/include/`:
@@ -34,6 +39,8 @@ C++ headers (kernel layers 1-6) in `cpp/include/`:
 | `stack_audit.hpp` | Layer 5: Audit trail + subject binding |
 | `stack_arena.hpp` | Layer 6: Memory isolation + arena allocation |
 
+`cpp/include/` also holds `stack_run_cancel.hpp` (lets another thread stop a supervised worker in flight) and `stack_supervised_exec.hpp` (supervised execution in a child process). Neither is a numbered layer.
+
 `manual/sections/` holds the manual's sections as markdown. `manual/measurements/`
 holds the raw timing runs the ANC sections quote. `manual/review/` holds the
 final reviewer's findings. Whether each finding is reflected in the manual has not been checked.
@@ -42,15 +49,15 @@ final reviewer's findings. Whether each finding is reflected in the manual has n
 
 Rust 1.95 or newer is required (`rust-version` in `Cargo.toml`). The CI clippy job pins
 Rust 1.99.0; the other CI jobs use the stable toolchain. Most external dependencies come
-from the workspace list in `Cargo.toml`. A few crates, such as `stack-p3-2` and `stack-ffi`,
-declare their own external crates in their `Cargo.toml` files.
+from the workspace list in `Cargo.toml`. A few crates declare their own external crates in their `Cargo.toml` files:
+`stack-p3-2` in its normal dependencies, and `stack-ffi` only in its test dependencies.
 
 ```
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets --no-fail-fast
 ```
 
-Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. The test `shedding_reflects_load_only_for_balanced_dummy` (ANC Strategy 3) records an open finding. It fails in debug builds (2 of 2 runs when checked) and passes in release (1 of 1 run when checked), so read it only as a release-build signal. The Summary section lists the open ANC limits.
+Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. The test `shedding_reflects_load_only_for_balanced_dummy` (ANC Strategy 3) records an open finding. Its observed results conflict across two notes in the repo. This README reports 2 of 2 debug runs failing and 1 of 1 release run passing. The CI note on `ANC_WALL_CLOCK_TESTS` reports 5 of 5 debug runs and 2 of 5 release runs failing. Treat it as a timing-sensitive signal, not a settled result, until the runs are reconciled. The Summary section lists the open ANC limits.
 
 CI tests the four ANC crates in two jobs, both in release and one test at a
 time. `anc` runs every test except the wall-clock ones. It has no `continue-on-error`,
