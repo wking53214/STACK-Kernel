@@ -114,7 +114,7 @@ committed script under `python3 -I` at CNS commit
 
 ### Format version 2: supervisor-observed facts (D1-C)
 
-Status: implemented and tested in this crate and in `stack-admission`, which writes it on every real run.
+Status: implemented and tested in this crate and in `stack-admission`, which writes it whenever the supervisor reports its facts. A run refused before spawn, or an executor that reports none, still writes version 1 (see "Wired" below).
 
 A terminal event may carry the two facts the supervisor observed
 (`cpp/CONTAINMENT.md`, "Supervisor-observed facts and payload claims"):
@@ -170,8 +170,8 @@ bytes).
 | `Attempted` | 4 | 8 | after `started_at_ms`: `image_sha256` (32 bytes), then the limits the supervisor was given as explicit fields: `wall_clock_deadline_ns`, `cpu_seconds`, `address_space_bytes`, `max_output_bytes`, `file_size_bytes` (u64 each), `nofile` (u32). 76 bytes. |
 | `Authorized` | 2 | 7 | after the action: the use store's evidence, a kind byte then `not_provided`, `non_durable_memory`, `durable` (record hash, position u64, head) or `no_new_record` (position, head) |
 
-The limits are written explicitly (76 bytes) and not as a digest: a digest of the
-limits plus the deadline is 40 bytes, but only the explicit form lets a verifier
+The limits are written explicitly (76 bytes) and not as a digest: a 32-byte digest of the
+limits plus the 8-byte deadline is 40 bytes, but only the explicit form lets a verifier
 state under which limits the worker ran without already knowing them. The deadline
 is recorded in nanoseconds, exactly as applied; `AppliedLimits::wall_clock_deadline_ms`
 rounds up. They are the limits the kernel handed the supervisor. A zero
@@ -307,7 +307,7 @@ newest header slot, yields exactly the same records).
 `verify_log(records, trusted, expectations)`; `verify_log_bytes` parses
 the file format first. Output: `Verification { state, execution, scope,
 findings }`, with `to_json()` so no consumer gets a bare word (register
-D-07).
+D-07, kept outside this repo).
 
 ### States, exactly
 
@@ -478,7 +478,7 @@ tested through a failing log wrapper at the trait (see section 6).
   pass it as `Expectations::anchor`. The verifier then rejects a log that no
   longer holds that record (`log_does_not_reach_anchor`, `anchor_mismatch`;
   `tests/anchor.rs`). A rollback to a point at or after the anchor stays
-  undetectable, so the limitation is still listed. Same class as D-09 and D-28.
+  undetectable, so the limitation is still listed. Same class as D-09 and D-28 (D-28 is kept outside this repo).
 * A log file that is deleted or truncated to zero length is created again as
   a new, empty log at the next open, with no error and no marker that an
   earlier log existed.
