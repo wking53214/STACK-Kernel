@@ -2,7 +2,7 @@
 
 The Minotaur String caps every walk at 64 levels of nesting and 100,000 steps by default, and flags loops using memory fixed at construction.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written. The workspace now requires 1.95 (see the README).*
 
 ### Metaphor and goal
 

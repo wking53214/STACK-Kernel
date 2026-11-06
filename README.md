@@ -39,19 +39,21 @@ final reviewer's findings. Not all of them are applied to the manual yet.
 
 ## Build and test
 
-Rust 1.95 or newer is required (`rust-version` in `Cargo.toml`); the original reference
-build used 1.94. Dependencies are limited to the workspace list in
-`Cargo.toml`.
+Rust 1.95 or newer is required (`rust-version` in `Cargo.toml`). The CI clippy job pins
+Rust 1.99.0; the other CI jobs use the stable toolchain. Dependencies are limited to the
+workspace list in `Cargo.toml`.
 
 ```
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets --no-fail-fast
 ```
 
-Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. One test fails every time because it records an open finding: `shedding_reflects_load_only_for_balanced_dummy`, in ANC Strategy 3. The Summary section lists the open ANC limits.
+Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. The test `shedding_reflects_load_only_for_balanced_dummy` (ANC Strategy 3) records an open finding. It fails in debug builds (2 of 2 runs when checked) and passes in release (1 of 1 run when checked), so read it only as a release-build signal. The Summary section lists the open ANC limits.
 
 CI tests the four ANC crates in two jobs, both in release and one test at a
-time. `anc` runs every test except the wall-clock ones and blocks a merge.
+time. `anc` runs every test except the wall-clock ones. It has no `continue-on-error`,
+so a failure fails the job; whether that blocks a merge depends on branch protection,
+which this review did not check.
 `anc-wall-clock` runs exactly the wall-clock ones, named with the reason for
 each in `ANC_WALL_CLOCK_TESTS` in `.github/workflows/ci.yml`, on every push
 and pull request. It is marked `continue-on-error` because a shared runner
@@ -134,7 +136,7 @@ Status: accepted, documented, not eliminated. The padded response still has a sm
 | Same, A vs A control (no difference expected) | -0.07 ns | standard error 0.33 ns | t = -0.2, valid |
 | Loopback socket, 1 connection, 800,000 requests | -3.2 ns (middle 50%) | per request sd 1.28 µs | t = -0.8, not detectable at this sample size |
 
-The sign has been negative in every run we measured on this machine except one early subagent run, which reported the opposite sign for the same seeds. We have not reproduced that run, and we don't know its cause.
+In the baseline runs (no barrier), the sign was negative in every run we kept, except one subagent session of 10 runs that reported the opposite sign for the same seeds. We have not reproduced that session and don't know its cause. With the barrier added in the server, the sign was mixed (pooled +0.39 ns, not significant).
 
 ### What an attacker needs (estimates, not measurements on a real network)
 
@@ -150,8 +152,8 @@ Loopback is the most favorable channel for an attacker. If a real deployment is 
 
 - **A memory barrier after the validator** (1,000 fences). In-process, it cut the gap to about -0.9 ns, but that result is not a fix. It added about 6 µs per request, and at 4 connections the overrun rate rose from 0.002% to 0.075% and errors from 2 to 34. The release-time check failed, so the barrier was not adopted.
 - **Padding overshoot exists even without load.** The 99th percentile release lands 11 to 14 µs past the 50 µs ceiling at every connection count tested (1, 2, 4 and 8). The median overshoot is under 0.1 µs.
-- **Overrun replies are a separate timing class.** Under 4 connections, 2 of about 200,000 padded operations finished after the hard ceiling and were answered with `Trip::Overrun`. Their release time differs from normal replies. The cause is probably the OS briefly descheduling a spinning thread (not measured). Overruns are counted, not hidden.
-- **Eight connections** produced 2 client errors out of 8 clients. We have not identified the error type.
+- **Overrun replies are a separate timing class.** In the guarded 4-connection run, 2 of about 200,000 padded operations finished after the hard ceiling and were answered with `Trip::Overrun`. Their release time differs from normal replies. The cause is probably the OS briefly descheduling a spinning thread (not measured). Overruns are counted, not hidden.
+- **Eight connections:** the stage recorded 2 errors (client or pad, not separated). We have not identified them.
 
 ### What limits the damage
 
@@ -174,11 +176,10 @@ The loopback measurements came from scratch harnesses that are **not committed t
 
 ## Known state
 
-- Defect-fixing phase COMPLETE (October 2, 2026)
-  - All six layers + P3.2 hardened
-  - 15 architectural defects identified and fixed
-  - 6 red-team validation passes
-  - All tests passing
+- Defect-fixing phase recorded as complete on October 2, 2026 (historical)
+  - All six layers + P3.2 hardened, per the completion log
+  - 15 architectural defects and 6 red-team passes, per the completion log (counts not re-verified in November 2026)
+  - Not every test passes on every run. The ANC wall-clock job is non-blocking and failed on the last runs checked. The ANC timing tests fail under load, and one fails in debug builds (see above)
   - See `manual/ELEGANT_COMPLETION_LOG.md` for details
 - ANC timing-sensitive tests may fail under load
   - Run on idle machine for reliable results

@@ -2,7 +2,7 @@
 
 A request that finds its lane empty is dispatched within one epoch (8 ms by default) plus poll latency, whatever other lanes do, as long as the driver misses no phases.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written. The workspace now requires 1.95 (see the README).*
 
 ### Metaphor and goal
 

@@ -2,7 +2,7 @@
 
 Ceiling padding showed no detectable leak in 9 of 9 release runs at about 100,000 per class (worst max |t| 2.92; leak line 4.5).
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written. The workspace now requires 1.95 (see the README).*
 
 ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-ceiling`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 

@@ -1,5 +1,7 @@
 ## Verification pipeline
 
+*Status note (November 2026): the only workflow in this repository is `.github/workflows/ci.yml`. It has no nightly `timing` job, no self-hosted runner, and no release-tag trigger, and its clippy job pins Rust 1.99.0. The snippets below use Rust 1.94 and describe a planned job. Read them as design notes, not as what runs today.*
+
 A build ships only if all 16 timing verdicts stay at or below |t| 4.5, at 100,000 samples per class, on the first attempt: 11 strategy verdicts (3 for Strategy 1, 4 for Strategy 2, 4 for Strategy 3) and 5 constant-time control runs.
 
 *New design: the job below has not run on GitHub Actions. Its gate expressions were run against the recorded verify output, and its test commands were re-run for this section.*
