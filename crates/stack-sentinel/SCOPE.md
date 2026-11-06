@@ -37,7 +37,7 @@ The record states it in a fixed field:
   recompute. An older genuine anchor verifies a chain cut back to its count.
 * **that the original action was legitimate.** The ledger records what the
   writer recorded. Anyone holding the service key can re-sign a rebuilt chain
-  and a new anchor (`APPLY_verdict_receipts.md`, section 6).
+  and a new anchor (`APPLY_verdict_receipts.md`, section 6; that file is not in this repo, so it is cited, not checked).
 * **anything about execution.** The ledger holds decisions, not evidence
   that any decision was carried out.
 
@@ -55,6 +55,8 @@ The six words, their exit codes and the default CLI output are unchanged
 | `SEED_FORGED` (exit 1) | a `shuffle_seed` does not re-derive under a trusted key | `seed_not_derived`, `seed_retired_key`, `seed_unverifiable` |
 | `TRUNCATED` (exit 1) | the chain is shorter than, or differs from, its anchor; **or no anchor could be judged** | `tail_missing`, `head_mismatch`, `anchor_missing`, `anchor_unreadable`, `anchor_invalid`, `anchor_unknown_key`, `anchor_unverifiable`, `anchor_retired_key`, `anchor_makes_no_claim` |
 | `UNATTESTED` (exit 1) | an unsigned claim after the policy marker, or a key the auditor does not trust | `unsigned_after_policy`, `signature_unknown_key`, `signature_unknown_key_after_policy`, `signature_retired_key`, `signature_unverifiable` |
+
+A command-line usage error exits 2 and prints a message, not a verdict.
 
 `TRUNCATED` covers both "the chain was cut" and "the verifier cannot judge
 the anchor". Tell them apart by `reason` and `gate_outcome`: a `retry`
@@ -220,3 +222,6 @@ The name itself is not reported in the scope record.
 * Cross-language agreement beyond the checked-in differential corpus: the
   live cross-check against `sentinel_os` (`tests/crosscheck.rs`) is ignored
   unless that checkout is available.
+* The `sentinel_os` Python sources that the hashed-column lists and the
+  `twin_custody.py` line citations point to are not in this repo. They are
+  cited, not checked here.
