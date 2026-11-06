@@ -301,7 +301,7 @@ Not detectable from the file alone:
 
 Compaction rewrites the log without nonces past their retention window and
 keeps every sender sequence, the high-water mark and every quarantine; it
-writes, syncs and locks a fresh file before renaming it over the old one
+locks, writes and syncs a fresh file before renaming it over the old one
 (`compaction_keeps_sequences_live_nonces_and_quarantines`). The compaction
 threshold is `FileStoreOptions::compact_after_bytes`.
 
