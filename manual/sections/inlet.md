@@ -2,7 +2,7 @@
 
 The Inlet Winnowing Filter refuses malformed UTF-8 and 4,307 banned characters before any other component sees them, at fixed cost per byte.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
 ### Metaphor and goal
 

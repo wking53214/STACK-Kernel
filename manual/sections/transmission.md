@@ -2,7 +2,7 @@
 
 The Tractor Transmission changes operating mode only at zero requests in flight, so no request runs half on one configuration and half on another.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
 ### Metaphor and goal
 

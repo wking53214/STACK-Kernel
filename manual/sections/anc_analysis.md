@@ -2,7 +2,7 @@
 
 ANC cannot make the timing delta zero; the testable goal is no detectable difference at 100,000 samples per class (Welch |t| at most 4.5).
 
-*New design: analysis only. No ANC code exists in the TACK repositories today. The tests it defines run in the stack-anc-harness crate, compiled and tested on Rust 1.94.*
+*New design: analysis only. No ANC code exists in the TACK repositories today. The tests it defines run in the stack-anc-harness crate, compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README).*
 
 ### The problem ANC is meant to solve
 

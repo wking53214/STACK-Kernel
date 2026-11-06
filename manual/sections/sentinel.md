@@ -1,8 +1,8 @@
 ## 7. Sentinel Hash-Chain
 
-Edits to hashed fields, deleted rows, and tails cut past the latest anchor in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in all 211 cases.
+Edits to hashed fields, deleted rows, and tails cut past the latest anchor in sentinel_os's ledger are detectable offline; the Rust verifier matched Python in 210 of the 211 recorded cases, and the one remaining difference is listed in the test.
 
-*Exists today in sentinel_os. The Rust verifier, stack-sentinel, is a new design: reference implementation compiled and tested on Rust 1.94*
+*Exists today in sentinel_os. The Rust verifier, stack-sentinel, is a new design: reference implementation compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
 ### Metaphor and goal
 
@@ -236,7 +236,7 @@ Metrics go through the `metrics` facade and spans through `tracing` (`src/teleme
 | Name | Type | Labels | Meaning |
 |---|---|---|---|
 | `stack_sentinel_verifications_total` | counter | `verdict`, `outcome` | One per export that reached a verdict. `outcome` is that of the most severe finding. |
-| `stack_sentinel_trips_total` | counter | `verdict`, `reason` (23 values), `outcome`, `resolution` | One per finding: the first, the anchor note and the escalation. |
+| `stack_sentinel_trips_total` | counter | `verdict`, `reason` (24 values), `outcome`, `resolution` | One per finding: the first, the anchor note and the escalation. |
 | `stack_sentinel_input_rejected_total` | counter | `reason` (10 values), `outcome` (always `retry`) | One per export or key set refused before a verdict. |
 | `stack_sentinel_rows_checked_total` | counter | none | Rows the chain walk examined. It adds 0 when the anchor was missing or unreadable. |
 | `stack_sentinel_verify_duration_seconds` | histogram | `outcome` | Wall time of one `verify_export` call. A refusal is recorded as `retry`. |
@@ -355,9 +355,9 @@ Known limitations that remain:
 - **Stalled-job alert.** `StackSentinelNoCleanVerification` uses `absent_over_time`, but a long-running host keeps exporting the counter after its first VERIFIED, unless its exporter expires idle series. Adding `sum(increase(stack_sentinel_verifications_total{verdict="verified"}[26h])) == 0` as an alternative would catch a stalled job.
 - **Test strength.** The byte-edit and column-value attacks are property tests with 256 cases each, not coverage-guided fuzzing.
 
-`tests/properties.rs` adds nine properties: four at 256 cases and five at 48. `cargo clippy -p stack-sentinel --all-targets -- -D warnings` finished with no warnings.
+`tests/properties.rs` has ten property tests in three `proptest!` blocks. `cargo clippy -p stack-sentinel --all-targets -- -D warnings` finished with no warnings.
 
-The final run of `cargo test -p stack-sentinel --all-targets` passed 77 tests in seven targets: unit, binary, acceptance, differential, properties, redteam and telemetry, in that order.
+The last recorded run of `cargo test -p stack-sentinel --all-targets` passed 77 tests in seven targets (not re-run for this review; the crate has since gained test targets): unit, binary, acceptance, differential, properties, redteam and telemetry, in that order.
 
 ```text
 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

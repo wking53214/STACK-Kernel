@@ -2,7 +2,7 @@
 
 The Minotaur String caps every walk at 64 levels of nesting and 100,000 steps by default, and flags loops using memory fixed at construction.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written. The workspace now requires 1.95 (see the README).*
 
 ### Metaphor and goal
 
@@ -340,7 +340,7 @@ An independent red-team wrote 11 attacks and 2 control tests, each asserting the
 
 Four red-team tests were edited after the fixes, mainly because their attack lines no longer compiled. The compile errors are pinned by doctests instead, and each edit is listed in the fix record.
 
-Final run of `cargo test -p stack-minotaur --all-targets` (debug build): 60 tests in six targets, all passing. `cargo test -p stack-minotaur --doc` passed 6 of 6, including 4 compile_fail doctests, and clippy with `-D warnings` was clean.
+Last recorded run of `cargo test -p stack-minotaur --all-targets` (debug build): 60 tests in six targets, all passing. A count of `#[test]` attributes in this review found 61 (17 in `src`, 44 in `tests`); the run was not repeated. `cargo test -p stack-minotaur --doc` passed 6 of 6, including 4 compile_fail doctests, and clippy with `-D warnings` was clean.
 
 ```text
 $ cargo test -p stack-minotaur --all-targets   (summary lines only)

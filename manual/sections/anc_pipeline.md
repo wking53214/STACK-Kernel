@@ -2,7 +2,7 @@
 
 The brief's padding design leaked in 9 of 9 release measurements, while the branch-free compare showed no detectable leak in 12 of 12.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
 ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn secrets from how long replies take. This crate, `stack-anc-pipeline`, is a new design that is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain exists today.
 
@@ -322,7 +322,7 @@ The smoke test's calibration gate, from `tests/leak.rs`:
 
 The builder ran the smoke test ten times and all passed: `constant_time` max |t| 1.0 to 2.3, `early_exit` 386 to 540. Debug timings are not evidence, so the example refuses to run in a debug build.
 
-**CI today, and the gap.** `cargo test --all-targets` runs the smoke and red-team tests, but it only compiles the example. The example prints JSON and exits 0 even when it finds a leak. CI therefore needs a separate release job that runs it and gates on its summary.
+**CI today, and the gap.** CI runs this crate's tests in release (jobs `anc` and `anc-wall-clock`), including the smoke and red-team tests, but it never runs the example. The example prints JSON and exits 0 even when it finds a leak. A gate on its summary would need a separate job.
 
 The gate below was run against the three recorded runs. It exited 0 on each, and exited 1 when `constant_time` was swapped for `balanced_dummy`.
 
@@ -384,7 +384,7 @@ Without `black_box` the filler is gone. `objdump` places `balanced_dummy_no_blac
 
 The crate's own docs quote an earlier run on a 2.80 GHz VM, for example `balanced_dummy` at max cropped t 32.4. Its verdicts agree with the table above.
 
-**Test suite status.** `cargo clippy -p stack-anc-pipeline --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, the builder's 28 tests all pass: 15 unit, 5 equivalence, 1 flood, 1 leak, 1 logs and 5 telemetry.
+**Test suite status.** `cargo clippy -p stack-anc-pipeline --all-targets -- -D warnings` is clean in the last recorded run. With `--no-fail-fast`, the builder's 28 tests all passed in that run: 15 unit, 5 equivalence, 1 flood, 1 leak, 1 logs and 5 telemetry.
 
 The red team's 17 tests live in `tests/redteam.rs` in the same crate, and 6 of them fail on open findings. The brief's command therefore fails. Its final summary line, re-run for this section:
 
@@ -399,7 +399,7 @@ Cargo stops at the first failing target, so `tests/telemetry.rs` did not run in 
 
 **Not a proof.** A pass means no detectable leak at 100,000 samples per class, on one VM. The uncropped test could miss a mean shift below about 8 to 17 ns through the gate.
 
-**One binary.** The no-branch listing is static evidence for this x86_64 binary built by Rust 1.94. A compiler upgrade, or another target such as aarch64, can bring a branch back, so rerun the verify example after either.
+**One binary.** The no-branch listing is static evidence for this x86_64 binary built by Rust 1.94 when recorded (the workspace now requires 1.95). A compiler upgrade, or another target such as aarch64, can bring a branch back, so rerun the verify example after either.
 
 Formal tools that could check the no-branch property, such as ct-verif and binsec/rel, are not available under the workspace's dependency rules. No formal verification was done.
 

@@ -4,7 +4,7 @@ Reference implementation of the ≡TACK governance kernel, written in Rust and C
 
 These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](https://github.com/wking53214/CNS), Apache-2.0). Several source comments reference that contract.
 
-`stack-sentinel` reproduces CNS's subject digest (`cns.gate.subject_digest`) in Rust, and it is held to CNS's own answer key: `crates/stack-sentinel/tests/fixtures/cns-digest-vectors.json` is a copy of CNS's `contracts/digest-vectors.json` (contents and the digest CNS gives each, chosen to catch near-misses), and `cargo test -p stack-sentinel --test cns_vectors` recomputes every one. CNS checks this copy against its own, so a stale one is reported there.
+`stack-sentinel` reproduces CNS's subject digest (`cns.gate.subject_digest`) in Rust, and it is held to CNS's own answer key: `crates/stack-sentinel/tests/fixtures/cns-digest-vectors.json` is a copy of CNS's `contracts/digest-vectors.json` (the inputs and the digest CNS gives each), and `cargo test -p stack-sentinel --test cns_vectors` recomputes every one. According to CNS's workflow as of CNS commit `4acd8f9`, CNS runs these tests against its own copy, so a stale copy here is reported there.
 
 ## What is here
 
@@ -24,6 +24,7 @@ These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](http
 | `_warm` | Dependency warm-up crate, not part of the kernel |
 
 C++ headers (kernel layers 1-6) in `cpp/include/`:
+
 | File | Component |
 |---|---|
 | `stack_kernel.hpp` | Foundation: CNS compatibility layer |
@@ -35,26 +36,29 @@ C++ headers (kernel layers 1-6) in `cpp/include/`:
 
 `manual/sections/` holds the manual's sections as markdown. `manual/measurements/`
 holds the raw timing runs the ANC sections quote. `manual/review/` holds the
-final reviewer's findings. Not all of them are applied to the manual yet.
+final reviewer's findings. Whether each finding is reflected in the manual has not been checked.
 
 ## Build and test
 
-Rust 1.95 or newer is required (`rust-version` in `Cargo.toml`); the original reference
-build used 1.94. Dependencies are limited to the workspace list in
-`Cargo.toml`.
+Rust 1.95 or newer is required (`rust-version` in `Cargo.toml`). The CI clippy job pins
+Rust 1.99.0; the other CI jobs use the stable toolchain. Most external dependencies come
+from the workspace list in `Cargo.toml`. A few crates, such as `stack-p3-2` and `stack-ffi`,
+declare their own external crates in their `Cargo.toml` files.
 
 ```
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets --no-fail-fast
 ```
 
-Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. One test fails every time because it records an open finding: `shedding_reflects_load_only_for_balanced_dummy`, in ANC Strategy 3. The Summary section lists the open ANC limits.
+Some timing tests can fail on a loaded machine, for example `rt_driver_default_config_misses_no_phases`. Rerun a failing test alone before treating it as a regression. The test `shedding_reflects_load_only_for_balanced_dummy` (ANC Strategy 3) records an open finding. It fails in debug builds (2 of 2 runs when checked) and passes in release (1 of 1 run when checked), so read it only as a release-build signal. The Summary section lists the open ANC limits.
 
 CI tests the four ANC crates in two jobs, both in release and one test at a
-time. `anc` runs every test except the wall-clock ones and blocks a merge.
+time. `anc` runs every test except the wall-clock ones. It has no `continue-on-error`,
+so a failure fails the job; whether that blocks a merge depends on branch protection,
+which this review did not check.
 `anc-wall-clock` runs exactly the wall-clock ones, named with the reason for
-each in `ANC_WALL_CLOCK_TESTS` in `.github/workflows/ci.yml`, on every push
-and pull request. It is marked `continue-on-error` because a shared runner
+each in `ANC_WALL_CLOCK_TESTS` in `.github/workflows/ci.yml`, on pushes to `main`
+and on every pull request. It is marked `continue-on-error` because a shared runner
 can fail them with no code change, so read its result before merging ANC
 changes.
 
@@ -83,7 +87,7 @@ A second test in the same file, `live_edge_cases_differ_only_as_documented`, fee
 
 ## Design Analogy: The Flywheel
 
-≡TACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution—a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded—that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
+≡TACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution (a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded), that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
 
 ### The River and Its Banks
 
@@ -97,7 +101,7 @@ Neither the water nor the banks are static. They are in constant conversation.
 2. **Boundary enforces**: deadline fires, quota exhausted, capability revoked, memory exceeded
 3. **Trap event is logged** with full execution context
 4. **Sentinel observes** patterns in trap logs and asks: which boundaries catch most, why, in what states?
-5. **Boundaries reorganize** based on patterns—tighter deadlines for chronic overruns, reduced quotas for quota-busters
+5. **Boundaries reorganize** based on patterns, such as tighter deadlines for chronic overruns, reduced quotas for quota-busters
 6. **Next transaction** loads reorganized boundaries
 7. The flywheel turns: **traps → learning → reorganization → tighter boundaries → new traps**
 
@@ -113,22 +117,75 @@ Neither the water nor the banks are static. They are in constant conversation.
 | 6: Isolation | Memory boundary isolation (arena) |
 | P3.2: Hard Preemption | Hybrid model: signal sets flag + context-local state → trap events logged for Sentinel |
 
-Every enforcement event is a data point. Sentinel runs offline analysis (Q1-Q6 queries on trap_events table) to identify which boundaries trap most, which agents trigger most traps, what patterns emerge. Based on patterns, boundaries are reorganized for next execution.
+Every enforcement event is a data point. The intended design has Sentinel run offline analysis (Q1-Q6 queries on a `trap_events` table) to identify which boundaries trap most, which agents trigger most traps, and what patterns emerge. Based on patterns, boundaries would be reorganized for the next execution. This repository records `TrapEvent`s in `stack-p3-2`, but it does not implement the table or the Q1-Q6 analyses; those are specified in `manual/sections/p3.2_schema_design.md`.
 
 **Anti-isolation principle**: The system cannot hide enforcement from itself. Enforcement is the primary input to governance learning.
 
 ---
 
+## Accepted timing residual (ANC strategy 1)
+
+Status: accepted, documented, not eliminated. The padded response still has a small, measurable difference between the two secret-dependent paths. This section is the current record. Where it conflicts with older numbers in `manual/sections/anc_ceiling.md`, this section wins.
+
+### What the residual is
+
+`stack-anc-ceiling` releases every response at admission plus a fixed ceiling (50 µs in the tests). The validator used for measurement is `leaky_validate`, which stops at the first wrong byte. Class A (wrong at byte 0) finishes earlier than class B (wrong at byte 31). After padding, a difference remains between the two classes. Measured values, all on one 4-core virtual machine:
+
+| Setup | Gap, class A minus B | Noise | Result |
+|---|---|---|---|
+| In-process, padded, 20 runs of 20,000 per class | about -2.8 ns (mean) | run-to-run sd 1.0 ns | 19 of 20 runs negative |
+| Loopback socket, 4 connections, one source, 10 runs of 3 s | -2.39 ns | standard error 0.22 ns | t = -10.8, 10 of 10 runs negative |
+| Same, A vs A control (no difference expected) | -0.07 ns | standard error 0.33 ns | t = -0.2, valid |
+| Loopback socket, 1 connection, 800,000 requests | -3.2 ns (middle 50%) | per request sd 1.28 µs | t = -0.8, not detectable at this sample size |
+
+In the baseline runs (no barrier), the sign was negative in every run we kept, except one subagent session of 10 runs that reported the opposite sign for the same seeds. We have not reproduced that session and don't know its cause. With the barrier added in the server, the sign was mixed (pooled +0.39 ns, not significant).
+
+### What an attacker needs (estimates, not measurements on a real network)
+
+These use the standard detection rule (|t| of at least 4.5) and assume independent noise, which is the attacker's best case.
+
+- **One connection, loopback:** about 6.6 million requests per class (about 13 million total). At about 83 µs per round trip, roughly 18 minutes of traffic.
+- **Four connections, loopback:** about 70,000 requests per class (about 140,000 total), roughly 2 seconds at about 67,000 requests per second. The per-request noise drops under concurrency, probably because server threads stop sleeping between requests.
+- **A network adds noise.** Real networks are noisier than loopback, which raises these numbers. We have not measured a real network, so the attack cost on one is unknown.
+
+Loopback is the most favorable channel for an attacker. If a real deployment is slower to attack than these figures, that is a property of the network, not of the padding.
+
+### What we tried and why it is not a fix
+
+- **A memory barrier after the validator** (1,000 fences). In-process, it cut the gap to about -0.9 ns, but that result is not a fix. It added about 6 µs per request, and at 4 connections the overrun rate rose from 0.002% to 0.075% and errors from 2 to 34. The release-time check failed, so the barrier was not adopted.
+- **Padding overshoot exists even without load.** The 99th percentile release lands 11 to 14 µs past the 50 µs ceiling at every connection count tested (1, 2, 4 and 8). The median overshoot is under 0.1 µs.
+- **Overrun replies are a separate timing class.** In the guarded 4-connection run, 2 of about 200,000 padded operations finished after the hard ceiling and were answered with `Trip::Overrun`. Their release time differs from normal replies. The cause is probably the OS briefly descheduling a spinning thread (not measured). Overruns are counted, not hidden.
+- **Eight connections:** the stage recorded 2 errors (client or pad, not separated). We have not identified them.
+
+### What limits the damage
+
+- **Per-source guard** (`stack-anc-ceiling::source_guard`, PR #54, merged). Caps requests in flight per source and failed checks per source, with a cooldown. In a 3-second test from one source with 4 connections, 11 requests were admitted and 200,757 were refused, and refused responses were released on the same schedule as admitted ones. The guard is a library module. It is **not yet wired into any service**, and its limits are not tuned, because the legitimate failure rate per source is unknown.
+- **A source-spreading attacker** is slowed, not blocked. Each source has its own budget, so cost rises with the number of sources needed.
+
+### What is not claimed
+
+- That the two paths take the same time. They do not, by about 2 to 3 ns in our runs.
+- That the residual is zero, or that the test `calibrated_spin_padding_hides_the_early_exit` proves it. That test checks for a measurable difference under its own rules. It is non-blocking in CI, and it has failed on recent CI runs.
+- Attackers on the same physical core, through shared cache, or through a sibling hardware thread (SMT). These are outside the threat model.
+- Any real network, any production load pattern, or any second machine.
+- That the sign of the residual is fixed across all setups. In the baseline runs it was negative in every run we kept, except one subagent session. With the barrier added, it was mixed.
+
+### How this was accepted
+
+The residual is accepted as a known, bounded risk for this library. The bound depends on the attacker's channel and request budget, and the mitigation available now is the per-source guard, which is not yet deployed. Anyone deploying the library in front of an untrusted network must (1) wire in the guard, (2) set its limits from the legitimate failure rate for that deployment, (3) monitor overrun and refusal counts, and (4) decide whether the estimates above are acceptable for their threat model.
+
+The loopback measurements came from scratch harnesses that are **not committed to this repository**, so they cannot be reproduced from the repo as it stands.
+
 ## Known state
 
-- Defect-fixing phase COMPLETE (October 2, 2026)
-  - All six layers + P3.2 hardened
-  - 15 architectural defects identified and fixed
-  - 6 red-team validation passes
-  - All tests passing
+- Defect-fixing phase recorded as complete on October 2, 2026 (historical)
+  - All six layers + P3.2 hardened, per the completion log
+  - 15 architectural defects and 6 red-team passes, per the completion log (counts not re-verified in November 2026)
+  - Not every test passes on every run. The ANC wall-clock job is non-blocking and failed on the last runs checked. The ANC timing tests fail under load, and one fails in debug builds (see above)
   - See `manual/ELEGANT_COMPLETION_LOG.md` for details
 - ANC timing-sensitive tests may fail under load
   - Run on idle machine for reliable results
   - Strategy 1 (`rt04`) and Green Wave driver tests affected
 - ANC cannot make timing difference zero mathematically
+  - See "Accepted timing residual" above for the measured residual and its limits
   - Manual's ANC section explains signal detection limits

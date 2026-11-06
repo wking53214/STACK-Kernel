@@ -2,7 +2,7 @@
 
 Use Strategy 3's branch-free compare (max |t| at most 2.60, no added delay) where code allows, and a Strategy 1 ceiling elsewhere.
 
-*New design: reference implementations compiled and tested on Rust 1.94*
+*New design: reference implementations compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
 ### What is being compared
 

@@ -2,7 +2,7 @@
 
 The brief's rolling-average target leaked (max |t| up to 24.7, leak line 4.5); the epoch-quantized fix stayed below 4.5 at 100,000 per class.
 
-*New design: reference implementation compiled and tested on Rust 1.94*
+*New design: reference implementation compiled and tested on Rust 1.94 when written (the workspace now requires 1.95, see the README)*
 
 ANC (Active Timing Cancellation) is the kernel's defence against attackers who learn a secret from how long replies take. This crate, `stack-anc-adaptive`, is a new design and is not deployed anywhere. Of the seven TACK components, only the Sentinel Hash-Chain in sentinel_os exists today.
 
@@ -296,10 +296,10 @@ Calibration comes first. The harness must flag the unpadded `leaky_validate` and
 | Smoke test | `tests/leak.rs` | Debug, 2,000 per class, victim amplified to about 40 and 164 µs | Yes | Calibration at that n, rolling mean flagged, epoch Hybrid passes. Not evidence. |
 | Controller rules | `tests/epoch.rs`, `tests/naive.rs` | Synthetic clock times | Yes | Doubling, decreases, both budgets, freeze and thaw, and identical trajectories when the floor covers both classes. A property test with 64 cases keeps the target on the ladder. |
 | Metrics | `tests/telemetry.rs` | `DebuggingRecorder` with `metrics::with_local_recorder` | Yes | 15 of the 20 metrics are asserted to fire, with closed-set labels. The 5 added by the fixes, for the lifetime budget and panics, are not yet. |
-| Red team | `tests/redteam.rs` | 17 attack tests; one property test with 2,000 cases | Yes | 3 tests for open findings fail. |
+| Red team | `tests/redteam.rs` | attack tests (the count has grown since this was written); one property test with 2,000 cases | Yes | 3 tests for open findings fail. |
 | Evidence run | `examples/verify.rs` | Release, 100,000 per class | Compiled, not run | Calibration, leak tests, poisoning, trajectory, flood and the production budget, printed as JSON. |
 
-**CI today, and the gap.** `cargo test --all-targets` runs the smoke test but only compiles the evidence run. The example prints JSON and exits 0 even when it finds a leak, and the pinned runs took 454 and 473 s. CI therefore needs a separate release job, for example nightly, that gates on the JSON:
+**CI today, and the gap.** CI runs this crate's tests in release (jobs `anc` and `anc-wall-clock`), including the smoke test, but it never runs the evidence example. The example prints JSON and exits 0 even when it finds a leak, and the pinned runs took 454 and 473 s. A gate on its JSON would need a separate job, for example nightly:
 
 ```text
 cargo build --release -p stack-anc-adaptive --example verify
@@ -343,7 +343,7 @@ Uncropped, the smallest mean shift the test could flag was 13.4 to 13.9 µs (Sle
 
 At the production budget the controller froze after 6,102 and 2,069 requests, warm-up included (0.95 and 0.55 s). It thawed at the next 60 s window boundary, then froze again. Its mean target was 1,711 and 2,020 µs, against 148 and 163 µs for the same pad under the measurement budget.
 
-**Test suite status.** `cargo clippy -p stack-anc-adaptive --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, 61 tests pass and 3 fail across 8 targets. The passes are unit 14, epoch 14, leak 1, naive 6, pad 7, red team 14 of 17 and telemetry 5.
+**Test suite status.** `cargo clippy -p stack-anc-adaptive --all-targets -- -D warnings` is clean, re-run for this section. With `--no-fail-fast`, the last recorded run had 61 passing and 3 failing tests across 8 targets (not re-run; the crate now has more `#[test]` functions). The passes in that run were unit 14, epoch 14, leak 1, naive 6, pad 7, red team 14 of 17 and telemetry 5.
 
 The 3 failures are the red team's open findings, kept as failing tests, so the brief's command fails. Its final summary line, re-run for this section:
 
@@ -359,7 +359,7 @@ Cargo stops at the first failing target, so `tests/telemetry.rs` ran only in the
 - **No proof.** A pass is no detectable leak at that n on one virtual machine. The tests rule out shifts they could see, not all shifts.
 - **Not zero leakage.** The budget meters the leak and does not remove it. By default the controller allows up to 1,024 bits between operator resets. A frozen controller still leaks its overruns and misses, and is charged for them.
 - **Sleep mode's distribution.** KS separated the two classes under epoch Sleep in every full-size pinned run, for a reason not yet tested. Prefer Hybrid where that matters. A flood drains the spin budget and forces Sleep: about 1,200 of 5,000 served requests spun in the pinned Hybrid flood.
-- **Extra slots on backlog and a spillway (opt-in).** Set `scaling.max_slots` above `max_concurrent` and the pad opens `step` more slots after any window of `scaling.reaction_delay` in which an arrival found every open slot held, then closes `step` after `scaling.cooldown_windows` quiet windows in a row, never outside `max_concurrent ..= max_slots`. Set `scaling.spillway_size` above zero and that many arrivals that find every slot held wait exactly `scaling.spillway_wait`, then try once more. Both use only arrival times, never work times: the slots-taken test reads the held times (arrival plus a constant), and a shed caused by the backstop is deliberately not counted as backlog because it depends on when requests returned. A full spillway sheds at once. Both are off by default. Red-team tests ``attack_scaling_and_spillway_independent_of_victim_secret` and `scaling_opens_under_flood_and_closes_when_quiet`` and the slot unit tests show the open-slot count, the spillway wait and the verdict are the same whichever way a victim's secret work went. `slots_open()` reports the current count. Open item: no metric yet exports the open-slot count.
+- **Extra slots on backlog and a spillway (opt-in).** Set `scaling.max_slots` above `max_concurrent` and the pad opens `step` more slots after any window of `scaling.reaction_delay` in which an arrival found every open slot held, then closes `step` after `scaling.cooldown_windows` quiet windows in a row, never outside `max_concurrent ..= max_slots`. Set `scaling.spillway_size` above zero and that many arrivals that find every slot held wait exactly `scaling.spillway_wait`, then try once more. Both use only arrival times, never work times: the slots-taken test reads the held times (arrival plus a constant), and a shed caused by the backstop is deliberately not counted as backlog because it depends on when requests returned. A full spillway sheds at once. Both are off by default. Red-team tests ``attack_scaling_and_spillway_independent_of_victim_secret` and `scaling_opens_under_flood_and_closes_when_quiet`` and the slot unit tests show the open-slot count, the spillway wait and the verdict are the same whichever way a victim's secret work went. `slots_open()` reports the current count. `stack_anc_slots_open` exports the open-slot count.
 - **Slot occupancy (fixed in this version).** Every admitted request holds its slot for one fixed time, the controller cap, counted from admission, whatever its work time. A third party probing admission cannot learn that a victim was slow (`attack_shed_decision_reveals_victim_overrun` now passes). The hold is the cap at construction, so it does not follow later cap changes. The cost is capacity: throughput is at most `max_concurrent / cap` per second. A backstop of `4 x max_concurrent` requests inside the pad bounds requests stuck past the hold. The cap is a placeholder speed limit until measured work times set it.
 - **Overrun multiples.** The blocking API cannot stop work at the cap, so an overrun's release still tells `ceil(work / cap)`. It is charged, but the multiple is not capped; a pre-emptible API is the real fix.
 - **Reply content.** A RETRY reply differs from a value. Every trip is counted, but an overrun RETRY is influenced by the secret like an escalation.
