@@ -38,7 +38,7 @@ deadline and burns that CPU time.
 
 All tests are in `cpp/tests/supervised_exec_tests.cpp` (ctest
 `STACKSupervisedExec`, 15 cases, 1116 assertions) unless noted. The first 12
-cases ran 20 times in a row on the development host: 20 passes, 0 failures.
+cases ran 20 times in a row on the development host: 20 passes, 0 failures. (Historical, recorded by the author; not repeated in the 2026-11-06 check.)
 
 | Guarantee | Test |
 |---|---|
@@ -51,7 +51,7 @@ cases ran 20 times in a row on the development host: 20 passes, 0 failures.
 | Allocation beyond `RLIMIT_AS` ends in `ResourceLimit` or `Crashed`, never `Completed`. | "allocating beyond RLIMIT_AS is ResourceLimit or Crashed" |
 | With `SIGCHLD` ignored (`SIG_IGN` or `SA_NOCLDWAIT`) the executor refuses with `SigchldIgnored` before forking; it never reports a misleading outcome. | "a run is refused while SIGCHLD is ignored" |
 | A default-constructed `Limits` bounds the address space at 4 GiB, so a runaway allocation is `Crashed` or `ResourceLimit`, never `Completed`. | "allocating beyond the default address-space limit is Crashed or ResourceLimit" |
-| On the `waitpid` fallback (no pidfd) a child reaped at the deadline is not signaled by its freed pid; with a pidfd the child is signaled through it. Tested by interposing `kill`, `waitpid` and `syscall` in `cpp/tests/supervised_fallback_tests.cpp` (ctest `STACKSupervisedFallback`). | "no kill after reap" |
+| On the `waitpid` fallback (no pidfd) a child reaped at the deadline is not signaled by its freed pid; with a pidfd the child is signaled through it. Tested by interposing `kill`, `waitpid` and `syscall` in `cpp/tests/supervised_fallback_tests.cpp` (ctest `STACKSupervisedFallback`). | The kill count is 0 after the reaped-at-deadline run: a `CHECK` in `main()`, not a Catch2 case (the binary prints `fallback: kill calls after reap`) |
 | A zero deadline, a deadline over one hour, an output cap over 1 MiB or over the caller's buffer, and a descriptor below 3 are `InvalidLimits` before anything is forked. | "zero or absurd limits are rejected before forking" |
 | A completing payload's bytes arrive exactly, with `Completed`. | "a payload that returns bytes is Completed with the exact bytes" |
 | 300 sequential runs leave no zombie (`waitpid(-1)` gives `ECHILD`) and no descriptor (`/proc/self/fd` count unchanged). | "300 sequential runs leave no zombies and no descriptors" |
@@ -79,7 +79,7 @@ baseline probes on it: a payload that returns the caller's memory
 well-formed frame then `exit_group(0)` (`Completed` with the forged bytes).
 `RunWorker` closes the first and bounds the second. Labels: implemented and
 tested unless stated; the tests are `cpp/tests/worker_exec_tests.cpp` (ctest
-`STACKWorkerExec`, 31 cases) and `cpp/tests/worker_reap_tests.cpp` (`STACKWorkerReap`,
+`STACKWorkerExec`, 32 cases) and `cpp/tests/worker_reap_tests.cpp` (`STACKWorkerReap`,
 10 cases); the governed FFI path is `cpp/tests/ffi_supervised_tests.cpp`
 (`STACKFfiSupervised`, 23 cases).
 
@@ -216,7 +216,7 @@ and the existing spellings (`Outcome`, the ABI integers, the receipt
 
 Every row asserts outcome, `exit_observed`, `frame_status` and the
 success-only-on-Completed-conditions rule. Tests are Catch2 case names unless
-stated. Results: all pass (ctest 22/22).
+stated. Results: all pass. Re-checked on 2026-11-06 on this branch: the 25 ctest entries CI selects (`ctest -LE needs-root`) passed as a non-root user with umask 022; the root-only entry `STACKWorkerReapPidReuse` passed as root (its `[pid-reuse]` cases).
 
 | # | Case | Outcome | exit_observed | frame_status | Test |
 |---|---|---|---|---|---|
@@ -292,7 +292,7 @@ reported as a result.
 - **Architectures.** x86_64 and aarch64 only, by the architecture check in
   the filter and the `#error` for anything else. Only x86_64 has been built
   and run; aarch64 has not been compiled in this work (no cross compiler
-  was available).
+  was available). CI has no aarch64 job: every job runs on `ubuntu-latest`, which is x86_64.
 - **Exceptions.** The payload runs on its own stack; an exception that
   escapes it ends in `std::terminate`, `abort` and `Crashed`. It never
   unwinds into frames the child inherited from the parent.
@@ -320,7 +320,7 @@ What it cannot give, and why it is not isolation:
   the payload already finished and the result is success; and under CPU
   contention its signal can arrive well after the budget (R2-K-16, measured:
   up to 182 ms of CPU time into a 50 ms budget with six busy loops on four
-  cores).
+  cores; recorded in `crates/stack-ffi/ABI.md` section 7, not re-measured here).
 
 Fixed in this phase on that path: the deadline signal handler can return
 (`rt_sigreturn` was missing from the allowlist and the first expiry killed
@@ -434,17 +434,17 @@ tests failed for exactly that reason. The environment each test depends on:
 | Test or area | Depends on |
 | --- | --- |
 | `STACKWorkerReapPidReuse` (two `[pid-reuse]` cases) | Root or `CAP_SYS_ADMIN` to write `/proc/sys/kernel/ns_last_pid`; a pidfd-capable kernel (5.3 or later); a root-owned build (the worker image check). Not run in CI. Fails loudly, never skips, without the capability. `STACKPidReuseInterposed*` need only a pidfd-capable kernel and run in CI. |
-| `STACKWorkerExec`, `STACKWorkerImage`, `STACKWorkerReap` (the rest), `STACKFfiSupervised`, the Rust `stack-ffi` and `stack-admission` governed tests | The worker image is built by the same user with a umask that leaves it free of group and other write (umask 022, as on the CI runner): the image check refuses a group-writable worker. A build under umask 002 makes every worker spawn fail (`SpawnFailed`). The image and its directory must be owned by root or the current euid. `memfd_create` and permission to exec a sealed memfd (the pinned digest path). |
+| `STACKWorkerExec`, `STACKWorkerImage`, `STACKWorkerReap` (the rest), `STACKFfiSupervised`, the Rust `stack-ffi` and `stack-admission` governed tests | The worker image is built by the same user with a umask that leaves it free of group and other write (umask 022; the workflow does not set umask, so CI depends on the runner's default): the image check refuses a group-writable worker. A build under umask 002 makes every worker spawn fail (`SpawnFailed`). The image and its directory must be owned by root or the current euid. `memfd_create` and permission to exec a sealed memfd (the pinned digest path). |
 | Image refusal tests (symlink, setuid, setgid, group- or world-writable, non-pinned program) | `openat2` with `RESOLVE_NO_SYMLINKS` for a symlink in a directory component; where it is absent only a final-component symlink is refused. A fixture directory under `/tmp` that the current user can create. They use no host binary: the "another program" fixture is a copy of the test binary (`/proc/self/exe`), regular, mode 0755, owned by the current euid. Never name `/usr/bin/touch`, `/bin/true` and the like: on some images they are symlinks to a multicall binary. |
 | `STACKSupervisedExec`, `STACKWorkerExec` | `seccomp` strict filter support (`PR_SET_SECCOMP`, `SECCOMP_RET_KILL_PROCESS`); `prctl(PR_SET_NO_NEW_PRIVS)`; `/proc` mounted (`/proc/self/fd`, `/proc/<pid>/stat`). |
 | `STACKSupervisedFallback` | A kernel with `pidfd_open` for the pidfd case (the case prints "not run on this kernel" and the fallback case still runs). |
 | `STACKTsan_*` | `libtsan` (shipped with g++); a kernel and address-space layout that allow ThreadSanitizer. |
-| `STACKFfiSupervised` timing cases | Wall-clock deadlines of 40 to 300 ms; a heavily loaded runner can approach the stated slack. |
+| `STACKFfiSupervised` timing cases | Wall-clock deadlines from 40 ms to a few seconds; a heavily loaded runner can approach the stated slack. |
 | Rust workspace (`cargo test --workspace --locked`, ANC crates excluded) | The C++ worker is compiled by `crates/stack-ffi/build.rs` with `g++` on the PATH; `sha256sum` (coreutils) for the digest test; a writable `std::env::temp_dir()`. |
 
 To reproduce CI locally: create a non-root user, build and test as that user
 with `umask 022`, run `ctest -LE needs-root` and
-`cargo +1.99.0 test --workspace --locked --exclude stack-anc-harness
+`cargo +1.99.0 test --workspace --locked --no-fail-fast --exclude stack-anc-harness
 --exclude stack-anc-ceiling --exclude stack-anc-adaptive
 --exclude stack-anc-pipeline`, the root-only cases are optional
 (see above).
