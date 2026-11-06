@@ -16,17 +16,20 @@ configured default as a hard ceiling either way.
 Failure behaviour (each tested): service down, slow, 401/404/500, malformed JSON, or a value
 that is below 1, negative, a string or null leaves the last good value in force, or the default
 if there is none. A fractional value is rounded DOWN (the governance side tightens by a factor, so
-0.9 of 512 MiB is 483,183,820.8 bytes); flooring can only make a limit stricter. Before this, the
-client refused fractions and the first trace replays showed every tightened memory cap being
-ignored while whole-numbered token and deadline limits were applied. A governed value above the
+0.9 of 512 MiB is 483,183,820.8 bytes); flooring can only make a limit stricter. The comment in `parse_limit` says that, before the fix, the client refused fractions, so the
+first trace replays showed every tightened memory cap ignored while whole-numbered token and
+deadline limits were applied. Those replays are not in this repo. A governed value above the
 default is ignored and counted.
 `stats()` exposes `source_errors`, `invalid_values`, `above_ceiling`.
 
 Limits: HTTP has no TLS, so run it on loopback or a trusted network with a read-only
-(source) token. A read blocks up to the source timeout on a cache miss; call `effective` from a
-refresher thread if that matters. Only the Rust crate is covered; the C++ headers do not read
-governed limits yet. Memory and token limits are readable through `LimitKind` but nothing in
-this crate enforces them yet; only the deadline is wired in.
+(source) token. On a cache miss, `effective` waits for the source. Each socket step (connect, write, read)
+is capped by the source timeout, but the total can run longer if the server sends bytes slowly,
+and the DNS lookup is not covered by the timeout. Call `effective` from a refresher thread if
+that matters. Only the Rust crate is covered; the C++ headers do not read
+governed limits yet. The library enforces only the deadline: `begin_transaction_governed` reads no other limit.
+Memory and token limits are readable through `LimitKind`, and the `governed_workload` example
+applies them to its own simulated traps, but nothing in the library enforces them yet.
 
 Contract check against the live Python service:
 `GOVERNED_E2E_PORT=<port> GOVERNED_E2E_TOKEN=<token> cargo test -p stack-p3-2 -- --ignored e2e`
@@ -48,3 +51,7 @@ an agent that knows the rule can complete exactly the canaries and hang the rest
 tightening read as harmful and asks a person to undo it (T16 in the governance threat model; shown in
 `experimental/docs/TRACE_TEST_PLAN.md`, round 8). The key must not be readable by the agent, and the
 kernel must not reveal to a task which deadline it is running under.
+
+Not checked here: the `experimental` repo (`scripts/adjudication_server.py`, `TrapBridge`,
+the T16 threat model and `docs/TRACE_TEST_PLAN.md`) is not part of this checkout. This
+document cites those names and does not verify them.
