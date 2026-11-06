@@ -213,9 +213,13 @@ pub struct Refused {
 
 /// A request that passed every admission check. It carries the one
 /// permission that exists, the [`AuthorizedAction`], and the open receipt
-/// handle. Nothing has run, and outside this crate nothing can: only
-/// [`Admission::process`] executes. Dropping it leaves the execution `authorized`
-/// with nothing after it, which the verifier reports as INCOMPLETE.
+/// handle. Nothing has run. Through this crate, only [`Admission::process`]
+/// executes an admitted request and writes the receipts around the run. That is
+/// not a wall: the [`AuthorizedAction`] is `Clone`, and the executor and FFI entry
+/// points accept any `AuthorizedAction`, so code in the same process can start a
+/// worker without these records (README, section 8). Dropping it leaves the
+/// execution `authorized` with nothing after it, which the verifier reports as
+/// INCOMPLETE.
 #[must_use = "an admitted request that is dropped was authorized and never attempted"]
 pub struct Admitted {
     pub(crate) execution_id: ExecutionId,

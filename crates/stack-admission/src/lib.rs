@@ -39,8 +39,9 @@
 //! than a named test proves.
 //!
 //! Stages 1 to 4 are [`Admission::admit`]; stages 5 to 8 are the crate's
-//! private `execute`; [`Admission::process`] is all of them and the only
-//! public way to run an admitted request.
+//! private `execute`; [`Admission::process`] is all of them and the only path
+//! that writes the receipts around a run. It is not the only public way to
+//! start a worker: see section 8 of the README.
 
 #![forbid(unsafe_code)]
 

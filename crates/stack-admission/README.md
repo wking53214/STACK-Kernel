@@ -261,6 +261,20 @@ an anti-misuse boundary, not protection from malicious in-process code. Remainin
 the worker kinds are a fixed built-in set, arguments are not delivered, the native digest is
 not recomputed by the kernel, and storage is single process and single host.
 
+Receipt gating is a property of `Admission::process`, not of the executor. The
+`AuthorizedAction` that `Authority::authorize` mints is `Clone` (the in-flight
+registry keeps a copy so it can re-check revocation while a worker runs; removing
+`Clone` was tried and the library does not compile without it), and
+`Executor::run_authorized`, `stack_ffi::supervised_run_governed` and
+`stack_ffi::supervised_run_governed_cancellable` accept any `&AuthorizedAction`.
+Code in the same process that holds one, or that builds its own `Authority` with
+its own trust set, can start a worker with no `proposed`, `authorized` or
+`attempted` record, and can run a different worker kind or limits than the
+authorization named: the host keeps only a label of the digest
+(`tests/authorization_required.rs`; `stack-ffi/tests/authorized_run.rs`,
+`a_different_kind_runs_as_itself_under_the_same_authorization`). A real boundary
+needs a separate kernel process, below.
+
 ## D2-C follow-up (deferred): a separate kernel process owning execution
 
 Status: NOT implemented. Nothing in this repository is a daemon, an IPC client or a
