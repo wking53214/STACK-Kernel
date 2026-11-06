@@ -1,6 +1,6 @@
 # stack-admission: CNS decision to kernel authority to receipt
 
-Status: new crate, branch `race02-e2e`, Phase 5 of the CNS and
+Status: crate on `main`, Phase 5 of the CNS and
 STACK-Kernel integration (decision E). Nothing outside this crate calls
 it. Every claim below names the test that proves it; anything not tested
 is listed under "Limits" or marked BLOCKED. The integration contract with
@@ -57,13 +57,13 @@ itself said `allowed: true` for that decision).
 |---|---|---|
 | Stages 1 to 8 | implemented | `tests/admission.rs`, `tests/execution.rs`, `tests/adversarial.rs` |
 | Kernel policy (seats, operation map, limits, provenance) | implemented, validated | `config::tests` |
-| Executor seam over the supervised C++ worker program, fail-closed when the worker path is unset or unusable, governed before spawn | implemented | `tests/smoke.rs`, `tests/worker_governance.rs`; the only file naming `stack-ffi` is `src/executor.rs` |
+| Executor seam over the supervised C++ worker program, fail-closed when the worker path is unset or unusable, governed before spawn | implemented | `tests/smoke.rs`, `tests/worker_governance.rs`; the only source file naming `stack-ffi` is `src/executor.rs` (tests also use it) |
 | Worker identity in the receipt: the `Attempted` record binds the worker image SHA-256 the supervisor pinned and the limits it was given (version 2) | implemented | `tests/worker_use_native.rs` |
 | Use evidence in the receipt: the `Authorized` record binds the use store's record hash and position (`FileUseStore`) or a labeled non-durable marker (version 2) | implemented | `tests/worker_use_native.rs` |
 | Native digest kept apart from the CNS subject digest; each tamper caught by its own expectation | implemented | `tests/worker_use_native.rs` |
 | Independent verification of the log | implemented in tests, with fresh trusted keys and the auditor's own expectations | `tests/execution.rs` |
 | Fixtures from the real CNS SuperGate (8 cases) | committed, regenerates byte for byte | `tests/fixtures/gen_cns_governed_decisions.py` |
-| Capability issuer | EXPERIMENTAL: exists only as a test helper with fixture seeds | `tests/common/mod.rs` (the only signing path in the crate) |
+| Capability issuer | EXPERIMENTAL: exists only as a test helper with fixture seeds | `tests/common/mod.rs` (the only code that signs capabilities; receipt records are signed in `stack-receipt`) |
 | Real worker programs and argument delivery | PLANNED: the C ABI runs a fixed built-in set | see Limits |
 | UAI-1 envelopes as the decision carrier | BLOCKED: decision pending (register R2-E-06) | none |
 | Two or more hosts sharing replay, use or receipt state | BLOCKED: one VM here, and the stores are single-writer by lock | `a_second_verifier_on_the_same_stores_cannot_start_it_is_locked_not_reconciled` |
@@ -80,8 +80,8 @@ recomputed by the kernel (a Sentinel verification hook is planned). See
 
 ## 4. Scenario to test
 
-All tests assert the observable result. Every refusal test also asserts
-that no worker ran, by a run counter at the executor seam. The built-in
+All tests assert the observable result. Refusal tests that could reach the executor also assert,
+by a run counter at the executor seam, that no worker ran. The built-in
 workers run under a seccomp filter that forbids `open(2)`, so a worker
 cannot write a counter file itself; the counter wraps the executor, and
 `authorization_precedes_the_attempt_and_the_attempt_precedes_execution`
@@ -128,11 +128,9 @@ additionally reads the receipt FILE from inside the executor call.
 | other endings (crash, abort, exit, seccomp) | `every_ending_other_than_a_completion_is_recorded_as_itself_and_is_not_success` |
 | executor failure or a self-contradicting report | `an_executor_failure_or_a_contradictory_report_is_unknown_never_completed` |
 
-Measured non-returning termination, debug build, 300 ms deadline: the
-supervisor reports 300.9 to 301.2 ms; the whole pipeline (parse, three
-signed records, fork, kill, reap, one more record) took 419 to 446 ms.
-The asserted bound is the deadline plus 2 s. These are one machine's
-numbers, not a guarantee.
+Measured non-returning termination, debug build, 300 ms deadline, on 2026-11-06 (three rounds for each of two payloads):
+the supervisor reports 301.2 to 305.3 ms; the whole pipeline (parse, three signed records, fork, kill, reap, one more record)
+took 431 to 451 ms. The asserted bound is the deadline plus 2 s. These are one machine's numbers, not a guarantee.
 
 ## 5. Limits, stated
 
@@ -143,7 +141,7 @@ numbers, not a guarantee.
 * **Results are self-reported.** `Completed` means the worker exited 0
   within the deadline with a well-formed frame. The worker is a separate
   program that writes its frame itself and can write any bytes it likes
-  (`cpp/CONTAINMENT.md`, R2-K-08); since decision A it holds none of the kernel
+  (`cpp/CONTAINMENT.md`, the forged-frame case); since decision A it holds none of the kernel
   process's memory, but the bytes are still its own claim. The receipt records the digest and the verifier lists
   `result_is_self_reported` on every completion.
 * **Symmetric Trident HMAC.** A handoff proves possession of a shared
@@ -200,7 +198,7 @@ numbers, not a guarantee.
 * **Lock descriptors are inherited by workers.** A supervised worker is
   forked from the whole process before it execs; between the fork and its
   descriptor clean-up it holds a copy of every advisory-lock descriptor (after
-  the exec it holds none, tested: only fds 0 to 2 and the result pipe). The
+  the exec it holds none, the `/proc/self/fd` probe in `cpp/tests/worker_exec_tests.cpp` lists only fds 0 to 2 and the result pipe). The
   window is unchanged by decision A and not claimed fixed. A restart that races a worker
   still setting up can find a store locked and fails closed (R2-X-01).
 * **Clock and keys are trusted.** One clock serves the Trident, the
@@ -219,13 +217,14 @@ CARGO_TARGET_DIR=<dir> cargo test -p stack-admission --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-The whole suite takes about 40 seconds in a debug build; 30 of those are
+In a debug build the whole suite took about one minute on 2026-11-06. The slowest
+test binary, `tests/execution.rs` (about 49 seconds), holds
 `every_byte_flip_of_the_receipt_file_is_rejected_or_changes_nothing`,
-which verifies all 1928 single-byte flips.
+which verified all 2083 single-byte flips in the run recorded here (the test prints the count).
 
 To regenerate the CNS fixtures (read-only against a CNS checkout; the
 committed file is byte-identical for CNS `4acd8f9` and, apart from the
-recorded commit, for CNS main `221c5c9`):
+recorded commit, for CNS `221c5c9` and `0fdbb19`):
 
 ```text
 python3 -I -B tests/fixtures/gen_cns_governed_decisions.py <CNS checkout> <commit> \
@@ -261,7 +260,7 @@ differ only in their arguments) and what each switch changes.
 | R2-X-05 | A real CNS roster using `same_subject=` is refused. | `a_real_decision_that_carries_the_same_subject_seat_is_refused_today` | safe direction; a CNS feature the kernel cannot admit yet |
 
 Observed and not a defect: a blocked worker does not outlive its killed
-supervisor (`PR_SET_PDEATHSIG`, measured 8 ms in
+supervisor (`PR_SET_PDEATHSIG`, measured 2.4 ms on 2026-11-06 in
 `a_kernel_killed_during_execution_leaves_an_incomplete_unknown_execution`);
 `cpp/CONTAINMENT.md` does not mention it and the header does.
 
@@ -271,7 +270,7 @@ supervisor (`PR_SET_PDEATHSIG`, measured 8 ms in
 |---|---|---|
 | `SupervisedExecutor` runs only through `run_authorized` with the `AuthorizedAction`; `run` and `run_observed` are refused and spawn nothing | implemented, tested | `tests/authorization_required.rs` |
 | The C++ host gets the capability digest and refuses an all-zero one; the full digest is in the receipt, the audit ring holds only a label | implemented, tested | `stack-ffi/tests/authorized_run.rs`, `cpp/tests/ffi_authorized_caller.c` |
-| A signed capability revoked while a real 3 s spin worker runs kills it (< 1 s, measured 58 ms); terminal is `Terminated`, not a success; an unrelated run is unaffected | implemented, tested | `tests/revocation_real_worker.rs` |
+| A signed capability revoked while a real 3 s spin worker runs kills it (< 1 s, measured 27 ms on 2026-11-06); terminal is `Terminated`, not a success; an unrelated run is unaffected | implemented, tested | `tests/revocation_real_worker.rs` |
 | Real admission runs record the observed terminal, the worker image and limits, and the use evidence (receipt format version 2) | implemented, tested | `tests/observed_terminal.rs`, `tests/worker_use_native.rs` |
 
 Non-guarantee: code in the same process can call the raw C symbols with any digest; this is
