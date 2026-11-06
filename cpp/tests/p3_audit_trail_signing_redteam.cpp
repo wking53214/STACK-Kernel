@@ -175,6 +175,40 @@ bool test_ring_wraparound() {
     return true;
 }
 
+// TEST 7: The signing key is not the published placeholder.
+// The header once derived the key as 0xA5 ^ i. Anyone who knew that could
+// forge a record that verifies. A record signed after InitializeSigningKey()
+// must not verify under that key.
+bool test_key_is_not_the_published_placeholder() {
+    std::cout << "[TEST 7] Key Is Not The Published Placeholder\n";
+    TestAuditRing ring;
+    ring.InitializeSigningKey();
+    ring.Push(AuditEventType::RateLimitTriggered, 777, 5);
+
+    AuditEventRecord record;
+    if (!ring.ReadSlot(0, record) || record.is_signed != 1) {
+        std::cout << "  FAIL: record not readable or not signed\n";
+        return false;
+    }
+
+    uint8_t placeholder[HmacSha256::KEY_SIZE];
+    for (std::size_t i = 0; i < HmacSha256::KEY_SIZE; ++i) {
+        placeholder[i] = static_cast<uint8_t>(0xA5 ^ i);
+    }
+    const bool forgeable = HmacSha256::Verify(
+        placeholder,
+        reinterpret_cast<const uint8_t*>(&record),
+        offsetof(AuditEventRecord, is_signed),
+        record.signature);
+    if (forgeable) {
+        std::cout << "  FAIL: the record verifies under the published placeholder key\n";
+        return false;
+    }
+
+    std::cout << "  PASS\n";
+    return true;
+}
+
 int main() {
     std::cout << "========================================\n";
     std::cout << "P3.3 RED-TEAM: Audit Trail Signing\n";
@@ -189,6 +223,7 @@ int main() {
     if (test_multiple_events()) passed++; else failed++;
     if (test_seqlock_integration()) passed++; else failed++;
     if (test_ring_wraparound()) passed++; else failed++;
+    if (test_key_is_not_the_published_placeholder()) passed++; else failed++;
 
     std::cout << "\n========================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n";
