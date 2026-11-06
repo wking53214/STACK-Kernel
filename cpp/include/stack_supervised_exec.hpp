@@ -1143,12 +1143,19 @@ private:
         return current.sa_handler == SIG_IGN || (current.sa_flags & SA_NOCLDWAIT) != 0;
     }
 
-    // Reads what is available now. Returns false on a hard read error.
+    // Reads what is available now, but at most kMaxDrainBytesPerCall in one call, so a worker that
+    // writes as fast as the supervisor reads cannot keep this loop from returning to the deadline
+    // check in Supervise (the pipe stays readable, so the next poll returns at once). Returns false
+    // on a hard read error.
+    static constexpr std::size_t kMaxDrainBytesPerCall = 64 * 1024;
     [[nodiscard]] static bool DrainPipe(int fd, FrameParser& parser, bool& eof) noexcept {
         uint8_t chunk[4096];
+        std::size_t drained = 0;
         for (;;) {
+            if (drained >= kMaxDrainBytesPerCall) return true;
             const ssize_t r = ::read(fd, chunk, sizeof chunk);
             if (r > 0) {
+                drained += static_cast<std::size_t>(r);
                 parser.Feed(chunk, static_cast<std::size_t>(r));
                 continue;
             }

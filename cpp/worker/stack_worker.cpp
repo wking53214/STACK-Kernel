@@ -119,6 +119,7 @@ enum Kind : uint32_t {
     kCloseUnfilteredThenSpin = 57,// case 6 (unfiltered): closes the result pipe early, then spins
     kPartialFrameThenBlock = 58,  // case 9: a header and part of the body, then blocks
     kForgeThenCrash = 59,         // case 12: a well-formed frame claiming success, then SIGSEGV
+    kFloodResultPipe = 60,        // writes junk to the result pipe as fast as it can, never exits
 #endif
 };
 
@@ -319,6 +320,12 @@ int main(int argc, char** argv, char** envp) {
         const uint8_t head[12] = {'S', 'T', 'K', 'R', 16, 0, 0, 0, 'a', 'b', 'c', 'd'};
         RawWrite(head, sizeof head);
         SpinForever();
+    }
+    case kFloodResultPipe: {
+        // A worker that never stops writing: the supervisor's read loop must still honor the deadline.
+        static uint8_t junk[65536];
+        for (std::size_t i = 0; i < sizeof junk; ++i) junk[i] = 'X';
+        for (;;) RawWrite(junk, sizeof junk);
     }
     case kForgeThenCrash:
         SendFrame("FORGED-OK", 9);

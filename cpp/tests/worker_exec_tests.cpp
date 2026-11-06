@@ -53,7 +53,7 @@ enum : uint32_t {
     kSocket = 43, kExecve = 44, kFork = 45, kPtrace = 46, kX32Syscall = 49, kCpuBound = 50, kEnvCount = 51,
     kListFds = 52,
     kFrameThenExitNonZero = 53, kProbeFds = 54, kClobberResultFd = 55, kCloseResultThenSpin = 56,
-    kCloseUnfilteredThenSpin = 57, kPartialFrameThenBlock = 58, kForgeThenCrash = 59,
+    kCloseUnfilteredThenSpin = 57, kPartialFrameThenBlock = 58, kForgeThenCrash = 59, kFloodResultPipe = 60,
 };
 
 Limits DefaultLimits() {
@@ -261,6 +261,28 @@ TEST_CASE("Worker: frames that are not clean are not Completed", "[worker][forge
         REQUIRE(r.report.signal_number == SIGKILL);
     }
     REQUIRE(NoChildrenLeft());
+}
+
+// RACE finding (DrainPipe): the supervisor's read loop drains the result pipe until it would block.
+// A worker that writes faster than the supervisor reads never lets it block, so the deadline check at
+// the top of the loop was never reached. The run is bounded by an alarm in a forked guard so a
+// supervisor that does not return fails the test instead of hanging the suite.
+TEST_CASE("RunWorker: a worker that floods the result pipe is still killed at the deadline", "[worker][flood]") {
+    const pid_t guard = ::fork();
+    REQUIRE(guard >= 0);
+    if (guard == 0) {
+        ::alarm(20);  // a supervisor still reading after 20 s has missed a 300 ms deadline
+        const Run r = Hostile(kFloodResultPipe);
+        Measured("a worker flooding the result pipe", r.report);
+        const bool ok = r.report.outcome != Outcome::Completed && r.report.deadline_fired &&
+                        r.report.elapsed_ns <= kDeadlineNs + kSlackNs;
+        ::_exit(ok ? 0 : 3);
+    }
+    int status = 0;
+    REQUIRE(::waitpid(guard, &status, 0) == guard);
+    INFO("guard status " << status << (WIFSIGNALED(status) ? " (killed by a signal: the supervisor did not return in time)" : ""));
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 0);
 }
 
 // P12 (baseline probe): the payload returns the caller's memory. On the
