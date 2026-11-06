@@ -86,9 +86,9 @@ fn a_record_has_one_encoding_so_the_version_and_the_event_must_agree() {
     as_v2[..DOMAIN_TAG_V2.len()].copy_from_slice(DOMAIN_TAG_V2);
     assert_eq!(decode_record(&as_v2), Err(DecodeError::BadTagByte("event", 1)));
     // A later version is not guessed at.
-    let mut v3 = v2.clone();
-    v3[14] = b'3';
-    assert_eq!(decode_record(&v3), Err(DecodeError::BadTag));
+    let mut v4 = v2.clone();
+    v4[14] = b'4';
+    assert_eq!(decode_record(&v4), Err(DecodeError::BadTag));
     // Unknown exit and frame codes are refused, not collapsed.
     let n = v2.len();
     let mut bad_frame = v2.clone();

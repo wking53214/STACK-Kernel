@@ -249,7 +249,8 @@ fn a_kernel_killed_during_execution_leaves_an_incomplete_unknown_execution() {
     assert_eq!(e.execution.sequences, vec![1, 2, 3]);
 
     // The restarted kernel works, refuses the dead kernel's envelope as a
-    // replay, and does not rewrite history: the old execution stays open.
+    // replay, and does not rewrite history: it closes the old execution with a
+    // Recovered record appended after it (I-6), and the outcome stays unknown.
     let h = Builder::restarting(dir.path(), started_now()).start_after_release();
     h.set_next_seq(2);
     // (The dead kernel's envelope is sequence 1; present sequence 1 again.)
@@ -265,7 +266,7 @@ fn a_kernel_killed_during_execution_leaves_an_incomplete_unknown_execution() {
     let fresh = h.process(honest_payload(&case, "echo"));
     assert!(fresh.is_success(), "{fresh:?}");
     let v = h.verify_full(&case, None);
-    assert_eq!(v.state, State::Incomplete, "the log is as incomplete as its worst execution: {}", v.to_json());
+    assert_eq!(v.state, State::VerifiedWithLimitations, "the recovered execution no longer holds the log incomplete: {}", v.to_json());
     assert_eq!(v.executions.len(), 2);
     assert_eq!(v.executions[0].execution.outcome, Some(OutcomeKind::Unknown));
     assert_eq!(v.executions[1].execution.outcome, Some(OutcomeKind::Completed));

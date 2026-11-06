@@ -165,6 +165,12 @@ pub enum RefusalReason {
     UnknownOperation(String),
     /// `stack-authority` refused.
     Authorization(AuthzError),
+    /// The policy refuses a request that carries arguments, and this one
+    /// does. Nothing was recorded and nothing was consumed.
+    ArgumentsNotAllowed,
+    /// The policy requires one-time capabilities, and the one presented is
+    /// reusable. Nothing was consumed.
+    ReusableCapabilityNotAllowed,
     /// A receipt record that must precede execution could not be written.
     Receipt(RecordError),
 }
@@ -181,6 +187,10 @@ impl fmt::Display for RefusalReason {
             Self::Binding(findings) => write!(f, "cns binding: {findings:?}"),
             Self::UnknownOperation(op) => write!(f, "operation {op:?} is not in the kernel's map"),
             Self::Authorization(e) => write!(f, "authorization: {e}"),
+            Self::ArgumentsNotAllowed => f.write_str("arguments are not accepted under this kernel's policy"),
+            Self::ReusableCapabilityNotAllowed => {
+                f.write_str("a reusable capability is not accepted under this kernel's policy")
+            }
             Self::Receipt(e) => write!(f, "receipt: {e}"),
         }
     }
@@ -203,9 +213,13 @@ pub struct Refused {
 
 /// A request that passed every admission check. It carries the one
 /// permission that exists, the [`AuthorizedAction`], and the open receipt
-/// handle. Nothing has run, and outside this crate nothing can: only
-/// [`Admission::process`] executes. Dropping it leaves the execution `authorized`
-/// with nothing after it, which the verifier reports as INCOMPLETE.
+/// handle. Nothing has run. Through this crate, only [`Admission::process`]
+/// executes an admitted request and writes the receipts around the run. That is
+/// not a wall: the [`AuthorizedAction`] is `Clone`, and the executor and FFI entry
+/// points accept any `AuthorizedAction`, so code in the same process can start a
+/// worker without these records (README, section 8). Dropping it leaves the
+/// execution `authorized` with nothing after it, which the verifier reports as
+/// INCOMPLETE.
 #[must_use = "an admitted request that is dropped was authorized and never attempted"]
 pub struct Admitted {
     pub(crate) execution_id: ExecutionId,
@@ -484,6 +498,7 @@ pub struct Admission {
     cancellable: Option<Box<dyn CancellableExecutor>>,
     registry: Arc<InFlightRegistry>,
     clock: Arc<dyn Clock>,
+    recovered: Vec<ExecutionId>,
 }
 
 /// Text a receipt record can carry: at most [`MAX_TEXT_BYTES`], cut at a
@@ -544,6 +559,10 @@ impl Admission {
             policy.provenance.clone(),
             Box::new(KernelClock::new(Arc::clone(&clock))),
         )?;
+        // Before the kernel can take any work, close in the log every execution
+        // an earlier run left open. If this fails the kernel does not start:
+        // new work would be written after records nobody has accounted for.
+        let recovered = recorder.recover_open_executions()?;
         let registry = Arc::new(InFlightRegistry::default());
         let hook_registry = Arc::clone(&registry);
         authority.set_change_hook(move |a| {
@@ -560,7 +579,15 @@ impl Admission {
             cancellable: None,
             registry,
             clock,
+            recovered,
         })
+    }
+
+    /// The executions an earlier run left open, which this kernel closed in
+    /// the log with a `Recovered` record when it started. Empty after a clean
+    /// shutdown. For an operator to report; it changes nothing.
+    pub fn recovered_executions(&self) -> &[ExecutionId] {
+        &self.recovered
     }
 
     /// Runs workers through `executor` instead of the one in [`Parts`], so
@@ -656,6 +683,12 @@ impl Admission {
         // ---- 2. The payload, strictly.
         let request = payload::parse(&handoff.payload)
             .map_err(|e| Self::unrecorded(Stage::Payload, RefusalReason::Payload(e)))?;
+        // Arguments are neither delivered to the worker nor covered by the
+        // capability. A policy that refuses them does so before anything is
+        // proposed or consumed.
+        if self.policy.refuse_arguments && !args_are_empty(&request.args) {
+            return Err(Self::unrecorded(Stage::Payload, RefusalReason::ArgumentsNotAllowed));
+        }
         let args = to_canonical_bytes(&request.args, &self.limits)
             .map_err(|e| Self::unrecorded(Stage::Payload, RefusalReason::Canonical(e)))?;
 
@@ -721,6 +754,11 @@ impl Admission {
             Ok(a) => a,
             Err(e) => return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::Authorization(e))),
         };
+        // A reusable capability records no use, so refusing it here consumes
+        // nothing. The refusal is recorded like any other authorization refusal.
+        if self.policy.require_one_time_capabilities && !action.one_time() {
+            return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::ReusableCapabilityNotAllowed));
+        }
         // The permission exists. Record it; without the record nothing runs.
         let exec = exec.authorize(&action).map_err(|e| Refused {
             stage: Stage::Authorization,
@@ -947,6 +985,16 @@ impl Admission {
                 None,
             ),
         }
+    }
+}
+
+/// True for JSON `null` and the empty object: the two ways a request says it
+/// carries no arguments.
+fn args_are_empty(args: &serde_json::Value) -> bool {
+    match args {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.is_empty(),
+        _ => false,
     }
 }
 

@@ -1,8 +1,8 @@
 # stack-authority: the authorization boundary
 
 Status: new crate, Phase 2 of CNS-KERNEL-INTEGRATION-HARDENING, under
-decision B (the kernel only verifies). Nothing outside this crate calls it
-yet. Every claim below is backed by a named test in `tests/`; anything
+decision B (the kernel only verifies). `stack-receipt`, `stack-ffi` and
+`stack-admission` use it; no service calls the admission pipeline yet. Every claim below is backed by a named test in `tests/`; anything
 not tested is marked as a limitation or an open question.
 
 ## 1. The concepts, kept separate
@@ -338,9 +338,9 @@ process (D2-C) is deferred and NOT implemented; see `crates/stack-ffi/ABI.md`.
    from the content by the enforcement boundary, as Trident's prong 2
    does, never copied from the caller.
 2. Where does `decision_root` come from? CNS `super_gate._root` lives in
-   Python; nothing in STACK-Kernel reproduces it today (register D-11,
-   D-12). The kernel needs either the root as a verified input or a Rust
-   reimplementation checked against CNS vectors.
+   Python. `stack-receipt` reimplements it in Rust (`decision_root`), checked
+   against committed CNS vectors, and `stack-admission` recomputes it before
+   it asks this crate to authorize (register D-11, D-12).
 3. How does Trident's verified envelope combine with this crate? The
    natural seam is: Trident admits the envelope, the boundary derives the
    `ActionRequest` from the verified handoff, and this crate authorizes.

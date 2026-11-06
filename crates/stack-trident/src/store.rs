@@ -1127,12 +1127,22 @@ impl FileStore {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(StoreError::io("rename compacted log", &e));
         }
-        sync_parent(&self.path)?;
+        // The rename has happened: the log at `path` is now the new file, so
+        // take it over before the directory sync. Keeping the old handle
+        // would leave later records in an unlinked file that a restart never
+        // reads, and the new file's lock would be dropped.
         self.file = file;
         self.generation = generation;
         self.committed_len = committed_len;
         self.head = head;
         self.dirty_tail = false;
+        if let Err(e) = sync_parent(&self.path) {
+            // The rename may not survive a crash, so an acknowledgement made
+            // from here on could be lost. Refuse further use until the store
+            // is loaded again.
+            self.loaded = false;
+            return Err(e);
+        }
         self.next_compact_at = self
             .options
             .compact_after_bytes
@@ -1248,8 +1258,10 @@ impl ReplayStore for FileStore {
         self.high_water_ms = self.high_water_ms.max(record.issued_at_unix_ms);
         if self.committed_len >= self.next_compact_at {
             if let Err(e) = self.compact(record.accepted_at_unix_ms) {
-                // The acceptance is already durable; a failed compaction
-                // only leaves the log longer than it needs to be.
+                // The acceptance is already durable. A compaction that failed
+                // before the rename only leaves the log longer than it needs
+                // to be. One that failed after it leaves the store unloaded,
+                // so later commits are refused until it is loaded again.
                 self.next_compact_at = self.committed_len.saturating_mul(2);
                 tracing::error!(error = %e, "stack.trident replay store compaction failed; keeping the uncompacted log");
             }
@@ -1292,8 +1304,22 @@ fn lock_exclusive(file: &File, path: &Path) -> Result<(), StoreError> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: make directory syncs on this thread fail, to exercise the
+    /// path where a rename has happened but cannot be made durable.
+    static FAIL_SYNC_PARENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Makes a directory entry change (create, rename) durable.
 fn sync_parent(path: &Path) -> Result<(), StoreError> {
+    #[cfg(test)]
+    if FAIL_SYNC_PARENT.with(std::cell::Cell::get) {
+        return Err(StoreError::io(
+            "sync directory",
+            &std::io::Error::other("injected directory sync failure"),
+        ));
+    }
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -1353,6 +1379,41 @@ mod tests {
         assert_eq!(st.senders.len(), 2);
         assert_eq!(st.nonces.len(), 1, "{:?}", st.nonces);
         assert!(st.quarantined.is_empty());
+    }
+
+    #[test]
+    fn a_directory_sync_failure_after_the_rename_cannot_leave_acknowledged_records_behind() {
+        let path = temp("compact-sync-fail");
+        let _ = std::fs::remove_file(&path);
+        let mut s = FileStore::open(&path).unwrap();
+        s.load().unwrap();
+        s.commit(&accept(1, 1, 10)).unwrap();
+        s.commit(&accept(1, 2, 20)).unwrap();
+
+        FAIL_SYNC_PARENT.with(|c| c.set(true));
+        let compacted = s.compact(30);
+        FAIL_SYNC_PARENT.with(|c| c.set(false));
+        assert!(compacted.is_err(), "the failed directory sync is reported");
+
+        // After the rename the log at `path` is the new file. The store must
+        // not acknowledge a record that a restart cannot see.
+        let later = s.commit(&accept(1, 3, 40));
+        drop(s);
+        let mut reopened = FileStore::open(&path).unwrap();
+        let st = reopened.load().unwrap();
+        if later.is_ok() {
+            assert!(
+                st.nonces.iter().any(|n| n.expires_at_unix_ms == 140),
+                "a commit that was acknowledged did not survive a restart"
+            );
+        }
+        assert!(
+            later.is_err(),
+            "a store whose compaction could not be made durable refuses further commits until it is loaded again"
+        );
+        // Everything acknowledged before the failure is still there.
+        assert_eq!(st.high_water_ms, 20);
+        assert_eq!(st.nonces.len(), 2, "{:?}", st.nonces);
     }
 
     #[test]

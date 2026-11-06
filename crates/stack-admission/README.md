@@ -118,6 +118,10 @@ additionally reads the receipt FILE from inside the executor call.
 | execution timeout is `TimedOut`, not success | `an_execution_timeout_is_a_timed_out_receipt_and_not_success` |
 | non-returning payload terminated within a measured bound | `a_non_returning_payload_is_terminated_within_a_measured_bound` (prints the measurement) |
 | kernel killed during execution | `a_kernel_killed_during_execution_leaves_an_incomplete_unknown_execution` |
+| restart closes the execution a crash left open, before new work | `a_restarted_kernel_closes_the_open_execution_before_it_takes_any_work` (`tests/recovery.rs`), the second half of the kernel-killed test above |
+| recovery does not repeat; a clean shutdown recovers nothing | `recovery_does_not_repeat_on_the_next_restart`, `a_kernel_that_shut_down_cleanly_recovers_nothing_and_writes_nothing` |
+| an execution that never attempted is closed with no unknown outcome | `an_authorized_but_never_attempted_execution_is_closed_without_an_unknown_outcome` |
+| a kernel that cannot write its recovery records does not start | `a_kernel_that_cannot_write_its_recovery_records_does_not_start` |
 | terminal write failure | `a_terminal_that_cannot_be_recorded_is_a_typed_non_success_and_leaves_the_attempt_open` |
 | attempted write failure means no execution | `an_attempt_that_cannot_be_recorded_does_not_run` |
 | ordering authorization < attempt < execution | `authorization_precedes_the_attempt_and_the_attempt_precedes_execution` |
@@ -172,6 +176,20 @@ numbers, not a guarantee.
   refusal (including a replay) or an unparseable payload is returned to
   the caller but not written to the receipt log: there is no subject to
   record. An auditor reading the log alone does not see them (R2-X-03).
+* **A restart closes crashed executions without knowing how they ended.**
+  `Admission::new` closes, in the receipt log, every execution an earlier run left
+  open, with a `Recovered` record naming the last stage found, before the kernel
+  takes any work (`Admission::recovered_executions` lists them). It records no
+  outcome. For an execution last seen `attempted` the payload may have run to
+  completion, been cut off, or never started: the verifier reports the outcome
+  `unknown` with the limitation `execution_recovered_outcome_unknown`, and the
+  log's state is `VERIFIED_WITH_LIMITATIONS`, not `INCOMPLETE`, so a consumer
+  must read `execution.outcome`, not the state alone. If the log cannot list its
+  records or a recovery record cannot be written, the kernel does not start
+  (`BuildError::Recorder`). The kernel relies on the receipt log's exclusive lock
+  to know no other process is still running those executions. It does not
+  recover work or retry it, and the recovered execution's one-time capability
+  stays spent. Receipt format version 3 (`crates/stack-receipt/RECEIPT.md`).
 * **A one-time capability is consumed at authorization.** If the
   `authorized` or `attempted` record then cannot be written, nothing runs
   and the capability stays spent.
@@ -222,12 +240,22 @@ store, durable receipt log, receipt key, executor, clock). `new` refuses a
 non-Production Trident, a differing audience, a non-durable store or log,
 and a log for another kernel.
 
+`KernelPolicy` also carries two switches that close known gaps. They have no
+default, so an operator states them. `require_one_time_capabilities` refuses a
+reusable capability, which could otherwise start the same action again in a
+fresh envelope until it expires. `refuse_arguments` refuses any request whose
+`args` is not JSON `null` or `{}`, because arguments are neither delivered to
+the worker nor covered by a capability (R2-X-02). The recommended setting for
+both is `true`. `tests/hardening.rs` pins today's behaviour with the switches
+off (a reusable capability runs twice; one capability covers requests that
+differ only in their arguments) and what each switch changes.
+
 ## 7. Defects found while building this crate
 
 | Id | Finding | Evidence | Effect |
 |---|---|---|---|
 | R2-X-01 | A supervised worker is a fork of the whole process and holds a copy of every advisory-lock descriptor (replay store, use store, receipt log) until its setup closes them. | scratch experiment: 3 threads forking workers continuously, 1,008,508 of 1,101,388 lock re-acquisitions in the parent failed in 8 s; one intermittent "still locked" start in about 60 runs of `tests/adversarial.rs` | fail closed, intermittent restart failures; the planned fork+exec clean worker (I-05) removes it |
-| R2-X-02 | `args` are validated and digested and the `resource` is authorized, but the worker receives neither, and no capability or digest covers `args`; the receipt's `attempted` record was documented as "bytes actually passed" and "exactly what is about to run". | `src/executor.rs` (`_args` unused); `RECEIPT.md` section 2 | the receipt field overstates; harmless while no worker reads arguments |
+| R2-X-02 | `args` are validated and digested and the `resource` is authorized, but the worker receives neither, and no capability or digest covers `args`; the receipt's `attempted` record was documented as "bytes actually passed" and "exactly what is about to run". | `src/executor.rs` (`_args` unused); `RECEIPT.md` section 2 | the receipt field overstates; harmless while no worker reads arguments; `refuse_arguments` refuses non-empty arguments until they are bound |
 | R2-X-03 | A Trident refusal or an unparseable payload is not written to the receipt log. | `a_malformed_payload_is_refused_before_anything_is_recorded` | an auditor of the log alone does not see refused replays |
 | R2-X-04 | The payload has no version field. | `src/payload.rs` | a future format change cannot be told from a malformed payload |
 | R2-X-05 | A real CNS roster using `same_subject=` is refused. | `a_real_decision_that_carries_the_same_subject_seat_is_refused_today` | safe direction; a CNS feature the kernel cannot admit yet |
@@ -250,6 +278,20 @@ Non-guarantee: code in the same process can call the raw C symbols with any dige
 an anti-misuse boundary, not protection from malicious in-process code. Remaining limits:
 the worker kinds are a fixed built-in set, arguments are not delivered, the native digest is
 not recomputed by the kernel, and storage is single process and single host.
+
+Receipt gating is a property of `Admission::process`, not of the executor. The
+`AuthorizedAction` that `Authority::authorize` mints is `Clone` (the in-flight
+registry keeps a copy so it can re-check revocation while a worker runs; removing
+`Clone` was tried and the library does not compile without it), and
+`Executor::run_authorized`, `stack_ffi::supervised_run_governed` and
+`stack_ffi::supervised_run_governed_cancellable` accept any `&AuthorizedAction`.
+Code in the same process that holds one, or that builds its own `Authority` with
+its own trust set, can start a worker with no `proposed`, `authorized` or
+`attempted` record, and can run a different worker kind or limits than the
+authorization named: the host keeps only a label of the digest
+(`tests/authorization_required.rs`; `stack-ffi/tests/authorized_run.rs`,
+`a_different_kind_runs_as_itself_under_the_same_authorization`). A real boundary
+needs a separate kernel process, below.
 
 ## D2-C follow-up (deferred): a separate kernel process owning execution
 

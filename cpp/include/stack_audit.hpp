@@ -41,9 +41,11 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <sys/random.h>
 #include "stack_kernel.hpp"
 
 namespace stack::telemetry {
@@ -230,20 +232,30 @@ public:
      * INITIALIZE SIGNING KEY: Derive from kernel entropy.
      *
      * Must be called once at kernel boot, before any signing operations.
-     * Derives a random 32-byte key that will be used to sign all audit events.
-     * Key lives in kernel memory only (never exported).
+     * Fills a 32-byte key from the kernel's random pool (getrandom). The key
+     * lives in kernel memory only and is never exported.
      *
-     * For now, uses a deterministic placeholder. Production implementation:
-     *   - Call getrandom(signing_key_.data(), 32, GRND_NONBLOCK)
-     *   - Handle entropy starvation gracefully
+     * Returns true when the key was filled. If the pool cannot be read, the
+     * key is wiped, signing stays off, and later events are recorded
+     * unsigned (is_signed == 0) rather than signed with a weak key. Callers
+     * should check the result.
      */
-    void InitializeSigningKey() noexcept {
-        // Placeholder: deterministic test key
-        // Production: derive from getrandom()
-        for (std::size_t i = 0; i < HmacSha256::KEY_SIZE; ++i) {
-            signing_key_[i] = static_cast<uint8_t>(0xA5 ^ i);
+    bool InitializeSigningKey() noexcept {
+        std::size_t filled = 0;
+        while (filled < HmacSha256::KEY_SIZE) {
+            const ssize_t n = ::getrandom(signing_key_.data() + filled, HmacSha256::KEY_SIZE - filled, 0);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                signing_key_.fill(0);
+                key_initialized_ = false;
+                return false;
+            }
+            filled += static_cast<std::size_t>(n);
         }
         key_initialized_ = true;
+        return true;
     }
 
 public:

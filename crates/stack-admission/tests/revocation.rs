@@ -159,6 +159,9 @@ impl ReceiptLog for HookedLog {
     fn is_durable(&self) -> bool {
         self.inner.is_durable()
     }
+    fn acknowledged_records(&self) -> Result<Vec<SignedRecord>, LogError> {
+        self.inner.acknowledged_records()
+    }
 }
 
 type Hook = Box<dyn Fn(&Admission) + Send>;

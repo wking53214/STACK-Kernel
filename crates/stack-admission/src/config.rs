@@ -75,6 +75,17 @@ pub struct KernelPolicy {
     pub operations: BTreeMap<String, WorkerKind>,
     /// Limits every execution runs under.
     pub limits: ExecutionLimits,
+    /// Refuse a capability that is not one-time. A reusable capability can
+    /// start the same action again, in a fresh envelope, until it expires.
+    /// `true` is the recommended setting. There is no default: an operator
+    /// states it.
+    pub require_one_time_capabilities: bool,
+    /// Refuse any request whose `args` is not JSON `null` or an empty object.
+    /// Arguments are not delivered to the worker and are not covered by the
+    /// capability, so accepting them would let requests that differ only in
+    /// their arguments run under one authorization. `true` is the recommended
+    /// setting until arguments are bound. There is no default.
+    pub refuse_arguments: bool,
     /// Who the receipts say produced them.
     pub provenance: Provenance,
 }
@@ -145,6 +156,8 @@ mod tests {
             ]),
             operations: BTreeMap::from([("echo".to_owned(), WorkerKind::ReturnBytes)]),
             limits: ExecutionLimits::with_deadline_ns(300_000_000),
+            require_one_time_capabilities: true,
+            refuse_arguments: true,
             provenance: Provenance {
                 component: "stack-admission".into(),
                 version: "0.1.0".into(),
