@@ -13,7 +13,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     // The worker program is compiled from the same header; list its source too.
     println!("cargo:rerun-if-changed=../../cpp/worker/stack_worker.cpp");
-    
+    println!("cargo:rerun-if-env-changed=STACK_REQUIRE_STATIC_WORKER");
+
     cc::Build::new()
         .cpp(true)
         .std("c++23")
@@ -43,7 +44,11 @@ fn main() {
 
 /// Compiles cpp/worker/stack_worker.cpp to `out_dir/name`, statically linked
 /// (no dynamic loader in the worker image). Falls back to a dynamic link only
-/// when no static libc is installed, and says so as a build warning.
+/// when no static libc is installed, and says so as a build warning. A
+/// dynamically linked worker is not covered by the image digest (the loader and
+/// shared libraries run before the worker installs its seccomp filter), so a
+/// build that must not fall back sets `STACK_REQUIRE_STATIC_WORKER` to any
+/// value other than empty or `0`; the fallback is then a build error.
 fn build_worker(out_dir: &Path, name: &str, defines: &[&str]) -> PathBuf {
     let target = out_dir.join(name);
     let compiler = cc::Build::new().cpp(true).get_compiler();
@@ -59,6 +64,11 @@ fn build_worker(out_dir: &Path, name: &str, defines: &[&str]) -> PathBuf {
         matches!(cmd.status(), Ok(s) if s.success())
     };
     if !compile(true) {
+        let required = std::env::var("STACK_REQUIRE_STATIC_WORKER").is_ok_and(|v| !v.is_empty() && v != "0");
+        assert!(
+            !required,
+            "static link of {name} failed and STACK_REQUIRE_STATIC_WORKER is set, so a dynamically linked worker is refused (install a static libc, for example libc6-dev, or unset the variable)"
+        );
         println!("cargo:warning=static link of {name} failed; using a dynamically linked worker");
         assert!(compile(false), "building the {name} helper program failed");
     }

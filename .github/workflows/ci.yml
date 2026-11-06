@@ -119,6 +119,9 @@ jobs:
     # this step red on its own. Move the pin deliberately, together with whatever
     # new lints that release adds.
     runs-on: ubuntu-latest
+    env:
+      # A worker that fell back to dynamic linking would not be covered by the image digest.
+      STACK_REQUIRE_STATIC_WORKER: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
