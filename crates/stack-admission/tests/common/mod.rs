@@ -190,6 +190,9 @@ pub fn policy() -> KernelPolicy {
             ("forbidden".to_owned(), WorkerKind::ForbiddenSyscall),
         ]),
         limits: ExecutionLimits::with_deadline_ns(DEADLINE_NS),
+        // The baseline policy keeps today's behaviour; tests/hardening.rs sets these.
+        require_one_time_capabilities: false,
+        refuse_arguments: false,
         provenance: Provenance {
             component: "stack-admission".into(),
             version: "0.1.0-test".into(),

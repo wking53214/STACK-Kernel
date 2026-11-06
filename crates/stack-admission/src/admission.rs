@@ -165,6 +165,12 @@ pub enum RefusalReason {
     UnknownOperation(String),
     /// `stack-authority` refused.
     Authorization(AuthzError),
+    /// The policy refuses a request that carries arguments, and this one
+    /// does. Nothing was recorded and nothing was consumed.
+    ArgumentsNotAllowed,
+    /// The policy requires one-time capabilities, and the one presented is
+    /// reusable. Nothing was consumed.
+    ReusableCapabilityNotAllowed,
     /// A receipt record that must precede execution could not be written.
     Receipt(RecordError),
 }
@@ -181,6 +187,10 @@ impl fmt::Display for RefusalReason {
             Self::Binding(findings) => write!(f, "cns binding: {findings:?}"),
             Self::UnknownOperation(op) => write!(f, "operation {op:?} is not in the kernel's map"),
             Self::Authorization(e) => write!(f, "authorization: {e}"),
+            Self::ArgumentsNotAllowed => f.write_str("arguments are not accepted under this kernel's policy"),
+            Self::ReusableCapabilityNotAllowed => {
+                f.write_str("a reusable capability is not accepted under this kernel's policy")
+            }
             Self::Receipt(e) => write!(f, "receipt: {e}"),
         }
     }
@@ -656,6 +666,12 @@ impl Admission {
         // ---- 2. The payload, strictly.
         let request = payload::parse(&handoff.payload)
             .map_err(|e| Self::unrecorded(Stage::Payload, RefusalReason::Payload(e)))?;
+        // Arguments are neither delivered to the worker nor covered by the
+        // capability. A policy that refuses them does so before anything is
+        // proposed or consumed.
+        if self.policy.refuse_arguments && !args_are_empty(&request.args) {
+            return Err(Self::unrecorded(Stage::Payload, RefusalReason::ArgumentsNotAllowed));
+        }
         let args = to_canonical_bytes(&request.args, &self.limits)
             .map_err(|e| Self::unrecorded(Stage::Payload, RefusalReason::Canonical(e)))?;
 
@@ -721,6 +737,11 @@ impl Admission {
             Ok(a) => a,
             Err(e) => return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::Authorization(e))),
         };
+        // A reusable capability records no use, so refusing it here consumes
+        // nothing. The refusal is recorded like any other authorization refusal.
+        if self.policy.require_one_time_capabilities && !action.one_time() {
+            return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::ReusableCapabilityNotAllowed));
+        }
         // The permission exists. Record it; without the record nothing runs.
         let exec = exec.authorize(&action).map_err(|e| Refused {
             stage: Stage::Authorization,
@@ -947,6 +968,16 @@ impl Admission {
                 None,
             ),
         }
+    }
+}
+
+/// True for JSON `null` and the empty object: the two ways a request says it
+/// carries no arguments.
+fn args_are_empty(args: &serde_json::Value) -> bool {
+    match args {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.is_empty(),
+        _ => false,
     }
 }
 

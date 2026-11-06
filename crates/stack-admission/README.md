@@ -222,12 +222,22 @@ store, durable receipt log, receipt key, executor, clock). `new` refuses a
 non-Production Trident, a differing audience, a non-durable store or log,
 and a log for another kernel.
 
+`KernelPolicy` also carries two switches that close known gaps. They have no
+default, so an operator states them. `require_one_time_capabilities` refuses a
+reusable capability, which could otherwise start the same action again in a
+fresh envelope until it expires. `refuse_arguments` refuses any request whose
+`args` is not JSON `null` or `{}`, because arguments are neither delivered to
+the worker nor covered by a capability (R2-X-02). The recommended setting for
+both is `true`. `tests/hardening.rs` pins today's behaviour with the switches
+off (a reusable capability runs twice; one capability covers requests that
+differ only in their arguments) and what each switch changes.
+
 ## 7. Defects found while building this crate
 
 | Id | Finding | Evidence | Effect |
 |---|---|---|---|
 | R2-X-01 | A supervised worker is a fork of the whole process and holds a copy of every advisory-lock descriptor (replay store, use store, receipt log) until its setup closes them. | scratch experiment: 3 threads forking workers continuously, 1,008,508 of 1,101,388 lock re-acquisitions in the parent failed in 8 s; one intermittent "still locked" start in about 60 runs of `tests/adversarial.rs` | fail closed, intermittent restart failures; the planned fork+exec clean worker (I-05) removes it |
-| R2-X-02 | `args` are validated and digested and the `resource` is authorized, but the worker receives neither, and no capability or digest covers `args`; the receipt's `attempted` record was documented as "bytes actually passed" and "exactly what is about to run". | `src/executor.rs` (`_args` unused); `RECEIPT.md` section 2 | the receipt field overstates; harmless while no worker reads arguments |
+| R2-X-02 | `args` are validated and digested and the `resource` is authorized, but the worker receives neither, and no capability or digest covers `args`; the receipt's `attempted` record was documented as "bytes actually passed" and "exactly what is about to run". | `src/executor.rs` (`_args` unused); `RECEIPT.md` section 2 | the receipt field overstates; harmless while no worker reads arguments; `refuse_arguments` refuses non-empty arguments until they are bound |
 | R2-X-03 | A Trident refusal or an unparseable payload is not written to the receipt log. | `a_malformed_payload_is_refused_before_anything_is_recorded` | an auditor of the log alone does not see refused replays |
 | R2-X-04 | The payload has no version field. | `src/payload.rs` | a future format change cannot be told from a malformed payload |
 | R2-X-05 | A real CNS roster using `same_subject=` is refused. | `a_real_decision_that_carries_the_same_subject_seat_is_refused_today` | safe direction; a CNS feature the kernel cannot admit yet |
