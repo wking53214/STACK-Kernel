@@ -132,7 +132,7 @@ Every enforcement event is a data point. The intended design has Sentinel run of
 
 ## Accepted timing residual (ANC strategy 1)
 
-Status: accepted, documented, not eliminated. The padded response still has a small, measurable difference between the two secret-dependent paths. This section is the current record. Where it conflicts with older numbers in `manual/sections/anc_ceiling.md`, this section wins.
+Status: documented, not eliminated, and open for direct callers. The padded response still has a small, measurable difference between the two secret-dependent paths. A caller who can time the padded function directly can detect it in minutes (see the November 6, 2026 measurements below), so the per-source guard must be wired in before any deployment. This section is the current record. Where it conflicts with older numbers in `manual/sections/anc_ceiling.md`, this section wins.
 
 ### What the residual is
 
@@ -185,7 +185,7 @@ Loopback is the most favorable channel for an attacker. If a real deployment is 
 
 ### How this was accepted
 
-The residual is accepted as a known, bounded risk for this library. The bound depends on the attacker's channel and request budget, and the mitigation available now is the per-source guard, which is not yet deployed. Anyone deploying the library in front of an untrusted network must (1) wire in the guard, (2) set its limits from the legitimate failure rate for that deployment, (3) monitor overrun and refusal counts, and (4) decide whether the estimates above are acceptable for their threat model.
+The residual is a documented open risk, not an accepted one. For a direct caller it is practical to detect in minutes. For a network attacker the bound depends on the channel and request budget, which are unmeasured. The mitigation available now is the per-source guard, which is not yet deployed. Anyone deploying the library in front of an untrusted network must (1) wire in the guard, (2) set its limits from the legitimate failure rate for that deployment, (3) monitor overrun and refusal counts, and (4) decide whether the estimates above are acceptable for their threat model.
 
 The loopback measurements came from scratch harnesses that are **not committed to this repository**, so they cannot be reproduced from the repo as it stands.
 
@@ -200,5 +200,5 @@ The loopback measurements came from scratch harnesses that are **not committed t
   - Run on idle machine for reliable results
   - Strategy 1 (`rt04`) and Green Wave driver tests affected
 - ANC cannot make timing difference zero mathematically
-  - See "Accepted timing residual" above for the measured residual and its limits
+  - See "Accepted timing residual" above for the measured residual and its limits (open for direct callers)
   - Manual's ANC section explains signal detection limits
