@@ -263,9 +263,11 @@ TEST_CASE("Worker: frames that are not clean are not Completed", "[worker][forge
     REQUIRE(NoChildrenLeft());
 }
 
-// RACE finding (DrainPipe): the supervisor's read loop drains the result pipe until it would block.
-// A worker that writes faster than the supervisor reads never lets it block, so the deadline check at
-// the top of the loop was never reached. The run is bounded by an alarm in a forked guard so a
+// RACE hypothesis (DrainPipe): the supervisor's read loop drained the result pipe until it would block,
+// so a worker that wrote faster than the supervisor read might never let it reach the deadline check.
+// NOT REPRODUCED: this test passes on the code without the per-call cap as well (on a 4-CPU host,
+// 25 runs, deadline held). It is a regression control for the deadline under a flooding worker, not
+// a test that detects the hypothesised hang. The run is bounded by an alarm in a forked guard so a
 // supervisor that does not return fails the test instead of hanging the suite.
 TEST_CASE("RunWorker: a worker that floods the result pipe is still killed at the deadline", "[worker][flood]") {
     const pid_t guard = ::fork();

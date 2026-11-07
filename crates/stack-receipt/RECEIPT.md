@@ -246,6 +246,30 @@ the kernel does not start; the records already written stay, and the next start
 recovers the rest. The tests are `tests/recovered.rs` (this crate) and
 `crates/stack-admission/tests/recovery.rs`.
 
+Cautions found in the independent review:
+
+* Recovery reads the records through the log's own locked file handle, not by
+  path, so a file swapped in at the path after `open` is not read
+  (`recovery_reads_the_log_the_kernel_holds_not_whatever_is_at_the_path`).
+* `Recorder::recover_open_executions` is public and the recorder is `Clone`.
+  Call it once at startup, before any execution is proposed. Called while
+  executions are in flight in the same process, it would close live ones, and
+  their genuine later records would be rejected (`duplicate_terminal`).
+* Recovery writes one record (two fsyncs) per open execution, with no bound, so
+  a log with very many open executions makes start-up slow. It fails closed, not
+  open.
+* Recovery does not weaken the rollback limitation, but it hides one symptom of
+  it. An attacker who restores an older copy of the log that ends mid-execution,
+  at or after the auditor's anchor, no longer leaves `INCOMPLETE`: the next
+  start signs a `Recovered` record and the log verifies. Only an anchor taken at
+  or after the cut sequence catches it (`anchor_mismatch`).
+* A version 3 log cannot be read by code that predates version 3 (`BadTag`, so
+  the whole log reads as corrupt). There is no downgrade path.
+* A recovered `attempted` execution verifies as `VERIFIED_WITH_LIMITATIONS`, the
+  same state as a completed one, and differs only in `execution.outcome` and the
+  limitation. A consumer that gates on `state` alone accepts an execution whose
+  outcome nobody knows.
+
 ### Which native component each digest refers to (G-4, R-6)
 
 Four digests sit in a record and are never merged or truncated:

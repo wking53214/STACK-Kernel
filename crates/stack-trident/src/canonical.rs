@@ -369,9 +369,12 @@ impl Parser<'_> {
             let b = self.bump().ok_or(CanonicalError::Malformed)?;
             let d = match b {
                 b'0'..=b'9' => b - b'0',
-                // Lowercase only, as the encoder writes it: an uppercase digit
-                // is a second spelling of the same text, and the MAC covers the
-                // canonical form, so it would verify.
+                // Lowercase only, as the encoder writes it. This closes the one
+                // single-bit-flip path (a hex digit's case) to a second spelling
+                // of the same text. It does NOT make the wire spelling unique: the
+                // MAC covers the canonical form, so other spellings (`-0`, raw
+                // versus escaped characters, whitespace, key order) are accepted
+                // by design.
                 b'a'..=b'f' => b - b'a' + 10,
                 _ => return Err(CanonicalError::Malformed),
             };

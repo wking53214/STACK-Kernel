@@ -754,8 +754,11 @@ impl Admission {
             Ok(a) => a,
             Err(e) => return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::Authorization(e))),
         };
-        // A reusable capability records no use, so refusing it here consumes
-        // nothing. The refusal is recorded like any other authorization refusal.
+        // The authority has already checked this capability and recorded its first presentation
+        // in the use store (a reusable capability is recorded too), so this refusal does NOT leave
+        // the store untouched. A holder of many issuer-signed reusable capabilities can fill the
+        // store's fixed capacity this way, and honest requests then fail with StoreUnavailable.
+        // The refusal is recorded like any other authorization refusal.
         if self.policy.require_one_time_capabilities && !action.one_time() {
             return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::ReusableCapabilityNotAllowed));
         }

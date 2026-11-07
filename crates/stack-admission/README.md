@@ -248,7 +248,13 @@ fresh envelope until it expires. `refuse_arguments` refuses any request whose
 the worker nor covered by a capability (R2-X-02). The recommended setting for
 both is `true`. `tests/hardening.rs` pins today's behaviour with the switches
 off (a reusable capability runs twice; one capability covers requests that
-differ only in their arguments) and what each switch changes.
+differ only in their arguments) and what each switch changes. The one-time check
+runs after the authority has accepted the capability and recorded its first
+presentation in the use store, so a refused reusable capability still uses a
+slot there; a holder of many issuer-signed reusable capabilities could fill the
+store and make honest requests fail with `StoreUnavailable`. The issuer must not
+issue reusable capabilities (`docs/issuer-requirements.md`, R-7); the switch is a
+second line, not a way to make them free to refuse.
 
 ## 7. Defects found while building this crate
 
