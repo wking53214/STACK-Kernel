@@ -549,6 +549,13 @@ pub struct LogVerification {
     pub scope: Scope,
     /// One verdict per execution, in order of first appearance.
     pub executions: Vec<Verification>,
+    /// The executions whose outcome nobody knows, in order of first appearance: an
+    /// attempt with no terminal record, an attempt a restart closed with a `Recovered`
+    /// record, and a recorded `Unknown` terminal. A log can verify
+    /// `VERIFIED_WITH_LIMITATIONS` and still list executions here, so a consumer that
+    /// reads the state must also check that this is empty (or accept each id). An
+    /// execution a restart closed before its attempt (it never ran) is not listed.
+    pub unknown_outcomes: Vec<ExecutionId>,
 }
 
 fn state_from(findings: &[Finding], scope: &Scope, has_records: bool) -> State {
@@ -1165,11 +1172,17 @@ pub fn verify_log(records: &[SignedRecord], trusted: &TrustedReceiptKeys, expect
             findings: all,
         });
     }
+    let unknown_outcomes = executions
+        .iter()
+        .filter(|e| e.execution.outcome == Some(OutcomeKind::Unknown))
+        .map(|e| e.execution.execution_id)
+        .collect();
     LogVerification {
         state: worst,
         findings: chain_findings,
         scope,
         executions,
+        unknown_outcomes,
     }
 }
 
@@ -1210,6 +1223,7 @@ pub fn verify_log_bytes(bytes: &[u8], trusted: &TrustedReceiptKeys, expectations
                 findings,
                 scope: Scope::default(),
                 executions: Vec::new(),
+                unknown_outcomes: Vec::new(),
             }
         }
     }
@@ -1343,12 +1357,19 @@ impl Verification {
 }
 
 impl LogVerification {
-    /// A JSON object: `state`, `scope`, `findings`, `executions` (each as
-    /// [`Verification::to_json`]).
+    /// A JSON object: `state`, `unknown_outcomes` (execution ids as hex), `scope`,
+    /// `findings`, `executions` (each as [`Verification::to_json`]).
     pub fn to_json(&self) -> String {
         let mut out = String::from("{\"state\":");
         json_str(&mut out, self.state.as_str());
-        out.push_str(",\"scope\":");
+        out.push_str(",\"unknown_outcomes\":[");
+        for (i, id) in self.unknown_outcomes.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            json_str(&mut out, &id.to_hex());
+        }
+        out.push_str("],\"scope\":");
         json_scope(&mut out, &self.scope);
         out.push_str(",\"findings\":");
         json_findings(&mut out, &self.findings);
