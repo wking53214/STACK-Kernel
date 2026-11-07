@@ -78,7 +78,10 @@ pub struct KernelPolicy {
     /// Refuse a capability that is not one-time. A reusable capability can
     /// start the same action again, in a fresh envelope, until it expires.
     /// `true` is the recommended setting. There is no default: an operator
-    /// states it.
+    /// states it. The check runs after the authority has accepted the
+    /// capability, so a refused reusable capability has still used a slot in
+    /// the use store; the issuer must not issue reusable capabilities in the
+    /// first place.
     pub require_one_time_capabilities: bool,
     /// Refuse any request whose `args` is not JSON `null` or an empty object.
     /// Arguments are not delivered to the worker and are not covered by the

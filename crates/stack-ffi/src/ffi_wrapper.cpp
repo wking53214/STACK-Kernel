@@ -280,9 +280,14 @@ static bool RunProcessInitialization() noexcept {
     // The initializing thread's deadline timer. Besides serving this thread
     // later, it proves that timer_create works in this process.
     if (!governor::HardenedPosixPreemptionGuard::InitializeThreadTimer().has_value()) return false;
+    // The process-wide audit ring signs what it records. Without a key it would record unsigned
+    // events that nothing can tell from forged ones, so initialization fails instead.
+    if (!g_audit_ring.InitializeSigningKey()) return false;
     // Constructed exactly once: only the winning thread reaches this line,
     // and only once per process. The calibration spins for 10 ms.
     static FfiHostInstance host_instance(CalibrateTicksPerToken());
+    // The host's own ring is keyed in its constructor; if that failed, no host is published.
+    if (!host_instance.AuditSigningReady()) return false;
     g_host = &host_instance;
     return true;
 }

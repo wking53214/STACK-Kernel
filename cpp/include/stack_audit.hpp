@@ -240,7 +240,10 @@ public:
      * unsigned (is_signed == 0) rather than signed with a weak key. Callers
      * should check the result.
      */
-    bool InitializeSigningKey() noexcept {
+    [[nodiscard]] bool InitializeSigningKey() noexcept {
+        // Once only: a second call must not replace the key, or every record signed so far would
+        // read as tampered. Call it before any thread pushes; it is not synchronized with Push.
+        if (key_initialized_) return true;
         std::size_t filled = 0;
         while (filled < HmacSha256::KEY_SIZE) {
             const ssize_t n = ::getrandom(signing_key_.data() + filled, HmacSha256::KEY_SIZE - filled, 0);
@@ -346,9 +349,10 @@ public:
             return false;  // Slot never written
         }
 
-        // P3.3: Verify HMAC if is_signed == 1
+        // P3.3: A signed record must verify. Without a key it cannot be checked, so it is refused
+        // (a failed re-key must not turn a signed record into an unchecked one).
         if (out_record.is_signed == 1) {
-            if (key_initialized_ &&
+            if (!key_initialized_ ||
                 !HmacSha256::Verify(
                     signing_key_.data(),
                     reinterpret_cast<const uint8_t*>(&out_record),
@@ -357,8 +361,12 @@ public:
                 // HMAC verification failed: record is tampered
                 return false;  // Indicate slot is corrupted
             }
+        } else if (key_initialized_) {
+            // A keyed ring signs every record it writes, so an unsigned one was not written by it
+            // (or its flag was cleared to skip the check).
+            return false;
         }
-        // Unsigned entries (is_signed == 0) pass through; marked as legacy
+        // In a ring that was never keyed, entries are unsigned and pass through.
 
         return true;
     }

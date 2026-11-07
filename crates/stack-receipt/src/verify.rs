@@ -579,7 +579,8 @@ fn verify_chain(records: &[SignedRecord], trusted: &TrustedReceiptKeys, exp: &Ex
     scope.check(Check::Signatures);
     scope.limit(Limitation::LogRollbackNotDetectableWithoutAnchor);
     scope.limit(Limitation::TimestampsAreWriterClaims);
-    if exp.anchor.is_some() {
+    // The genesis anchor (an empty log) protects nothing, so it is not reported as a check.
+    if exp.anchor.is_some_and(|a| *a != Head::genesis()) {
         scope.check(Check::AnchorHeld);
     }
     if records.is_empty() {
@@ -645,9 +646,17 @@ fn verify_chain(records: &[SignedRecord], trusted: &TrustedReceiptKeys, exp: &Ex
 }
 
 /// The anchor check: the log must still hold the anchored record. An anchor
-/// at sequence 0 is the head of an empty log, which every log extends.
+/// at sequence 0 is the head of an empty log, which every log extends, so it
+/// must carry the genesis hash; any other hash is a mistake or a forgery.
 fn check_anchor(records: &[SignedRecord], anchor: &Head, findings: &mut Vec<Finding>) {
     if anchor.sequence == 0 {
+        if *anchor != Head::genesis() {
+            findings.push(Finding::new(
+                FindingCode::AnchorMismatch,
+                Some(0),
+                "an anchor at sequence 0 is not the genesis hash",
+            ));
+        }
         return;
     }
     match records.iter().find(|s| s.record().sequence == anchor.sequence) {

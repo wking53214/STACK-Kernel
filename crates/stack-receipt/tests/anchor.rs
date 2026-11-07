@@ -142,3 +142,32 @@ fn an_anchor_on_an_empty_log_is_rejected_and_the_genesis_anchor_is_vacuous() {
     let v = verify_log(&[], &baseline_trust(), &exp);
     assert!(!codes(&v).contains(&FindingCode::LogDoesNotReachAnchor), "{:?}", v.findings);
 }
+
+#[test]
+fn a_sequence_zero_anchor_must_be_the_genesis_hash_and_the_genesis_anchor_claims_no_check() {
+    // An anchor at sequence 0 can only be the head of an empty log. One with another hash is a
+    // mistake or a forgery, not a vacuous anchor.
+    let path = temp("seq-zero");
+    let (bytes, _) = write_log(&path, honest_events());
+    let junk = Head {
+        sequence: 0,
+        hash: [9u8; 32],
+    };
+    let exp = Expectations {
+        anchor: Some(&junk),
+        ..Expectations::default()
+    };
+    let v = verify_log_bytes(&bytes, &baseline_trust(), &exp);
+    assert_eq!(v.state, State::Rejected, "{:?}", v.findings);
+    assert!(codes(&v).contains(&FindingCode::AnchorMismatch), "{:?}", v.findings);
+
+    // The genuine genesis anchor protects nothing, so the scope must not say it was checked.
+    let genesis = Head::genesis();
+    let exp = Expectations {
+        anchor: Some(&genesis),
+        ..Expectations::default()
+    };
+    let v = verify_log_bytes(&bytes, &baseline_trust(), &exp);
+    assert_eq!(v.state, State::VerifiedWithLimitations, "{:?}", v.findings);
+    assert!(!v.scope.checked.contains(&Check::AnchorHeld));
+}

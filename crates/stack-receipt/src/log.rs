@@ -790,7 +790,14 @@ impl ReceiptLog for FileReceiptLog {
         if self.poisoned {
             return Err(LogError::Poisoned);
         }
-        Ok(Self::read_file(&self.path)?.records)
+        // Read through the open, locked handle, not by path. A file swapped in at the path after
+        // `open` is not the log this handle will append to, and recovery would sign records about
+        // executions that are not in it. Every write seeks first, so moving the cursor is safe.
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(0)).map_err(|e| LogError::io("seek", &e))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|e| LogError::io("read", &e))?;
+        Ok(parse_log(&bytes)?.records)
     }
 }
 

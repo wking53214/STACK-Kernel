@@ -223,6 +223,28 @@ fn recovery_on_a_clean_or_empty_log_writes_nothing() {
     assert_eq!(rec.head().unwrap(), stack_receipt::Head::genesis());
 }
 
+#[test]
+fn recovery_reads_the_log_the_kernel_holds_not_whatever_is_at_the_path() {
+    // The kernel opens and locks one file. If another file is put at the path before recovery
+    // runs, recovery must still look at the file it holds and will append to.
+    let path = temp("swapped-held");
+    let rec = recorder_over_file(&path); // holds and locks the (empty) log at `path`
+
+    let other = temp("swapped-other");
+    let _ids = crashed_log(&other); // a different log with three open executions
+    let moved = path.with_file_name("moved.log");
+    let _ = std::fs::remove_file(&moved);
+    std::fs::rename(&path, &moved).unwrap(); // the held file keeps its inode
+    std::fs::rename(&other, &path).unwrap(); // a stranger's log now sits at the path
+
+    let recovered = rec.recover_open_executions().unwrap();
+    assert!(recovered.is_empty(), "recovered executions from a log the kernel does not hold: {recovered:?}");
+    drop(rec);
+    // The file the kernel held is untouched: no Recovered record was written into it.
+    let held = FileReceiptLog::read_file(&moved).unwrap();
+    assert!(held.records.is_empty(), "{} records were written into the held log", held.records.len());
+}
+
 // ---------------------------------------------------------------------------
 // The verifier does not take the record's word for it
 // ---------------------------------------------------------------------------
