@@ -20,6 +20,7 @@ Identifiers such as `D-19` refer to a project decision register that is not in t
 | Operation is an exact name in the capability; resource is inside a scope on a path-segment boundary | `authority.rs`, `scope.rs` | INSPECTED |
 | Window, and a lifetime cap (default 24 hours) | `authority.rs` `max_lifetime_ms` | INSPECTED |
 | One-time use recorded in a durable store | `store.rs`, `file_store.rs` | INSPECTED |
+| For a `stack-capability/2` capability: the arguments digest, worker label and limits digest equal what the kernel will run (before the use is recorded) | `authority.rs` step 12a, `tests/binding.rs` | EXECUTED |
 
 ## 2. What only an issuer can establish
 
@@ -50,8 +51,8 @@ MUST means the kernel's claims do not hold without it.
 - R-8 (SHOULD). Lifetimes are minutes, far under the 24-hour cap.
 - R-9 (MUST). `cap_id` and `nonce` are unique and drawn from a cryptographically secure source.
 
-**Arguments, worker kind and limits (known gaps)**
-- R-10 (MUST until the format changes). The capability does not bind `args`, the worker kind or the execution limits. The kernel's `refuse_arguments` defaults to true (`config.rs`), and the issuer issues capabilities only for operations that take no arguments. Binding an arguments digest means a new capability format version, which is a wire-format change and an owner decision.
+**Arguments, worker kind and limits**
+- R-10 (MUST). The issuer issues `stack-capability/2` capabilities that bind the execution: the SHA-256 of the canonical arguments, the worker kind's label and the SHA-256 of the limits. It computes the three with the kernel's own functions (`stack_admission::execution_binding`, `ExecutionLimits::binding_digest`) from the same policy the kernel runs, so they agree byte for byte. The kernel sets `require_execution_binding` to true, which refuses a version 1 capability. A version 1 capability binds nothing about how the operation runs, and the kernel then relies on `refuse_arguments`. Neither version makes the worker receive the arguments: that is still not implemented (R2-X-02).
 - R-11 (MUST). The operation-to-worker map lives in the kernel's `KernelPolicy.operations`. The issuer and the kernel operator agree on what each operation name runs.
 
 **Revocation and rotation**
@@ -86,7 +87,7 @@ These are acceptance criteria for a future issuer. None is implemented or run to
 
 - Who operates the issuer, and on what key-custody system.
 - Whether the Python `cns_interop` Ed25519 signing code (register D-19, not in this repository) becomes the issuer, or a new service does. Whichever it is, CNS must not become an authorization or execution authority; the issuer must stay separate from CNS's contract role.
-- Whether to add a capability format version that binds an arguments digest (and optionally the worker kind and limits). This changes the wire format.
+- ~~Whether to add a capability format version that binds an arguments digest, the worker kind and the limits.~~ Decided and implemented as `stack-capability/2`. Open: when the issuer starts issuing it, and when the kernel's `require_execution_binding` is turned on.
 - The revocation transport and its maximum staleness.
 - The maximum lifetime and whether any reusable capability is ever acceptable.
 - Whether a separate kernel process should own execution (the deferred D2-C design in `crates/stack-admission/README.md`).

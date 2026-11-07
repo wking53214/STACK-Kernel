@@ -10,7 +10,7 @@ CNS is `docs/cns-kernel-integration.md` at the repository root.
 
 One entry point, `Admission::process(envelope_bytes) -> AdmissionResult`.
 A request is a `stack-trident` envelope whose payload carries a CNS
-decision, a `stack-capability/1` capability and the action wanted. The
+decision, a `stack-capability/1` or `/2` capability and the action wanted. The
 pipeline either refuses it with a typed reason, recording the refusal in
 the receipt log where the log is reachable, or runs it under a
 write-ahead receipt and reports what happened.
@@ -160,9 +160,11 @@ took 431 to 451 ms. The asserted bound is the deadline plus 2 s. These are one m
   argument digest, and it authorizes the `resource` and records it in the
   `attempted` action, but the worker sees neither; the record is the
   digest and the resource the kernel intended to use, not proof of
-  delivery (R2-X-02, wording corrected). Neither the subject digest nor
-  the capability covers `args`. Until a worker reads them and a binding
-  exists, `args` and `resource` must not be read as what the worker
+  delivery (R2-X-02, wording corrected). A version 1 capability does not
+  cover `args`; a version 2 capability does, when the policy sets
+  `require_execution_binding` (the capability then commits to the argument
+  digest, the worker kind and the limits). Even so the worker still does not
+  receive them, so `args` and `resource` must not be read as what the worker
   acted on.
 * **A roster with the `CNS:same_subject` seat is refused.** A real
   SuperGate decision built with `same_subject=` carries a pseudo seat whose
@@ -248,7 +250,19 @@ fresh envelope until it expires. `refuse_arguments` refuses any request whose
 the worker nor covered by a capability (R2-X-02). The recommended setting for
 both is `true`. `tests/hardening.rs` pins today's behaviour with the switches
 off (a reusable capability runs twice; one capability covers requests that
-differ only in their arguments) and what each switch changes. The one-time check
+differ only in their arguments) and what each switch changes.
+
+A third switch, `require_execution_binding`, refuses a capability that does not
+bind the execution. A version 2 capability (`stack-capability/2`) commits to the
+SHA-256 of the canonical arguments, the worker kind's label and the SHA-256 of the
+limits (`ExecutionLimits::binding_digest`); the authority refuses a request that
+would run anything else, each mismatch with its own reason (`ArgsMismatch`,
+`WorkerMismatch`, `LimitsMismatch`), before the use is recorded, so a refusal
+consumes nothing. `execution_binding` computes the three values the way the kernel
+does, for an issuer. With the switch on, `refuse_arguments` can be turned off,
+because the capability then covers the arguments. With it off, version 1 and
+version 2 capabilities are both accepted. `tests/execution_binding.rs` pins it.
+The one-time check
 runs after the authority has accepted the capability and recorded its first
 presentation in the use store, so a refused reusable capability still uses a
 slot there; a holder of many issuer-signed reusable capabilities could fill the
@@ -261,7 +275,7 @@ second line, not a way to make them free to refuse.
 | Id | Finding | Evidence | Effect |
 |---|---|---|---|
 | R2-X-01 | A supervised worker is a fork of the whole process and holds a copy of every advisory-lock descriptor (replay store, use store, receipt log) until its setup closes them. | scratch experiment: 3 threads forking workers continuously, 1,008,508 of 1,101,388 lock re-acquisitions in the parent failed in 8 s; one intermittent "still locked" start in about 60 runs of `tests/adversarial.rs` | fail closed, intermittent restart failures; the planned fork+exec clean worker (I-05) removes it |
-| R2-X-02 | `args` are validated and digested and the `resource` is authorized, but the worker receives neither, and no capability or digest covers `args`; the receipt's `attempted` record was documented as "bytes actually passed" and "exactly what is about to run". | `src/executor.rs` (`_args` unused); `RECEIPT.md` section 2 | the receipt field overstates; harmless while no worker reads arguments; `refuse_arguments` refuses non-empty arguments until they are bound |
+| R2-X-02 | `args` are validated and digested and the `resource` is authorized, but the worker receives neither, and no version 1 capability covers `args` (a version 2 capability does, see section 6); the receipt's `attempted` record was documented as "bytes actually passed" and "exactly what is about to run". | `src/executor.rs` (`_args` unused); `RECEIPT.md` section 2 | the receipt field overstates; harmless while no worker reads arguments; `refuse_arguments` refuses non-empty arguments until they are bound |
 | R2-X-03 | A Trident refusal or an unparseable payload is not written to the receipt log. | `a_malformed_payload_is_refused_before_anything_is_recorded` | an auditor of the log alone does not see refused replays |
 | R2-X-04 | The payload has no version field. | `src/payload.rs` | a future format change cannot be told from a malformed payload |
 | R2-X-05 | A real CNS roster using `same_subject=` is refused. | `a_real_decision_that_carries_the_same_subject_seat_is_refused_today` | safe direction; a CNS feature the kernel cannot admit yet |

@@ -16,7 +16,7 @@ Pinned against:
 |---|---|
 | CNS package | version 2.3.0, commit `4acd8f958a091900d43f553eba7fe83f7d33c4d6` (on CNS `origin/main`). The version string reads 2.3.0 at this commit, but the `v2.3.0` tag points at `41592fb7b6735abe140f745353c09ba3eed8e7a2`, a different commit. Also reproduced at CNS `origin/main` head `0fdbb19deee1f7aa7c01503d2f95d5d1e2da84b7` (2026-11-05): the governed fixture regenerates identically except `cns_commit`, and the vendored digest vectors and differential corpus are byte-identical to that head |
 | Digest | `cns-digest/1`, restricted v1 (vectors schema `cns-digest-vectors/2`) |
-| Capability | `stack-capability/1` (`stack-authority`) |
+| Capability | `stack-capability/1` and `/2` (`stack-authority`) |
 | Receipt | `stack-receipt/1`, log `stack-receipt/log/1` (`stack-receipt`) |
 | Admission payload | the six-field object below. It carries no version field (R2-X-04); it is versioned by this page |
 

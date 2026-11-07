@@ -95,7 +95,7 @@ worker (measured 27 ms on 2026-11-06 from revocation to a recorded, dead worker,
 under 1 s), the receipt terminal is a non-success `Terminated`, and an unrelated
 run is unaffected (`stack-admission/tests/revocation_real_worker.rs`).
 
-## 3. Wire format, `stack-capability/1`
+## 3. Wire format, `stack-capability/1` and `/2`
 
 Big-endian integers; `u16`-length-prefixed UTF-8 strings with no control
 character (below U+0020, or U+007F); sets in strictly increasing byte
@@ -121,6 +121,23 @@ signed region
                   bound to one key and rotation cannot make it ambiguous)
 signature         64 bytes, Ed25519 over the signed region
 ```
+
+Version 2 adds an execution binding between `nonce` and `key_id`:
+
+```
+  [version 2 only, tag "stack-capability/2\n"]
+  args_digest     32 bytes (SHA-256 of the canonical argument bytes)
+  worker          u16 len, 1..=64 bytes (the worker kind's label)
+  limits_digest   32 bytes (SHA-256 of the execution limits)
+```
+
+A capability with no binding is written as version 1 and one with a binding as
+version 2, so a capability has exactly one encoding
+(`tests/binding.rs::a_record_has_one_encoding_so_the_version_and_the_body_must_agree`).
+Any other version is `UnsupportedVersion`. The binding is part of the signed
+region and so of the capability digest. `args_digest`, `worker` and
+`limits_digest` are computed by `stack-admission` (`execution_binding`,
+`ExecutionLimits::binding_digest`); this crate only compares them.
 
 Nothing may follow the signature. The parser refuses truncation at every
 length, trailing bytes, a wrong domain tag, an unsupported version,
@@ -166,6 +183,14 @@ the rules is covered by nothing (`authorize::resource_scopes_are_exact_or_segmen
 10. Decision root equals the request's.
 11. Operation is a member of the set, byte for byte.
 12. Some scope covers the resource.
+12a. Execution binding. A version 2 capability's arguments digest, worker
+    label and limits digest must equal what the request says will run; each
+    mismatch has its own error (`ArgsMismatch`, `WorkerMismatch`,
+    `LimitsMismatch`). A bound capability whose request does not describe the
+    execution is `ExecutionNotDescribed`. With `require_execution_binding`, a
+    version 1 capability is `ExecutionBindingRequired`. This runs before the
+    use is recorded, so a refusal here consumes nothing
+    (`tests/binding.rs::a_refused_binding_consumes_nothing_so_the_one_time_capability_still_works`).
 13. The use store records the use, last.
 
 Steps 1 to 4 reveal only facts about the bytes presented and the
@@ -181,7 +206,8 @@ Two shapes differ from the brief, after reading `stack-trident`: the
 verifying identity (audience) is `AuthorityConfig`, as
 `TridentConfig.audience` is, and now comes from the `Clock` only. Neither
 can be chosen by whoever builds the `ActionRequest`, which carries only
-subject digest, decision root, operation and resource. A request
+subject digest, decision root, operation, resource and, optionally, the
+execution description. A request
 descriptor is data: every field in it is compared with a field the issuer
 signed (`adversarial::hostile_request_descriptor_with_a_self_made_capability`,
 `permissive_capability_with_valid_signature_but_wrong_audience`).
