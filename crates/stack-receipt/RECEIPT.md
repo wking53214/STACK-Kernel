@@ -233,9 +233,10 @@ was closed by a restart and not by the run.
 Effect on the log's state: the recovered execution no longer holds the log
 `INCOMPLETE`. A log whose only open executions were recovered verifies
 `VERIFIED_WITH_LIMITATIONS`, as every log does. The unknown outcome is carried
-by `execution.outcome` and the limitation, not by the state, so a consumer that
-reads only the state sees an intact log and must still read
-`execution.outcome` (see "What a consumer must not infer").
+by `execution.outcome` and the limitation, not by the state. The log-level field
+`unknown_outcomes` lists every execution whose outcome is unknown, so a consumer
+that reads only the state and that field cannot miss one (see "What a consumer
+must not infer").
 
 Recovery relies on a single writer: it assumes no other process is still driving
 the executions it finds open. `FileReceiptLog` holds an exclusive advisory lock,
@@ -354,7 +355,15 @@ state is about the evidence; the outcome is about the action. An
 attempt with no terminal event is `INCOMPLETE` with outcome `unknown`
 and is never success. Once a restart has closed it with a `Recovered` record
 (format version 3) the state is no longer `INCOMPLETE`, but the outcome is still
-`unknown` and it is still never success. `REJECTED` dominates `INCOMPLETE`.
+`unknown` and it is still never success. A log can therefore verify
+`VERIFIED_WITH_LIMITATIONS` while executions in it have an unknown outcome:
+`LogVerification::unknown_outcomes` (the JSON field `unknown_outcomes`, execution
+ids as hex) lists them in order of first appearance, and a consumer that gates on
+the state MUST also require it to be empty or accept each id. It lists an attempt
+with no terminal, an attempt a restart closed, and a recorded `Unknown` terminal.
+It does not list an execution a restart closed before its attempt (it never ran),
+a rejection, or `termination_unconfirmed` (that outcome has its own finding).
+`REJECTED` dominates `INCOMPLETE`.
 
 ### Scope
 
@@ -423,8 +432,9 @@ content. Reject: `log_corrupt`, `sequence_gap`, `prev_hash_mismatch`,
 * An intact chain is not a current chain. See rollback below.
 * A log that verifies `VERIFIED_WITH_LIMITATIONS` after a restart is not "every
   run in it finished". An execution a restart closed has outcome `unknown`: the
-  payload may have run. Read `execution.outcome` and the limitation
-  `execution_recovered_outcome_unknown`, not the state alone.
+  payload may have run. Check `unknown_outcomes` (empty, or each id accepted),
+  and read `execution.outcome` and the limitation
+  `execution_recovered_outcome_unknown`; the state alone does not tell you.
 
 ### The tamper matrix (`tests/tamper.rs` unless noted)
 

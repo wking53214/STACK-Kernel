@@ -182,7 +182,8 @@ took 431 to 451 ms. The asserted bound is the deadline plus 2 s. These are one m
   completion, been cut off, or never started: the verifier reports the outcome
   `unknown` with the limitation `execution_recovered_outcome_unknown`, and the
   log's state is `VERIFIED_WITH_LIMITATIONS`, not `INCOMPLETE`, so a consumer
-  must read `execution.outcome`, not the state alone. If the log cannot list its
+  must check `unknown_outcomes` (the verifier lists every execution whose outcome
+  is unknown) or `execution.outcome`, not the state alone. If the log cannot list its
   records or a recovery record cannot be written, the kernel does not start
   (`BuildError::Recorder`). The kernel relies on the receipt log's exclusive lock
   to know no other process is still running those executions. It does not

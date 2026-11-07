@@ -92,6 +92,8 @@ fn a_restarted_kernel_closes_the_open_execution_before_it_takes_any_work() {
     assert!(e.findings.iter().any(|f| f.code == FindingCode::RecoveredAfterRestart), "{}", e.to_json());
     assert!(!e.findings.iter().any(|f| f.code == FindingCode::TerminalMissing), "{}", e.to_json());
     assert!(v.scope.not_checked.contains(&Limitation::ExecutionRecoveredOutcomeUnknown));
+    // The headline for a consumer that reads only the state: the recovered execution is listed.
+    assert_eq!(v.unknown_outcomes, vec![open]);
 
     // New work goes after the recovery record, and the log stays verifiable.
     h.set_next_seq(2);
