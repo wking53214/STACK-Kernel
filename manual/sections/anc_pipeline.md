@@ -280,7 +280,7 @@ CPU per request was 575 to 691 ns pinned, and rose to 3.1 to 3.5 µs unpinned. T
 
 **Shedding as a second channel.** A shed reply returns faster than a mismatch. For `constant_time` that reveals load, not the secret. A red-team probe that saw only reply codes stayed at |t| 1.87 or less over 14 runs.
 
-For the leaky validators the shed rate tracks the secret, because slot hold time depends on where the guess goes wrong. The probe detected `early_exit` in all 14 runs. It detected `balanced_dummy` in 8 of 8 isolated runs, and in both re-runs here (t = -7.64 and -19.46).
+For the leaky validators the shed rate tracks the secret, because slot hold time depends on where the guess goes wrong. The probe detected `early_exit` in all 14 runs. It detected `balanced_dummy` in 8 of 8 isolated runs, and in both re-runs here (t = -7.64 and -19.46). The November 6, 2026 re-run on a 2-vCPU machine did not match: the sign was positive in all 14 runs, but |t| reached 4.5 in only 3 of 14 (see the README). The test is now `#[ignore]`d as an open finding.
 
 Reading this channel needs no clock at all. The crate's `SlotsFull` docs and the ANC analysis both say a shed reflects load only, and that holds for `constant_time` alone.
 

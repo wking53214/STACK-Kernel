@@ -749,7 +749,13 @@ fn shedding_outcome_is_independent_of_token_value() {
 /// only reply codes (no clock) learns the class of concurrent guesses from
 /// its own shed rate. The safe behaviour is |t| < T_THRESHOLD, as for
 /// constant_time.
+/// Open finding, ignored by default. `balanced_dummy` is the brief's design,
+/// which is a measured counterexample. Its shed-rate difference between
+/// classes has the same sign in every local run so far, but the size is
+/// too small for a reliable |t| > 4.5 at 1.5 to 6 million probes on a
+/// 2-vCPU machine. Run with `--ignored` to measure it; see the README.
 #[test]
+#[ignore = "open finding: balanced_dummy shed channel, see README"]
 fn shedding_reflects_load_only_for_balanced_dummy() {
     let _l = serial();
     let t = shed_channel_t(Validator::BalancedDummy);
