@@ -46,8 +46,8 @@ pub mod trust;
 
 pub use authority::{ActionRequest, AuthorizedAction, Authority, AuthorityConfig, AuthzError, ConfigError};
 pub use capability::{
-    Capability, CapabilityDigest, Field, ParseError, SignedCapability, DIGEST_DOMAIN, DOMAIN_TAG, KEY_ID_BYTES,
-    MAX_ID_BYTES, MAX_OPERATIONS, MAX_OPERATION_BYTES, MAX_POLICY_REF_BYTES, MAX_RESOURCES, MAX_WIRE_BYTES,
+    Capability, CapabilityDigest, ExecutionBinding, Field, ParseError, SignedCapability, DIGEST_DOMAIN, DOMAIN_TAG,
+    DOMAIN_TAG_V2, KEY_ID_BYTES, MAX_ID_BYTES, MAX_OPERATIONS, MAX_OPERATION_BYTES, MAX_POLICY_REF_BYTES, MAX_RESOURCES, MAX_WIRE_BYTES,
     MIN_WIRE_BYTES, NONCE_BYTES, SIGNATURE_BYTES,
 };
 pub use clock::{Clock, ManualClock, SystemClock};

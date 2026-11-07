@@ -130,11 +130,11 @@ fn wrong_domain_tag_or_version_is_refused() {
     let mut other = w.clone();
     other[0] ^= 0x20;
     assert_eq!(parse(&other).unwrap_err(), ParseError::BadDomainTag);
-    let mut v2 = w.clone();
+    let mut v3 = w.clone();
     let pos = DOMAIN_TAG.len() - 2;
-    assert_eq!(v2[pos], b'1');
-    v2[pos] = b'2';
-    assert_eq!(parse(&v2).unwrap_err(), ParseError::UnsupportedVersion);
+    assert_eq!(v3[pos], b'1');
+    v3[pos] = b'3';
+    assert_eq!(parse(&v3).unwrap_err(), ParseError::UnsupportedVersion);
     let mut no_newline = w;
     no_newline[DOMAIN_TAG.len() - 1] = b' ';
     assert_eq!(parse(&no_newline).unwrap_err(), ParseError::UnsupportedVersion);

@@ -27,7 +27,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use stack_authority::AuthorizedAction;
+use sha2::{Digest, Sha256};
+use stack_authority::{AuthorizedAction, Digest32, ExecutionBinding};
 
 use crate::admission::{CancelToken, CancellableExecutor};
 
@@ -114,6 +115,21 @@ pub enum LimitsError {
     AddressSpace,
 }
 
+/// Domain separator hashed in front of the limits to make [`ExecutionLimits::binding_digest`].
+pub const LIMITS_DIGEST_DOMAIN: &[u8] = b"stack-admission/limits/1\n";
+
+/// What a version 2 capability binds for a run: the digest of the canonical
+/// argument bytes, the worker kind's label and the digest of the limits. The
+/// kernel builds it from its own parsed request and policy; an issuer builds it
+/// with this function so the two agree byte for byte.
+pub fn execution_binding(canonical_args: &[u8], kind: WorkerKind, limits: &ExecutionLimits) -> ExecutionBinding {
+    ExecutionBinding {
+        args_digest: Digest32::from_bytes(Sha256::digest(canonical_args).into()),
+        worker: kind.as_str().to_owned(),
+        limits_digest: limits.binding_digest(),
+    }
+}
+
 /// Limits every execution runs under. Mirrors the supervisor's limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutionLimits {
@@ -153,6 +169,22 @@ impl ExecutionLimits {
             file_size_bytes: 0,
             nofile: 0,
         }
+    }
+
+    /// SHA-256 over a fixed domain and the six limits, each big-endian, in
+    /// declaration order. This is the `limits_digest` a version 2 capability
+    /// binds: an issuer computes it with this function and the kernel computes
+    /// it from its own policy, so a capability issued for other limits is refused.
+    pub fn binding_digest(&self) -> Digest32 {
+        let mut h = Sha256::new();
+        h.update(LIMITS_DIGEST_DOMAIN);
+        h.update(self.wall_clock_deadline_ns.to_be_bytes());
+        h.update(self.cpu_seconds.to_be_bytes());
+        h.update(self.address_space_bytes.to_be_bytes());
+        h.update(self.max_output_bytes.to_be_bytes());
+        h.update(self.file_size_bytes.to_be_bytes());
+        h.update(self.nofile.to_be_bytes());
+        Digest32::from_bytes(h.finalize().into())
     }
 
     /// Checks the deadline, the result cap and the address-space limit. The

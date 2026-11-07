@@ -40,7 +40,7 @@ use stack_trident::{
 use crate::binding::{self, BindingFinding};
 use crate::clock::KernelClock;
 use crate::config::{ConfigError, KernelPolicy};
-use crate::executor::{ExecutionLimits, Executor, ExecutorError, ObservedRun, RunOutcome, RunReport, WorkerKind};
+use crate::executor::{execution_binding, ExecutionLimits, Executor, ExecutorError, ObservedRun, RunOutcome, RunReport, WorkerKind};
 use crate::payload::{self, PayloadError};
 
 /// What the operator hands the kernel to build its boundaries from. Every
@@ -551,8 +551,11 @@ impl Admission {
             Arc::new(KernelClock::new(Arc::clone(&clock))),
             parts.replay_store,
         )?;
-        let authority = Authority::new(AuthorityConfig::new(&policy.audience), parts.trust, parts.revocations)
-            .map_err(BuildError::Authority)?;
+        let authority_config = AuthorityConfig {
+            require_execution_binding: policy.require_execution_binding,
+            ..AuthorityConfig::new(&policy.audience)
+        };
+        let authority = Authority::new(authority_config, parts.trust, parts.revocations).map_err(BuildError::Authority)?;
         let recorder = Recorder::new(
             parts.receipt_log,
             parts.receipt_signer,
@@ -744,6 +747,8 @@ impl Admission {
             decision_root,
             operation: request.operation,
             resource: request.resource,
+            // What the kernel will run, built from its own parsed request and policy.
+            execution: Some(execution_binding(&args, kind, &self.policy.limits)),
         };
         let action = match self.authority.authorize(
             &request.capability,

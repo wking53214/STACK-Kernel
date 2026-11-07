@@ -29,6 +29,11 @@
 //! 11. Operation is a member of the capability's set, byte for byte.
 //! 12. Some resource scope covers the request's resource, under the
 //!     rules in `scope`.
+//!     (12a.) Execution binding: a version 2 capability's arguments digest,
+//!     worker label and limits digest equal what the request says will run,
+//!     each refused for its own reason; a bound capability with no
+//!     description of the execution is refused; with
+//!     `require_execution_binding` a version 1 capability is refused.
 //! 13. The use store records the use. For a one-time capability this is
 //!     the atomic step that makes it one-time; it runs last so a request
 //!     refused for any other reason does not consume anything.
@@ -41,7 +46,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
-use crate::capability::{Field, ParseError, SignedCapability, MAX_ID_BYTES, MAX_WIRE_BYTES, MIN_WIRE_BYTES};
+use crate::capability::{ExecutionBinding, Field, ParseError, SignedCapability, MAX_ID_BYTES, MAX_WIRE_BYTES, MIN_WIRE_BYTES};
 use crate::clock::Clock;
 use crate::digest::Digest32;
 use crate::scope::is_control;
@@ -77,6 +82,10 @@ pub struct AuthorityConfig {
     /// Whether a use store that is not durable is refused. True in every
     /// deployment; false only for tests and simulations.
     pub require_durable_use_store: bool,
+    /// Whether a capability without an execution binding (version 1) is
+    /// refused. False by default, so existing issuers keep working; a
+    /// deployment that has moved its issuer to version 2 sets it.
+    pub require_execution_binding: bool,
 }
 
 impl AuthorityConfig {
@@ -92,6 +101,7 @@ impl AuthorityConfig {
             max_lifetime_ms: Self::DEFAULT_MAX_LIFETIME_MS,
             max_capability_bytes: Self::DEFAULT_MAX_CAPABILITY_BYTES,
             require_durable_use_store: true,
+            require_execution_binding: false,
         }
     }
 
@@ -126,6 +136,12 @@ pub struct ActionRequest {
     pub operation: String,
     /// The resource, as a path under the rules in `scope`.
     pub resource: String,
+    /// What the boundary will run: the digest of the arguments, the worker
+    /// kind and the digest of the limits, computed by the boundary itself.
+    /// A version 2 capability is checked against it. `None` says the
+    /// boundary does not describe the execution, which a bound capability
+    /// refuses.
+    pub execution: Option<ExecutionBinding>,
 }
 
 /// Why a request was not authorized. Every variant denies; there is no
@@ -189,6 +205,21 @@ pub enum AuthzError {
     /// The capability names another verifier.
     #[error("capability is for another audience")]
     AudienceMismatch,
+    /// The verifier requires an execution binding and the capability has none.
+    #[error("capability has no execution binding")]
+    ExecutionBindingRequired,
+    /// The capability is bound but the request does not say what will run.
+    #[error("request does not describe the execution the capability binds")]
+    ExecutionNotDescribed,
+    /// The capability binds other arguments.
+    #[error("arguments digest mismatch")]
+    ArgsMismatch,
+    /// The capability binds another worker kind.
+    #[error("worker kind mismatch")]
+    WorkerMismatch,
+    /// The capability binds other execution limits.
+    #[error("limits digest mismatch")]
+    LimitsMismatch,
     /// The capability is about other content.
     #[error("subject digest mismatch")]
     SubjectMismatch,
@@ -507,6 +538,24 @@ impl Authority {
         }
         if !cap.resources.iter().any(|scope| scope.covers(&request.resource)) {
             return Err(AuthzError::ResourceDenied);
+        }
+        // 12a. What it will run, if the capability says. Before the use is
+        // recorded, so a refusal here consumes nothing.
+        match (&cap.binding, &request.execution) {
+            (Some(bound), Some(want)) => {
+                if !bound.args_digest.ct_eq(&want.args_digest) {
+                    return Err(AuthzError::ArgsMismatch);
+                }
+                if bound.worker != want.worker {
+                    return Err(AuthzError::WorkerMismatch);
+                }
+                if !bound.limits_digest.ct_eq(&want.limits_digest) {
+                    return Err(AuthzError::LimitsMismatch);
+                }
+            }
+            (Some(_), None) => return Err(AuthzError::ExecutionNotDescribed),
+            (None, _) if self.config.require_execution_binding => return Err(AuthzError::ExecutionBindingRequired),
+            (None, _) => {}
         }
         // 13. Record the use, last.
         let use_evidence = store.record_use_evidenced(

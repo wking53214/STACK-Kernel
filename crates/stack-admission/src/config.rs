@@ -89,6 +89,14 @@ pub struct KernelPolicy {
     /// their arguments run under one authorization. `true` is the recommended
     /// setting until arguments are bound. There is no default.
     pub refuse_arguments: bool,
+    /// Refuse a capability that does not bind the execution (a version 1
+    /// capability). A version 2 capability commits to the digest of the
+    /// arguments, the worker kind and the digest of the limits, and the
+    /// authority refuses a request that runs anything else. `true` is the
+    /// recommended setting once the issuer issues version 2. There is no
+    /// default. When it is `true`, arguments can be allowed again
+    /// (`refuse_arguments` false) because the capability then covers them.
+    pub require_execution_binding: bool,
     /// Who the receipts say produced them.
     pub provenance: Provenance,
 }
@@ -161,6 +169,7 @@ mod tests {
             limits: ExecutionLimits::with_deadline_ns(300_000_000),
             require_one_time_capabilities: true,
             refuse_arguments: true,
+            require_execution_binding: false,
             provenance: Provenance {
                 component: "stack-admission".into(),
                 version: "0.1.0".into(),
