@@ -384,9 +384,12 @@ private:
     mutable std::mutex initialization_lock_{};  // Serializes InitializeAndSeal()
     mutable std::mutex capability_lock_{};  // Protects active_host_capabilities_
     SeccompAuditRing<8192> audit_ring_{};  // Layer 5: Governance audit trail (DEFECT #1 FIX)
+    // Whether the audit ring got a signing key at construction. A host whose ring is unkeyed
+    // records unsigned events; a caller that needs signed ones checks AuditSigningReady().
+    bool audit_signing_ready_ = false;
 
 public:
-    GovernedMinotaurHost() noexcept = default;
+    GovernedMinotaurHost() noexcept : audit_signing_ready_(audit_ring_.InitializeSigningKey()) {}
 
     /**
      * Construct with a run-time refill rate for the governor, in HardwareClock
@@ -395,7 +398,10 @@ public:
      * measures the counter against a wall clock and passes frequency / N here.
      */
     explicit GovernedMinotaurHost(uint64_t governor_ticks_per_token) noexcept
-        : governor_(governor_ticks_per_token) {}
+        : governor_(governor_ticks_per_token), audit_signing_ready_(audit_ring_.InitializeSigningKey()) {}
+
+    /** True when the audit ring was keyed at construction and signs every event it records. */
+    [[nodiscard]] bool AuditSigningReady() const noexcept { return audit_signing_ready_; }
 
     /**
      * Read access to the governance audit trail, so a caller or a test can

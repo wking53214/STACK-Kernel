@@ -5,6 +5,7 @@
  */
 
 #include "stack_audit.hpp"
+#include "stack_host_binding.hpp"
 #include <iostream>
 #include <cstring>
 
@@ -17,7 +18,7 @@ using TestAuditRing = SeccompAuditRing<TEST_RING_CAPACITY>;
 bool test_signing_round_trip() {
     std::cout << "[TEST 1] Signing Round-Trip\n";
     TestAuditRing ring;
-    ring.InitializeSigningKey();
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: signing key could not be created\n"; return false; }
 
     ring.Push(AuditEventType::RateLimitTriggered, 123, 50);
 
@@ -45,7 +46,7 @@ bool test_signing_round_trip() {
 bool test_backward_compatibility() {
     std::cout << "[TEST 2] Backward Compatibility\n";
     TestAuditRing ring;
-    ring.InitializeSigningKey();
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: signing key could not be created\n"; return false; }
 
     ring.Push(AuditEventType::TransactionCompleted, 111, 10);
 
@@ -90,7 +91,7 @@ bool test_key_initialization() {
 bool test_multiple_events() {
     std::cout << "[TEST 4] Multiple Events\n";
     TestAuditRing ring;
-    ring.InitializeSigningKey();
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: signing key could not be created\n"; return false; }
 
     // Push 10 events
     for (int i = 0; i < 10; ++i) {
@@ -124,7 +125,7 @@ bool test_multiple_events() {
 bool test_seqlock_integration() {
     std::cout << "[TEST 5] Seqlock Integration\n";
     TestAuditRing ring;
-    ring.InitializeSigningKey();
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: signing key could not be created\n"; return false; }
 
     // Push and immediately read
     ring.Push(AuditEventType::CapabilityViolation, 333, 30);
@@ -149,7 +150,7 @@ bool test_seqlock_integration() {
 bool test_ring_wraparound() {
     std::cout << "[TEST 6] Ring Wraparound\n";
     SeccompAuditRing<16> ring;  // Small ring for wraparound testing
-    ring.InitializeSigningKey();
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: signing key could not be created\n"; return false; }
 
     // Push 32 events (wraps the ring twice)
     for (int i = 0; i < 32; ++i) {
@@ -182,7 +183,7 @@ bool test_ring_wraparound() {
 bool test_key_is_not_the_published_placeholder() {
     std::cout << "[TEST 7] Key Is Not The Published Placeholder\n";
     TestAuditRing ring;
-    ring.InitializeSigningKey();
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: signing key could not be created\n"; return false; }
     ring.Push(AuditEventType::RateLimitTriggered, 777, 5);
 
     AuditEventRecord record;
@@ -209,6 +210,70 @@ bool test_key_is_not_the_published_placeholder() {
     return true;
 }
 
+// TEST 8: Keying twice does not invalidate what was already signed.
+// A second call used to draw a new key, so every earlier record read as tampered.
+bool test_second_key_init_keeps_earlier_records_valid() {
+    std::cout << "[TEST 8] Second Key Init Keeps Earlier Records Valid\n";
+    TestAuditRing ring;
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: signing key could not be created\n"; return false; }
+    ring.Push(AuditEventType::RateLimitTriggered, 808, 8);
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: second init reported failure\n"; return false; }
+
+    AuditEventRecord record;
+    if (!ring.ReadSlot(0, record)) {
+        std::cout << "  FAIL: an earlier signed record no longer verifies after a second init\n";
+        return false;
+    }
+    std::cout << "  PASS\n";
+    return true;
+}
+
+// TEST 9: A keyed ring refuses an unsigned record.
+// An unsigned record in a keyed ring was not written by it (or had its flag cleared to skip the
+// check). Here one is made by pushing before the key exists.
+bool test_keyed_ring_refuses_unsigned_records() {
+    std::cout << "[TEST 9] Keyed Ring Refuses Unsigned Records\n";
+    TestAuditRing ring;
+    ring.Push(AuditEventType::RateLimitTriggered, 909, 9);  // unkeyed: stored unsigned
+    AuditEventRecord before;
+    if (!ring.ReadSlot(0, before) || before.is_signed != 0) {
+        std::cout << "  FAIL: control: an unkeyed ring should store and return an unsigned record\n";
+        return false;
+    }
+    if (!ring.InitializeSigningKey()) { std::cout << "  FAIL: signing key could not be created\n"; return false; }
+    AuditEventRecord after;
+    if (ring.ReadSlot(0, after)) {
+        std::cout << "  FAIL: a keyed ring returned an unsigned record as valid\n";
+        return false;
+    }
+    std::cout << "  PASS\n";
+    return true;
+}
+
+// TEST 10: The production host keys its audit ring itself.
+// Nothing outside the tests used to call InitializeSigningKey, so the host's ring recorded
+// unsigned events. A host must come up with a keyed ring that signs what it records.
+bool test_host_ring_is_keyed_and_signs() {
+    std::cout << "[TEST 10] Host Audit Ring Is Keyed And Signs\n";
+    stack::host::GovernedMinotaurHost<> host;
+    if (!host.AuditSigningReady()) {
+        std::cout << "  FAIL: the host did not key its audit ring\n";
+        return false;
+    }
+    host.RecordAuthorizationLabel(0xABCDEF, 5);
+    AuditEventRecord record;
+    if (!host.AuditRing().ReadSlot(0, record)) {
+        std::cout << "  FAIL: the host's signed record does not verify\n";
+        return false;
+    }
+    if (record.is_signed != 1) {
+        std::cout << "  FAIL: the host recorded an unsigned event\n";
+        return false;
+    }
+    std::cout << "  PASS\n";
+    return true;
+}
+
 int main() {
     std::cout << "========================================\n";
     std::cout << "P3.3 RED-TEAM: Audit Trail Signing\n";
@@ -224,6 +289,9 @@ int main() {
     if (test_seqlock_integration()) passed++; else failed++;
     if (test_ring_wraparound()) passed++; else failed++;
     if (test_key_is_not_the_published_placeholder()) passed++; else failed++;
+    if (test_second_key_init_keeps_earlier_records_valid()) passed++; else failed++;
+    if (test_keyed_ring_refuses_unsigned_records()) passed++; else failed++;
+    if (test_host_ring_is_keyed_and_signs()) passed++; else failed++;
 
     std::cout << "\n========================================\n";
     std::cout << "Results: " << passed << " passed, " << failed << " failed\n";
