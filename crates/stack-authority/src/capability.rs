@@ -1,7 +1,13 @@
 //! The capability: its fields, its one wire encoding, its strict parser
 //! and its digest.
 //!
-//! # Wire format, `stack-capability/1`
+//! # Wire format, `stack-capability/1` and `/2`
+//!
+//! Version 2 is version 1 plus an execution binding between `nonce` and
+//! `key_id`: `args_digest` (32 bytes), `worker` (u16 length, 1..=64 bytes,
+//! no control character) and `limits_digest` (32 bytes). A capability with
+//! no binding is written as version 1 and one with a binding as version 2,
+//! so every capability still has exactly one encoding.
 //!
 //! Every integer is big-endian. Every string is UTF-8, length-prefixed by
 //! a `u16`, and may not contain a control character (below U+0020, or
@@ -26,6 +32,10 @@
 //!   one_time        u8, 0 or 1
 //!   policy_ref      u16 len, 0..=256 bytes
 //!   nonce           16 bytes
+//!   [version 2 only]
+//!     args_digest   32 bytes (SHA-256 of the canonical argument bytes)
+//!     worker        u16 len, 1..=64 bytes (the worker kind's label)
+//!     limits_digest 32 bytes (SHA-256 of the limits the kernel will apply)
 //!   key_id          32 bytes (full SHA-256 fingerprint of the issuer's
 //!                   public key, see `trust`)
 //! signature         64 bytes, Ed25519 over the signed region
@@ -52,8 +62,10 @@ use sha2::{Digest, Sha256};
 use crate::digest::Digest32;
 use crate::scope::{is_control, validate_path, PathError, ResourceScope, ScopeKind, MAX_PATH_BYTES};
 
-/// The domain and version tag that opens every encoding.
+/// The domain and version tag that opens a version 1 encoding (no execution binding).
 pub const DOMAIN_TAG: &[u8] = b"stack-capability/1\n";
+/// The tag that opens a version 2 encoding (with an execution binding).
+pub const DOMAIN_TAG_V2: &[u8] = b"stack-capability/2\n";
 /// The prefix shared by every version of the format, used to tell an
 /// unsupported version from unrelated bytes.
 const DOMAIN_PREFIX: &[u8] = b"stack-capability/";
@@ -93,6 +105,10 @@ pub const MAX_WIRE_BYTES: usize = DOMAIN_TAG.len()
     + 2
     + MAX_POLICY_REF_BYTES
     + NONCE_BYTES
+    + 32
+    + 2
+    + MAX_OPERATION_BYTES
+    + 32
     + KEY_ID_BYTES
     + SIGNATURE_BYTES;
 
@@ -133,6 +149,8 @@ pub enum Field {
     ResourcePath,
     /// `policy_ref`.
     PolicyRef,
+    /// The execution binding's worker label.
+    Worker,
 }
 
 impl fmt::Display for Field {
@@ -146,6 +164,7 @@ impl fmt::Display for Field {
             Self::Resources => "resources",
             Self::ResourcePath => "resource path",
             Self::PolicyRef => "policy_ref",
+            Self::Worker => "worker",
         })
     }
 }
@@ -166,7 +185,7 @@ pub enum ParseError {
     /// The input does not open with the `stack-capability/` prefix.
     #[error("input does not carry the stack-capability domain tag")]
     BadDomainTag,
-    /// The input opens with the prefix but names a version other than 1.
+    /// The input opens with the prefix but names a version other than 1 or 2.
     #[error("unsupported stack-capability version")]
     UnsupportedVersion,
     /// A string or set is outside its length bounds.
@@ -235,6 +254,24 @@ pub struct Capability {
     pub policy_ref: String,
     /// Issuer-chosen nonce, so two capabilities with equal fields differ.
     pub nonce: [u8; NONCE_BYTES],
+    /// What the capability lets the kernel run: the arguments, the worker kind
+    /// and the limits. `None` is a version 1 capability, which authorizes an
+    /// operation on a resource and says nothing about how it runs.
+    pub binding: Option<ExecutionBinding>,
+}
+
+/// What a version 2 capability binds beyond the operation and the resource.
+/// The verifier compares each field with what the kernel says it will run and
+/// refuses on any difference, each with its own reason. The issuer computes the
+/// two digests with the same functions the kernel uses (`stack-admission`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionBinding {
+    /// SHA-256 of the canonical argument bytes the kernel will hand the worker.
+    pub args_digest: Digest32,
+    /// The worker kind's label, 1 to 64 bytes without a control character.
+    pub worker: String,
+    /// SHA-256 of the execution limits the kernel will apply.
+    pub limits_digest: Digest32,
 }
 
 impl Capability {
@@ -254,7 +291,7 @@ impl Capability {
     /// issuer signs and the verifier checks the signature over.
     pub fn encode_signed_region(&self, key_id: &[u8; KEY_ID_BYTES]) -> Result<Vec<u8>, ParseError> {
         let mut out = Vec::with_capacity(512);
-        out.extend_from_slice(DOMAIN_TAG);
+        out.extend_from_slice(if self.binding.is_some() { DOMAIN_TAG_V2 } else { DOMAIN_TAG });
         put_str(&mut out, Field::CapId, &self.cap_id, 1, MAX_ID_BYTES)?;
         put_str(&mut out, Field::IssuerId, &self.issuer_id, 1, MAX_ID_BYTES)?;
         put_str(&mut out, Field::Audience, &self.audience, 1, MAX_ID_BYTES)?;
@@ -303,6 +340,11 @@ impl Capability {
         out.push(u8::from(self.one_time));
         put_str(&mut out, Field::PolicyRef, &self.policy_ref, 0, MAX_POLICY_REF_BYTES)?;
         out.extend_from_slice(&self.nonce);
+        if let Some(b) = &self.binding {
+            out.extend_from_slice(b.args_digest.as_bytes());
+            put_str(&mut out, Field::Worker, &b.worker, 1, MAX_OPERATION_BYTES)?;
+            out.extend_from_slice(b.limits_digest.as_bytes());
+        }
         out.extend_from_slice(key_id);
         Ok(out)
     }
@@ -409,7 +451,7 @@ impl SignedCapability {
             return Err(ParseError::TooLarge);
         }
         let mut r = Reader { bytes, pos: 0 };
-        r.domain_tag()?;
+        let version = r.domain_tag()?;
         let cap_id = r.string(Field::CapId, 1, MAX_ID_BYTES)?;
         let issuer_id = r.string(Field::IssuerId, 1, MAX_ID_BYTES)?;
         let audience = r.string(Field::Audience, 1, MAX_ID_BYTES)?;
@@ -466,6 +508,18 @@ impl SignedCapability {
         };
         let policy_ref = r.string(Field::PolicyRef, 0, MAX_POLICY_REF_BYTES)?;
         let nonce = r.array::<NONCE_BYTES>()?;
+        let binding = if version == 2 {
+            let args_digest = Digest32::from_bytes(r.array::<32>()?);
+            let worker = r.string(Field::Worker, 1, MAX_OPERATION_BYTES)?;
+            let limits_digest = Digest32::from_bytes(r.array::<32>()?);
+            Some(ExecutionBinding {
+                args_digest,
+                worker,
+                limits_digest,
+            })
+        } else {
+            None
+        };
         let key_id = r.array::<KEY_ID_BYTES>()?;
         let signed_len = r.pos;
         let signature = r.array::<SIGNATURE_BYTES>()?;
@@ -486,6 +540,7 @@ impl SignedCapability {
                 one_time,
                 policy_ref,
                 nonce,
+                binding,
             },
             key_id,
             signature,
@@ -558,10 +613,15 @@ impl<'a> Reader<'a> {
         Ok(u64::from_be_bytes(self.array::<8>()?))
     }
 
-    fn domain_tag(&mut self) -> Result<(), ParseError> {
+    /// Reads the tag and returns the format version, 1 or 2.
+    fn domain_tag(&mut self) -> Result<u8, ParseError> {
         if self.bytes.starts_with(DOMAIN_TAG) {
             self.pos = DOMAIN_TAG.len();
-            return Ok(());
+            return Ok(1);
+        }
+        if self.bytes.starts_with(DOMAIN_TAG_V2) {
+            self.pos = DOMAIN_TAG_V2.len();
+            return Ok(2);
         }
         if self.bytes.starts_with(DOMAIN_PREFIX) {
             return Err(ParseError::UnsupportedVersion);

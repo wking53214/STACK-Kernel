@@ -82,6 +82,7 @@ pub fn baseline_request() -> ActionRequest {
         decision_root: fixture_digest("decision"),
         operation: "read".into(),
         resource: "/data/a".into(),
+        execution: None,
     }
 }
 
@@ -186,6 +187,7 @@ pub fn baseline_capability() -> Capability {
         one_time: false,
         policy_ref: "policy/baseline".into(),
         nonce: fixture_nonce("nonce-1"),
+        binding: None,
     };
     cap.normalise();
     cap

@@ -75,6 +75,7 @@ fn authorization(id: &str) -> AuthorizedAction {
         one_time: true,
         policy_ref: "policy/test-fixture".into(),
         nonce: [0; NONCE_BYTES],
+        binding: None,
     };
     cap.nonce.copy_from_slice(&fixture32(id)[..NONCE_BYTES]);
     cap.normalise();
@@ -94,6 +95,7 @@ fn authorization(id: &str) -> AuthorizedAction {
                 decision_root: root,
                 operation: "echo".into(),
                 resource: "/data/a".into(),
+                execution: None,
             },
             &ManualClock::new(T0 + 1),
             &MemoryUseStore::new(4),

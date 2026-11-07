@@ -7,7 +7,7 @@
 //!   "decision":   { "seats": [ "repo:gate", ... ],
 //!                   "verdicts": [ { "gate", "position", "outcome", "subject", "digest" }, ... ],
 //!                   "root": "<64 lowercase hex>" },
-//!   "capability": "<lowercase hex of the stack-capability/1 wire bytes>",
+//!   "capability": "<lowercase hex of the stack-capability/1 or /2 wire bytes>",
 //!   "operation":  "<name>",
 //!   "resource":   "/path",
 //!   "args":       <any JSON inside the Trident restricted domain>

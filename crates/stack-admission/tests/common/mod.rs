@@ -193,6 +193,7 @@ pub fn policy() -> KernelPolicy {
         // The baseline policy keeps today's behaviour; tests/hardening.rs sets these.
         require_one_time_capabilities: false,
         refuse_arguments: false,
+        require_execution_binding: false,
         provenance: Provenance {
             component: "stack-admission".into(),
             version: "0.1.0-test".into(),
@@ -731,6 +732,8 @@ pub struct CapSpec {
     pub expires_at_ms: u64,
     pub one_time: bool,
     pub policy_ref: String,
+    /// The execution binding (capability format version 2). `None` issues a version 1 capability.
+    pub binding: Option<stack_authority::ExecutionBinding>,
 }
 
 static CAP_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -759,6 +762,7 @@ impl CapSpec {
             expires_at_ms: T0 + HOUR,
             one_time: true,
             policy_ref: "policy/test-fixture".into(),
+            binding: None,
         }
     }
 
@@ -779,6 +783,7 @@ impl CapSpec {
             one_time: self.one_time,
             policy_ref: self.policy_ref.clone(),
             nonce: nonce_bytes(&self.cap_id),
+            binding: self.binding.clone(),
         };
         cap.normalise();
         let key = issuer_signing_key(&self.key_label);
@@ -903,6 +908,7 @@ pub fn authorization_for(operation: &str) -> AuthorizedAction {
                 decision_root: root,
                 operation: operation.to_owned(),
                 resource: RESOURCE.to_owned(),
+                execution: None,
             },
             &clock,
             &stack_authority::MemoryUseStore::new(16),

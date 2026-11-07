@@ -102,9 +102,9 @@ fn malformed_oversize_and_unsupported_input_is_typed() {
     let auth = memory_authority();
     let req = baseline_request();
     assert_eq!(authorize(&auth, b"", &req), Err(AuthzError::Malformed(ParseError::BadDomainTag)));
-    let mut v2 = baseline_wire();
-    v2[17] = b'2';
-    assert_eq!(authorize(&auth, &v2, &req), Err(AuthzError::UnsupportedVersion));
+    let mut v3 = baseline_wire();
+    v3[17] = b'3';
+    assert_eq!(authorize(&auth, &v3, &req), Err(AuthzError::UnsupportedVersion));
     let wire = baseline_wire();
     assert_eq!(authorize(&auth, &wire[..wire.len() - 1], &req), Err(AuthzError::Malformed(ParseError::Truncated)));
     let small = authority_with(AuthorityConfig {

@@ -562,6 +562,7 @@ fn hostile_request_descriptor_with_a_self_made_capability() {
         decision_root: fixture_digest("attacker-decision"),
         operation: "exfiltrate".into(),
         resource: "/secrets/all".into(),
+        execution: None,
     };
     let mut cap = baseline_capability();
     cap.subject_digest = req.subject_digest;
