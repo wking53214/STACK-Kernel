@@ -161,9 +161,10 @@ jobs:
   crosscheck:
     # Runs the real Python verifier (sentinel_os tools/verify_receipts.py) and the Rust stack-sentinel-verify
     # binary on the same inputs and fails on any difference that is not listed in
-    # crates/stack-sentinel/tests/crosscheck.rs. sentinel_os is a private repository, so the checkout needs a
-    # read-only token in the SENTINEL_OS_READ_TOKEN secret (or the repository made public). This job
-    # cannot skip: if the checkout, the install or the comparison fails, the job fails.
+    # crates/stack-sentinel/tests/crosscheck.rs. sentinel_os is a public repository, so the built-in
+    # github.token is enough. If it is made private again, set a read-only token in the
+    # SENTINEL_OS_READ_TOKEN secret and the checkout uses it. This job cannot skip: if the checkout, the
+    # install or the comparison fails, the job fails.
     # The sentinel_os checkout is pinned to a commit so a change over there cannot turn this job red by
     # itself. Move the pin deliberately, and rerun this test when you do.
     # Python 3.11 is deliberate: the nesting_5000_deep case depends on the interpreter's JSON recursion
@@ -176,7 +177,7 @@ jobs:
           repository: wking53214/sentinel_os
           ref: e97683cfce91d95475998d24e8b3df4f2ad1b5d8
           path: sentinel_os
-          token: ${{ secrets.SENTINEL_OS_READ_TOKEN }}
+          token: ${{ secrets.SENTINEL_OS_READ_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
