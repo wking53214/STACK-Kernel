@@ -1,12 +1,15 @@
 name: loopback-measure
 
-# Manual only. Runs the four-connection loopback timing harness on the
+# Manual, or a push to this branch only. Runs the four-connection loopback timing harness on the
 # standard ubuntu-latest runner and uploads the JSON results as an artifact.
 # The runner's vCPU count and CPU model are printed to the log so the
 # figures can be tied to the hardware they came from.
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - measure/four-connection-loopback
 
 permissions:
   contents: read
