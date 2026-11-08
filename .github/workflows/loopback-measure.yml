@@ -1,0 +1,42 @@
+name: loopback-measure
+
+# Manual, or a push to this branch only. Runs the four-connection loopback timing harness on the
+# standard ubuntu-latest runner and uploads the JSON results as an artifact.
+# The runner's vCPU count and CPU model are printed to the log so the
+# figures can be tied to the hardware they came from.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - measure/four-connection-loopback
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Record hardware
+        run: |
+          echo "vCPUs: $(nproc)"
+          lscpu | grep -E "Model name|^CPU\(s\)" || true
+      - name: Build harness
+        run: cargo build --release --locked -p stack-anc-harness --example loopback_four_conn
+      - name: Run leaky control and constant-time control
+        run: |
+          mkdir -p measure-out
+          for victim in leaky ct; do
+            ./target/release/examples/loopback_four_conn \
+              --victim "$victim" --connections 4 --per-class 200000 \
+              --runs 3 --seed 1 --out "measure-out/loopback_${victim}.json"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loopback-four-conn
+          path: measure-out/
