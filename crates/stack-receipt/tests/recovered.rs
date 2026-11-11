@@ -245,6 +245,40 @@ fn recovery_reads_the_log_the_kernel_holds_not_whatever_is_at_the_path() {
     assert!(held.records.is_empty(), "{} records were written into the held log", held.records.len());
 }
 
+#[test]
+fn a_forged_tail_written_in_place_stops_recovery_instead_of_hiding_the_open_execution() {
+    // The lock is advisory. Someone with write access but no keys appends a complete frame signed by
+    // a foreign key that chains to the head. `open` would refuse it; recovery must not believe it
+    // either, or the forged Terminal would make the open attempt look closed and nothing would be
+    // written for it.
+    use std::io::Write;
+    let path = temp("forged-tail");
+    let rec = recorder_over_file(&path);
+    let open = rec
+        .propose(id(1), proposed_body())
+        .unwrap()
+        .authorize_with(authorized_body())
+        .unwrap()
+        .attempt(actual(), T0)
+        .unwrap();
+    let head = FileReceiptLog::read_file(&path).unwrap().head;
+    let mut forged = record(head.sequence + 1, head.hash, terminal(completed()));
+    forged.execution_id = id(1);
+    let attacker = fixture_signer("attacker");
+    forged.key_id = *attacker.key_id();
+    let frame = attacker.sign(forged).unwrap().to_frame();
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(&frame).unwrap();
+    drop(f);
+
+    let err = rec.recover_open_executions().unwrap_err();
+    assert!(
+        matches!(err, stack_receipt::RecordError::Log(_)),
+        "recovery must fail, not return an empty list: {err:?}"
+    );
+    drop(open);
+}
+
 // ---------------------------------------------------------------------------
 // The verifier does not take the record's word for it
 // ---------------------------------------------------------------------------

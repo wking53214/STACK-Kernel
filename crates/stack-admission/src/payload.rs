@@ -187,7 +187,7 @@ pub fn parse(payload: &Value) -> Result<Request, PayloadError> {
     }
 
     let d = object(map.get("decision").ok_or(PayloadError::MissingField("decision"))?, "decision", &DECISION_FIELDS)?;
-    // `Digest32::from_hex` accepts upper case; this format does not.
+    // Lower case only: this format, like `Digest32::from_hex`, refuses upper-case hex.
     let root_hex = string(d, "root")?;
     if root_hex.len() != 64 || !is_lower_hex(root_hex) {
         return Err(PayloadError::BadRoot);

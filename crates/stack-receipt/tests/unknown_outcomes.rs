@@ -173,6 +173,26 @@ fn recovered_before_an_attempt_and_an_observed_unknown_terminal_are_told_apart()
 }
 
 #[test]
+fn a_worker_that_may_still_be_running_is_listed() {
+    // Review finding R2-01: the kernel killed the worker and could not confirm it dead. The log
+    // verifies like any other, and what the worker did, or is still doing, is not known.
+    let path = temp("unconfirmed");
+    let rec = recorder(&path);
+    run_to_terminal(&rec, 1, completed());
+    run_to_terminal(
+        &rec,
+        2,
+        Outcome::TerminationUnconfirmed {
+            reason: "SIGKILL not reaped".into(),
+        },
+    );
+    drop(rec);
+    let v = verify(&path);
+    assert_eq!(v.state, State::VerifiedWithLimitations, "{:?}", v.findings);
+    assert_eq!(v.unknown_outcomes, vec![id(2)]);
+}
+
+#[test]
 fn a_log_that_does_not_parse_lists_nothing_and_is_rejected() {
     let v = verify_log_bytes(b"not a log", &baseline_trust(), &Expectations::default());
     assert_eq!(v.state, State::Rejected);

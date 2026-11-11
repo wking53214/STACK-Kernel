@@ -269,6 +269,15 @@ struct RunClaim {
 };
 static constexpr int kRunIdUnavailable = -19;
 
+// The process-wide audit ring is keyed once, on first use by any entry point (initialization,
+// push or read), whichever comes first. The function-local static makes that race-free. A ring
+// that cannot be keyed records and returns nothing, rather than unsigned events that cannot be
+// told from forged ones.
+static bool AuditRingKeyed() noexcept {
+    static const bool keyed = g_audit_ring.InitializeSigningKey();
+    return keyed;
+}
+
 // The one-time process work. Runs on exactly one thread, the one that moved
 // the state to InProgress. The order matters: the two steps that can fail
 // come first, so a failure constructs no host.
@@ -282,7 +291,7 @@ static bool RunProcessInitialization() noexcept {
     if (!governor::HardenedPosixPreemptionGuard::InitializeThreadTimer().has_value()) return false;
     // The process-wide audit ring signs what it records. Without a key it would record unsigned
     // events that nothing can tell from forged ones, so initialization fails instead.
-    if (!g_audit_ring.InitializeSigningKey()) return false;
+    if (!AuditRingKeyed()) return false;
     // Constructed exactly once: only the winning thread reaches this line,
     // and only once per process. The calibration spins for 10 ms.
     static FfiHostInstance host_instance(CalibrateTicksPerToken());
@@ -965,6 +974,7 @@ uint64_t stack_ffi_testing_host_constructions() {
 
 // Audit ring: push event
 void stack_audit_push(uint8_t event_type, uint64_t context_id, uint32_t tokens) {
+    if (!AuditRingKeyed()) return;
     g_audit_ring.Push(
         static_cast<telemetry::AuditEventType>(event_type),
         context_id,
@@ -981,7 +991,7 @@ int stack_audit_read_slot(
     if (!out_timestamp || !out_context_id || !out_tokens) return -1;
 
     telemetry::AuditEventRecord event{};
-    bool valid = g_audit_ring.ReadSlot(index, event);
+    bool valid = AuditRingKeyed() && g_audit_ring.ReadSlot(index, event);
     if (!valid) {
         *out_timestamp = 0;
         *out_context_id = 0;

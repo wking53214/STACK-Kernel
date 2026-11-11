@@ -360,9 +360,13 @@ and is never success. Once a restart has closed it with a `Recovered` record
 `LogVerification::unknown_outcomes` (the JSON field `unknown_outcomes`, execution
 ids as hex) lists them in order of first appearance, and a consumer that gates on
 the state MUST also require it to be empty or accept each id. It lists an attempt
-with no terminal, an attempt a restart closed, and a recorded `Unknown` terminal.
-It does not list an execution a restart closed before its attempt (it never ran),
-a rejection, or `termination_unconfirmed` (that outcome has its own finding).
+with no terminal, an attempt a restart closed, a recorded `Unknown` terminal, and a
+`termination_unconfirmed` terminal (the kernel killed the worker and could not
+confirm it dead, so it may still be acting). It does not list an execution a restart
+closed before its attempt (it never ran) or a rejection. It is derived from the
+records' own claims, so it is authoritative only when the state is not `REJECTED`: a
+chain that lies about its stages (a wrong-stage `Recovered`, an `Attempted` after a
+terminal) is rejected, and its list may omit the execution it lies about.
 `REJECTED` dominates `INCOMPLETE`.
 
 ### Scope

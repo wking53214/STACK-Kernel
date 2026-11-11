@@ -794,10 +794,32 @@ impl ReceiptLog for FileReceiptLog {
         // `open` is not the log this handle will append to, and recovery would sign records about
         // executions that are not in it. Every write seeks first, so moving the cursor is safe.
         let mut file = &self.file;
+        let len = file.metadata().map_err(|e| LogError::io("stat", &e))?.len();
+        if len > MAX_LOG_BYTES {
+            return Err(LogError::TooLarge);
+        }
         file.seek(SeekFrom::Start(0)).map_err(|e| LogError::io("seek", &e))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|e| LogError::io("read", &e))?;
-        Ok(parse_log(&bytes)?.records)
+        let parsed = parse_log(&bytes)?;
+        // The lock is advisory: a writer that ignores it can edit this inode in place. What the
+        // handle holds is what `open` verified plus what `append` wrote since, so the file must still
+        // say exactly that, and every record must still verify under the keys the log was opened with.
+        // Anything else is refused, so recovery never believes bytes `open` would have refused.
+        if parsed.adopted_tail || parsed.head != self.head || parsed.committed_len != self.committed_len {
+            return Err(LogError::Corrupt {
+                offset: self.committed_len,
+                detail: "the file no longer matches the log this handle holds",
+            });
+        }
+        if parsed
+            .records
+            .iter()
+            .any(|s| !self.keys.iter().any(|k| s.verify(k).is_ok()))
+        {
+            return Err(LogError::BadSignature);
+        }
+        Ok(parsed.records)
     }
 }
 

@@ -176,7 +176,8 @@ enum class AuditEventType : uint8_t {
  * TAMPERING DETECTION:
  *   - Any bit flip in event data invalidates HMAC
  *   - Readers verify: if is_signed == 1, HMAC mismatch is detected
- *   - Unsigned entries (is_signed == 0) bypass verification (legacy)
+ *   - In a ring that was never keyed, unsigned entries pass through; in a keyed ring a reader
+ *     rejects an unsigned entry (it was not written by this ring, or its flag was cleared)
  */
 struct alignas(64) AuditEventRecord {
     uint64_t timestamp_ticks{0};
