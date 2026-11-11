@@ -1704,6 +1704,24 @@ mod tests {
         assert!(written[0].timestamp_ticks > 0);
     }
 
+    /// Review finding R2-04: the free-standing audit ring is keyed on first use, not by host
+    /// initialization. A record pushed before `host_initialize` used to be stored unsigned and
+    /// then rejected by the keyed reader once initialization keyed the ring, so it vanished.
+    #[test]
+    fn test_a_record_pushed_before_initialization_is_still_readable_after_it() {
+        const CHILD_ENV: &str = "STACK_FFI_AUDIT_BEFORE_INIT_CHILD";
+        const CONTEXT: u64 = 0x0B3F_0123;
+        if std::env::var_os(CHILD_ENV).is_some() {
+            audit_push(0, CONTEXT, 7);
+            assert_eq!(host_initialize(), Ok(()));
+            let found: std::vec::Vec<AuditRecord> = (0..1024u64).filter_map(audit_read_slot).collect();
+            assert_eq!(found.len(), 1, "the record pushed before initialization must survive it");
+            assert_eq!(found[0].context_id, CONTEXT);
+            return;
+        }
+        run_in_child("tests::test_a_record_pushed_before_initialization_is_still_readable_after_it", CHILD_ENV);
+    }
+
     /// I-02 (decision B): a transaction on a thread that has not sealed
     /// itself is refused with ThreadNotSealed and the thread is left as it
     /// was (it can still open files, which a sealed thread cannot). A

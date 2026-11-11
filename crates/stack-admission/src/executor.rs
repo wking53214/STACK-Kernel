@@ -176,14 +176,23 @@ impl ExecutionLimits {
     /// binds: an issuer computes it with this function and the kernel computes
     /// it from its own policy, so a capability issued for other limits is refused.
     pub fn binding_digest(&self) -> Digest32 {
+        // Destructured so that a limit added to the struct and not listed here fails to compile.
+        let Self {
+            wall_clock_deadline_ns,
+            cpu_seconds,
+            address_space_bytes,
+            max_output_bytes,
+            file_size_bytes,
+            nofile,
+        } = self;
         let mut h = Sha256::new();
         h.update(LIMITS_DIGEST_DOMAIN);
-        h.update(self.wall_clock_deadline_ns.to_be_bytes());
-        h.update(self.cpu_seconds.to_be_bytes());
-        h.update(self.address_space_bytes.to_be_bytes());
-        h.update(self.max_output_bytes.to_be_bytes());
-        h.update(self.file_size_bytes.to_be_bytes());
-        h.update(self.nofile.to_be_bytes());
+        h.update(wall_clock_deadline_ns.to_be_bytes());
+        h.update(cpu_seconds.to_be_bytes());
+        h.update(address_space_bytes.to_be_bytes());
+        h.update(max_output_bytes.to_be_bytes());
+        h.update(file_size_bytes.to_be_bytes());
+        h.update(nofile.to_be_bytes());
         Digest32::from_bytes(h.finalize().into())
     }
 

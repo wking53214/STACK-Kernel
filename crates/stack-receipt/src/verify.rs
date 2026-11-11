@@ -551,7 +551,10 @@ pub struct LogVerification {
     pub executions: Vec<Verification>,
     /// The executions whose outcome nobody knows, in order of first appearance: an
     /// attempt with no terminal record, an attempt a restart closed with a `Recovered`
-    /// record, and a recorded `Unknown` terminal. A log can verify
+    /// record, a recorded `Unknown` terminal, and a `TerminationUnconfirmed` terminal (the
+    /// kernel killed the worker and could not confirm it dead, so it may still be acting).
+    /// It is derived from the records' own claims, so it is authoritative only when the
+    /// state is not `REJECTED`: a chain that lies about its stages is rejected. A log can verify
     /// `VERIFIED_WITH_LIMITATIONS` and still list executions here, so a consumer that
     /// reads the state must also check that this is empty (or accept each id). An
     /// execution a restart closed before its attempt (it never ran) is not listed.
@@ -1174,7 +1177,7 @@ pub fn verify_log(records: &[SignedRecord], trusted: &TrustedReceiptKeys, expect
     }
     let unknown_outcomes = executions
         .iter()
-        .filter(|e| e.execution.outcome == Some(OutcomeKind::Unknown))
+        .filter(|e| matches!(e.execution.outcome, Some(OutcomeKind::Unknown | OutcomeKind::TerminationUnconfirmed)))
         .map(|e| e.execution.execution_id)
         .collect();
     LogVerification {

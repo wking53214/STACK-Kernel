@@ -39,6 +39,25 @@ fn with_args(case: &Value, cap: &[u8], args: Value) -> Value {
 }
 
 #[test]
+fn the_limits_digest_has_a_fixed_layout_known_answer() {
+    // SHA-256 of "stack-admission/limits/1\n" then the six limits big-endian: five u64 and a u32, in
+    // declaration order. The expected value was computed independently (Python hashlib). If this
+    // changes, every capability already issued for these limits stops matching.
+    let limits = ExecutionLimits {
+        wall_clock_deadline_ns: 300_000_000,
+        cpu_seconds: 0,
+        address_space_bytes: 4 << 30,
+        max_output_bytes: 4096,
+        file_size_bytes: 0,
+        nofile: 0,
+    };
+    assert_eq!(
+        limits.binding_digest().to_hex(),
+        "d900e0da0bd947058ff6ade2338ba7b90586aa7ccf85c2038463d0ca1e536309"
+    );
+}
+
+#[test]
 fn a_bound_capability_runs_the_arguments_it_names() {
     let dir = TempDir::new("bind-runs");
     let p = bound_policy();
