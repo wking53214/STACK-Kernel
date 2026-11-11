@@ -16,6 +16,10 @@
 //! usage: loopback_four_conn [--victim leaky|ct] [--connections N]
 //!          [--per-class N] [--runs N] [--seed N] [--out FILE]
 
+// A measurement tool, not production code: a socket or thread that fails during
+// setup should stop the run with a message, as the workspace's tests do.
+#![allow(clippy::expect_used, clippy::panic)]
+
 use stack_anc_harness::victim::{ct_validate, leaky_validate, TOKEN_LEN};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
