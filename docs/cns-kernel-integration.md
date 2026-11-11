@@ -68,7 +68,7 @@ signed decision proves a decision was signed, not that anything executed.
             ActionRequest{ kernel digest, kernel root, operation,
                            resource }, kernel audience, kernel clock,
             durable use store)  ──►  AuthorizedAction   (the only permission)
-        default policy: a capability that is not one-time is refused
+        with `require_one_time_capabilities` set: a capability that is not one-time is refused
         (`rejected`) before `authorized` is written
         records `authorized`        │ refuse: `rejected` recorded
   5 records `attempted`  ◄─ durable BEFORE the worker starts

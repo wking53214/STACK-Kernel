@@ -96,6 +96,9 @@ pub struct KernelPolicy {
     /// recommended setting once the issuer issues version 2. There is no
     /// default. When it is `true`, arguments can be allowed again
     /// (`refuse_arguments` false) because the capability then covers them.
+    /// Do not set both this and `refuse_arguments` to `false`: validation does
+    /// not refuse that pair, and a version 1 capability would then run with
+    /// arguments nothing covers.
     pub require_execution_binding: bool,
     /// Who the receipts say produced them.
     pub provenance: Provenance,
