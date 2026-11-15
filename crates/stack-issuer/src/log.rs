@@ -3,8 +3,9 @@
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde_json::json;
@@ -39,6 +40,12 @@ pub struct IssuanceRecord {
     pub decision_root: String,
     /// The single operation granted.
     pub operation: String,
+    /// The bound arguments digest, hex.
+    pub args_digest: String,
+    /// The bound worker label.
+    pub worker: String,
+    /// The bound limits digest, hex.
+    pub limits_digest: String,
     /// The scopes granted, as `exact:<path>` or `prefix:<path>`.
     pub resources: Vec<String>,
     /// Start of the window.
@@ -65,6 +72,9 @@ impl IssuanceRecord {
             "subject_digest": self.subject_digest,
             "decision_root": self.decision_root,
             "operation": self.operation,
+            "args_digest": self.args_digest,
+            "worker": self.worker,
+            "limits_digest": self.limits_digest,
             "resources": self.resources,
             "not_before_ms": self.not_before_ms,
             "expires_at_ms": self.expires_at_ms,
@@ -78,38 +88,71 @@ impl IssuanceRecord {
 
 /// Where issuance records go. The issuer calls `append` before it returns a
 /// capability and returns none if `append` fails.
+///
+/// A record means "the issuer produced this capability", not "it was delivered":
+/// if the record is written and a later step fails, the capability is dropped
+/// but the record stays.
 pub trait IssuanceLog: Send + Sync + fmt::Debug {
+    /// Whether `append` is durable. The issuer refuses a log that says no, as
+    /// the kernel refuses a store that is not durable.
+    fn is_durable(&self) -> bool;
     /// Durably records `record`, or fails.
     fn append(&self, record: &IssuanceRecord) -> Result<(), LogError>;
 }
 
 /// A file of JSON lines, opened for append only. Each record is flushed to
-/// stable storage before `append` returns. It is not tamper-evident (no hash
-/// chain, no signature) and it takes no lock, so one issuer process per file.
+/// stable storage before `append` returns. A new file is readable by its owner
+/// only. It refuses to open a file whose last line is unterminated (a torn
+/// write: appending would fuse two records), and after any failed write it
+/// refuses every later append until it is reopened. It is not tamper-evident
+/// (no hash chain, no signature), the directory entry is not flushed, and it
+/// takes no lock, so one issuer process per file.
 #[derive(Debug)]
 pub struct FileIssuanceLog {
     file: Mutex<File>,
+    failed: AtomicBool,
 }
 
 impl FileIssuanceLog {
     /// Opens or creates `path` for append.
     pub fn open(path: &Path) -> Result<Self, LogError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| LogError::Unavailable(e.to_string()))?;
-        Ok(Self { file: Mutex::new(file) })
+        let unavailable = |e: std::io::Error| LogError::Unavailable(e.to_string());
+        let mut options = OpenOptions::new();
+        options.create(true).append(true).read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path).map_err(unavailable)?;
+        let len = file.metadata().map_err(unavailable)?.len();
+        if len > 0 {
+            let mut last = [0u8; 1];
+            file.seek(SeekFrom::Start(len - 1)).map_err(unavailable)?;
+            file.read_exact(&mut last).map_err(unavailable)?;
+            if last[0] != b'\n' {
+                return Err(LogError::Unavailable("the log ends in an unterminated line (torn write); repair it first".into()));
+            }
+        }
+        Ok(Self { file: Mutex::new(file), failed: AtomicBool::new(false) })
     }
 }
 
 impl IssuanceLog for FileIssuanceLog {
+    fn is_durable(&self) -> bool {
+        true
+    }
+
     fn append(&self, record: &IssuanceRecord) -> Result<(), LogError> {
+        if self.failed.load(Ordering::SeqCst) {
+            return Err(LogError::Unavailable("an earlier write failed; reopen after repairing the log".into()));
+        }
         let mut line = record.to_json_line();
         line.push('\n');
         let mut file = self.file.lock().map_err(|_| LogError::Unavailable("log lock poisoned".into()))?;
-        file.write_all(line.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|e| LogError::Unavailable(e.to_string()))
+        file.write_all(line.as_bytes()).and_then(|()| file.sync_all()).map_err(|e| {
+            self.failed.store(true, Ordering::SeqCst);
+            LogError::Unavailable(e.to_string())
+        })
     }
 }

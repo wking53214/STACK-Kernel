@@ -112,13 +112,14 @@ fn a_lifetime_over_the_configured_maximum_or_zero_is_refused_and_the_maximum_its
 }
 
 #[test]
-fn a_decision_missing_a_required_seat_is_refused_and_nothing_is_logged() {
+fn a_decision_that_lost_a_seat_and_kept_its_old_root_is_refused_and_nothing_is_logged() {
     let case = case("all_pass");
     let log = SharedLog::default();
     let mut req = request(&case);
     req.decision.verdicts.pop();
     req.decision.seats.pop();
-    // The claimed root no longer matches either; the refusal names findings, not just one.
+    // This one is refused because the old root no longer matches. The tests in
+    // `tests/hardening.rs` recompute the root, so the seat check itself is what refuses.
     let err = honest_issuer(&log).issue(&req).unwrap_err();
     assert!(matches!(err, IssueError::DecisionRefused(ref f) if !f.is_empty()), "{err:?}");
     assert_eq!(log.count(), 0);
@@ -273,6 +274,7 @@ fn the_file_log_appends_one_line_per_issuance_and_never_rewrites() {
             Box::new(FileIssuanceLog::open(&path).unwrap()),
             Box::new(ManualClock::new(T0)),
         )
+        .unwrap()
     };
     let first = make().issue(&request(&case)).unwrap();
     let after_one = std::fs::read_to_string(&path).unwrap();
@@ -292,8 +294,8 @@ fn the_config_refuses_a_lifetime_ceiling_beyond_what_a_verifier_accepts() {
     use stack_issuer::{ConfigError, IssuerConfig};
     let p = kernel_policy();
     for bad in [0, 24 * HOUR + 1] {
-        let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), bad);
+        let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), bad, ROOTS);
         assert!(matches!(r, Err(ConfigError::MaxLifetime)), "{bad}");
     }
-    assert!(IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), 24 * HOUR).is_ok());
+    assert!(IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), 24 * HOUR, ROOTS).is_ok());
 }

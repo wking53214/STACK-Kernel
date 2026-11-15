@@ -1,13 +1,16 @@
 //! Issuing one capability.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde_json::Value;
 use stack_admission::{binding, execution_binding, BindingFinding, DecisionClaim};
 use stack_authority::{
     Capability, CapabilityDigest, Clock, ParseError, ResourceScope, ScopeKind, SignedCapability, NONCE_BYTES,
 };
+use stack_receipt::{MAX_ID_BYTES, MAX_SEATS};
 use stack_trident::canonical::to_canonical_bytes;
 
-use crate::config::IssuerConfig;
+use crate::config::{ConfigError, IssuerConfig};
 use crate::entropy::{Entropy, EntropyError};
 use crate::log::{IssuanceLog, IssuanceRecord, LogError};
 use crate::signer::{SignError, Signer};
@@ -67,6 +70,18 @@ pub enum IssueError {
     /// The decision is not a bound, policy-complete decision about this subject.
     #[error("decision refused: {0:?}")]
     DecisionRefused(Vec<BindingFinding>),
+    /// The decision or subject is malformed in a way the kernel's payload parser refuses.
+    #[error("decision shape: {0}")]
+    DecisionShape(&'static str),
+    /// The kernel refuses arguments and these are not empty.
+    #[error("the kernel policy refuses arguments")]
+    ArgumentsNotAllowed,
+    /// A scope lies outside every configured resource root.
+    #[error("scope {0:?} is outside the configured resource roots")]
+    ScopeOutsideRoots(String),
+    /// The issuer's clock is unusable: zero, running backwards, or too close to the end of time.
+    #[error("issuer clock: {0}")]
+    Clock(&'static str),
     /// The kernel's policy has no such operation.
     #[error("unknown operation {0:?}")]
     UnknownOperation(String),
@@ -112,6 +127,23 @@ pub struct Issuer {
     entropy: Box<dyn Entropy>,
     log: Box<dyn IssuanceLog>,
     clock: Box<dyn Clock>,
+    last_ms: AtomicU64,
+}
+
+fn args_are_empty(args: &Value) -> bool {
+    match args {
+        Value::Null => true,
+        Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
+fn under(path: &str, root: &str) -> bool {
+    path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn text_ok(s: &str, max: usize) -> bool {
+    !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control)
 }
 
 fn kind_label(kind: ScopeKind) -> &'static str {
@@ -123,14 +155,18 @@ fn kind_label(kind: ScopeKind) -> &'static str {
 
 impl Issuer {
     /// An issuer over its policy, its signer, its entropy, its log and its clock.
+    /// Refuses a log that does not say it is durable.
     pub fn new(
         config: IssuerConfig,
         signer: Box<dyn Signer>,
         entropy: Box<dyn Entropy>,
         log: Box<dyn IssuanceLog>,
         clock: Box<dyn Clock>,
-    ) -> Self {
-        Self { config, signer, entropy, log, clock }
+    ) -> Result<Self, ConfigError> {
+        if !log.is_durable() {
+            return Err(ConfigError::LogNotDurable);
+        }
+        Ok(Self { config, signer, entropy, log, clock, last_ms: AtomicU64::new(0) })
     }
 
     /// Issues one capability, or none. Order: refuse what must be refused, take
@@ -149,6 +185,11 @@ impl Issuer {
         if req.resources.iter().any(|r| r.kind() == ScopeKind::Prefix && r.path() == "/") {
             return Err(IssueError::WildcardScope);
         }
+        for r in &req.resources {
+            if !self.config.roots.iter().any(|root| under(r.path(), root)) {
+                return Err(IssueError::ScopeOutsideRoots(r.path().to_owned()));
+            }
+        }
         let kind = *self
             .config
             .operations
@@ -156,6 +197,24 @@ impl Issuer {
             .ok_or_else(|| IssueError::UnknownOperation(req.operation.clone()))?;
         if req.lifetime_ms == 0 || req.lifetime_ms > self.config.max_lifetime_ms {
             return Err(IssueError::Lifetime { requested: req.lifetime_ms, max: self.config.max_lifetime_ms });
+        }
+
+        // The shape checks the kernel's payload parser makes, so the issuer does not
+        // sign what the kernel always refuses.
+        if !req.subject.is_object() {
+            return Err(IssueError::DecisionShape("the subject is not a map"));
+        }
+        if req.decision.seats.len() > MAX_SEATS || req.decision.verdicts.len() > MAX_SEATS {
+            return Err(IssueError::DecisionShape("too many seats or verdicts"));
+        }
+        if req.decision.seats.iter().any(|s| !text_ok(s, MAX_ID_BYTES)) {
+            return Err(IssueError::DecisionShape("a seat name is empty, too long or holds a control character"));
+        }
+        if req.decision.verdicts.iter().any(|v| v.validate().is_err()) {
+            return Err(IssueError::DecisionShape("a verdict does not validate"));
+        }
+        if self.config.refuse_arguments && !args_are_empty(&req.args) {
+            return Err(IssueError::ArgumentsNotAllowed);
         }
 
         // Everything bound is recomputed here, never copied from the request.
@@ -168,6 +227,7 @@ impl Issuer {
         let canonical_args = to_canonical_bytes(&req.args, &self.config.canonical)
             .map_err(|e| IssueError::Arguments(format!("{e:?}")))?;
         let execution = execution_binding(&canonical_args, kind, &self.config.limits);
+        let binding_for_record = execution.clone();
 
         let mut nonce = [0u8; NONCE_BYTES];
         self.entropy.fill(&mut nonce)?;
@@ -176,9 +236,13 @@ impl Issuer {
         let cap_id = format!("cap-{}", hex::encode(id_bytes));
 
         let now = self.clock.now_unix_ms();
-        let expires = now
-            .checked_add(req.lifetime_ms)
-            .ok_or(IssueError::Lifetime { requested: req.lifetime_ms, max: self.config.max_lifetime_ms })?;
+        if now == 0 {
+            return Err(IssueError::Clock("the clock reads zero"));
+        }
+        if self.last_ms.fetch_max(now, Ordering::SeqCst) > now {
+            return Err(IssueError::Clock("the clock went backwards since the last issuance"));
+        }
+        let expires = now.checked_add(req.lifetime_ms).ok_or(IssueError::Clock("the window would overflow"))?;
 
         let mut cap = Capability {
             cap_id: cap_id.clone(),
@@ -217,6 +281,9 @@ impl Issuer {
             subject_digest: subject_digest.to_hex(),
             decision_root: decision_root.to_hex(),
             operation: req.operation.clone(),
+            args_digest: binding_for_record.args_digest.to_hex(),
+            worker: binding_for_record.worker.clone(),
+            limits_digest: binding_for_record.limits_digest.to_hex(),
             resources: cap.resources.iter().map(|r| format!("{}:{}", kind_label(r.kind()), r.path())).collect(),
             not_before_ms: now,
             expires_at_ms: expires,
