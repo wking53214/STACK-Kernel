@@ -267,3 +267,12 @@ jobs:
           cargo test --release --locked -p stack-anc-harness -p stack-anc-ceiling \
             -p stack-anc-adaptive -p stack-anc-pipeline --no-fail-fast -- --exact --test-threads=1 \
             $ANC_WALL_CLOCK_TESTS
+      # The open findings are ignored tests nothing else runs. They are measured here, in release and one
+      # at a time, with the numbers printed, so a recurrence (or a disappearance after a runner change)
+      # leaves data. A failure here is the finding showing, not a regression: it never fails the job.
+      - name: Measure the open findings (ignored tests, reported only)
+        continue-on-error: true
+        run: |
+          cargo test --release --locked -p stack-anc-ceiling --test lanes --test leak -- \
+            --ignored --exact --test-threads=1 --nocapture \
+            the_fast_lane_cropped_residual_open_finding calibrated_spin_padding_cropped_residual_open_finding

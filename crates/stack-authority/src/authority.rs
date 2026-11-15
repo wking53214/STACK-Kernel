@@ -91,7 +91,9 @@ pub struct AuthorityConfig {
     /// Whether a capability that is not one-time is refused
     /// ([`AuthzError::ReusableNotAllowed`]). False by default. The refusal comes
     /// before the use is recorded, so a refused reusable capability uses no slot
-    /// in the use store's fixed capacity.
+    /// in the use store's fixed capacity. `AuthorityConfig::new` leaves it false
+    /// for compatibility: a verifier that should accept only one-time capabilities
+    /// must set it (the kernel does, from its policy).
     pub require_one_time: bool,
 }
 
