@@ -60,8 +60,10 @@ pub fn canonical_limits() -> Limits {
     stack_trident::TridentConfig::production(KERNEL).limits()
 }
 
+pub const ROOTS: &[&str] = &["/data"];
+
 pub fn issuer_config() -> IssuerConfig {
-    IssuerConfig::from_kernel_policy(&kernel_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS).unwrap()
+    IssuerConfig::from_kernel_policy(&kernel_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS).unwrap()
 }
 
 // ---- fixture signer -------------------------------------------------------
@@ -136,6 +138,7 @@ impl Entropy for CounterEntropy {
 pub struct SharedLog {
     pub records: Arc<Mutex<Vec<IssuanceRecord>>>,
     pub fail: Arc<Mutex<bool>>,
+    pub not_durable: Arc<Mutex<bool>>,
 }
 
 impl SharedLog {
@@ -148,6 +151,9 @@ impl SharedLog {
 }
 
 impl IssuanceLog for SharedLog {
+    fn is_durable(&self) -> bool {
+        !*self.not_durable.lock().unwrap()
+    }
     fn append(&self, record: &IssuanceRecord) -> Result<(), LogError> {
         if *self.fail.lock().unwrap() {
             return Err(LogError::Unavailable("fixture log offline".into()));
@@ -165,6 +171,7 @@ pub fn issuer_with(signer: FixtureSigner, entropy: CounterEntropy, log: &SharedL
         Box::new(log.clone()),
         Box::new(ManualClock::new(now)),
     )
+    .unwrap()
 }
 
 pub fn honest_issuer(log: &SharedLog) -> Issuer {

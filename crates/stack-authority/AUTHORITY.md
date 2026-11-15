@@ -375,7 +375,8 @@ process (D2-C) is deferred and NOT implemented; see `crates/stack-ffi/ABI.md`.
    `ActionRequest` from the verified handoff, and this crate authorizes.
    Whether an `Assurance` flag or outcome on the Trident side should gate
    the call, or be recorded beside the `AuthorizedAction`, is undecided.
-4. Issuer side: no issuer exists. `cns_interop` holds Ed25519 signing in
+4. Issuer side: a library (`crates/stack-issuer`) makes version 2 capabilities;
+   there is no issuer service and no production signer. `cns_interop` holds Ed25519 signing in
    Python (register D-19, kept outside this repo); whether it becomes the issuer of this format is
    a human decision.
 5. Receipt home (decision C): `AuthorizedAction` is the input; the

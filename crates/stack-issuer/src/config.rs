@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use stack_admission::{ExecutionLimits, KernelPolicy, WorkerKind};
+use stack_authority::validate_path;
 use stack_receipt::RosterPolicy;
 use stack_trident::canonical::Limits;
 
@@ -22,6 +23,16 @@ pub enum ConfigError {
     /// A text field is empty, too long, or holds a control character.
     #[error("{0} is empty, too long, or holds a control character")]
     Text(&'static str),
+    /// The resource roots are missing, the whole tree, or not valid paths.
+    #[error("resource roots must be one or more valid paths other than \"/\"")]
+    Roots,
+    /// The kernel policy neither refuses arguments nor requires an execution
+    /// binding, so a capability would cover arguments nothing binds (R-10).
+    #[error("policy accepts arguments that no capability binds: set refuse_arguments or require_execution_binding")]
+    UnsafePolicyPair,
+    /// The issuance log says it is not durable.
+    #[error("the issuance log is not durable")]
+    LogNotDurable,
 }
 
 /// What the issuer needs to know, taken from one kernel policy. There is no
@@ -36,6 +47,8 @@ pub struct IssuerConfig {
     pub(crate) limits: ExecutionLimits,
     pub(crate) canonical: Limits,
     pub(crate) max_lifetime_ms: u64,
+    pub(crate) refuse_arguments: bool,
+    pub(crate) roots: Vec<String>,
 }
 
 fn text(name: &'static str, s: &str) -> Result<(), ConfigError> {
@@ -55,14 +68,29 @@ impl IssuerConfig {
     ///   will not agree.
     /// * `max_lifetime_ms` is the ceiling on any capability's lifetime. State
     ///   minutes, not hours (R-8).
+    /// * `resource_roots` are the only trees a capability may cover (R-6): every
+    ///   requested scope must equal a root or lie under one, on a path-segment
+    ///   boundary, so a prefix wider than a root is refused. There is no
+    ///   default, and `/` is refused as a root.
+    ///
+    /// The policy is copied when this is called. If the kernel's policy changes
+    /// later, this one does not follow; the kernel then refuses what no longer
+    /// matches (a worker, limits or roster mismatch), it does not accept it.
     pub fn from_kernel_policy(
         policy: &KernelPolicy,
         issuer_id: &str,
         policy_ref: &str,
         canonical: Limits,
         max_lifetime_ms: u64,
+        resource_roots: &[&str],
     ) -> Result<Self, ConfigError> {
         policy.validate().map_err(|e| ConfigError::Policy(e.to_string()))?;
+        if !policy.refuse_arguments && !policy.require_execution_binding {
+            return Err(ConfigError::UnsafePolicyPair);
+        }
+        if resource_roots.is_empty() || resource_roots.iter().any(|r| *r == "/" || validate_path(r).is_err()) {
+            return Err(ConfigError::Roots);
+        }
         text("issuer_id", issuer_id)?;
         if policy_ref.len() > 256 || policy_ref.chars().any(char::is_control) {
             return Err(ConfigError::Text("policy_ref"));
@@ -79,6 +107,8 @@ impl IssuerConfig {
             limits: policy.limits,
             canonical,
             max_lifetime_ms,
+            refuse_arguments: policy.refuse_arguments,
+            roots: resource_roots.iter().map(|r| (*r).to_owned()).collect(),
         })
     }
 }

@@ -2,7 +2,7 @@
 
 Status: requirements, plus a library (`crates/stack-issuer`) that implements part of them. There is no issuer service, no production signer and no requester authentication; see that crate's README for what is covered and what is not. Every capability in the tests is signed by a fixture key derived from a public label (`crates/stack-authority/tests/common/mod.rs`, `crates/stack-admission/tests/common/mod.rs`). This document states what an issuer must do for the kernel's claims to hold. It contains no key material, no service code and no new wire format.
 
-Evidence labels: INSPECTED means read in the source named. DECISION means the repository owner must decide it; nothing here decides it.
+Evidence labels: INSPECTED means read in the source named. DECISION means the repository owner must decide it; this document does not decide it. Where an owner answer is recorded below, it is labelled as one.
 
 Identifiers such as `D-19` refer to a project decision register that is not in this repository.
 
@@ -46,13 +46,13 @@ MUST means the kernel's claims do not hold without it.
 **Issuance policy**
 - R-4 (MUST). The issuer derives `audience`, `subject_digest` and `decision_root` from sources it verified. It does not copy them from the requester.
 - R-5 (MUST). The issuer verifies the CNS decision (section 2) before signing. It applies the same required roster and seat positions as the kernel's `KernelPolicy`, from one shared source, so the two cannot drift.
-- R-6 (MUST). Operations and resources are the minimum needed. No wildcard resource scope such as `Prefix("/")` unless the owner has accepted that breadth in writing.
+- R-6 (MUST). Operations and resources are the minimum needed. No wildcard resource scope such as `Prefix("/")` unless the owner has accepted that breadth in writing. The library enforces this with a required list of resource roots: every scope must lie at or under a root, and `/` is refused as a root. The kernel does not decode paths, so a root should not be one a worker might read percent-encoded or backslash segments under.
 - R-7 (SHOULD). `one_time` is true unless a documented reason says otherwise. The kernel's `require_one_time_capabilities` has no default: an operator states it, and `true` is recommended (`crates/stack-admission/src/config.rs`).
 - R-8 (SHOULD). Lifetimes are minutes, far under the 24-hour cap.
 - R-9 (MUST). `cap_id` and `nonce` are unique and drawn from a cryptographically secure source.
 
 **Arguments, worker kind and limits**
-- R-10 (MUST). The issuer issues `stack-capability/2` capabilities that bind the execution: the SHA-256 of the canonical arguments, the worker kind's label and the SHA-256 of the limits. It computes the three with the kernel's own functions (`stack_admission::execution_binding`, `ExecutionLimits::binding_digest`) from the same policy the kernel runs, so they agree byte for byte. The kernel sets `require_execution_binding` to true, which refuses a version 1 capability. A version 1 capability binds nothing about how the operation runs, and the kernel then relies on `refuse_arguments`. Neither version makes the worker receive the arguments: that is still not implemented (R2-X-02). Three cautions. (1) The arguments digest is over the canonical bytes (`stack_trident::canonical::to_canonical_bytes`), and `null` and `{}` are different values with different digests, although the kernel's `refuse_arguments` treats both as "no arguments": an issuer and a requester must agree on one spelling. (2) A policy with both `refuse_arguments` and `require_execution_binding` false accepts any arguments on a version 1 capability, and the receipt records their digest beside an authorization that never covered them; do not run that pair in production (policy validation does not refuse it). (3) A capability must fit the verifier's size cap (default 16 KiB, `AuthorityConfig::max_capability_bytes`) and, hex-encoded, the Trident envelope; the format's absolute maximum is 70,946 bytes, which no default accepts. Version 2 adds 67 to 130 bytes to a version 1 capability.
+- R-10 (MUST). The issuer issues `stack-capability/2` capabilities that bind the execution: the SHA-256 of the canonical arguments, the worker kind's label and the SHA-256 of the limits. It computes the three with the kernel's own functions (`stack_admission::execution_binding`, `ExecutionLimits::binding_digest`) from the same policy the kernel runs, so they agree byte for byte. The kernel should set `require_execution_binding` to true, which refuses a version 1 capability (`KernelPolicy` has no default, and some test policies set it false). A version 1 capability binds nothing about how the operation runs, and the kernel then relies on `refuse_arguments`. Neither version makes the worker receive the arguments: that is still not implemented (R2-X-02). Three cautions. (1) The arguments digest is over the canonical bytes (`stack_trident::canonical::to_canonical_bytes`), and `null` and `{}` are different values with different digests, although the kernel's `refuse_arguments` treats both as "no arguments": an issuer and a requester must agree on one spelling. (2) A policy with both `refuse_arguments` and `require_execution_binding` false accepts any arguments on a version 1 capability, and the receipt records their digest beside an authorization that never covered them; do not run that pair in production (policy validation does not refuse it). (3) A capability must fit the verifier's size cap (default 16 KiB, `AuthorityConfig::max_capability_bytes`) and, hex-encoded, the Trident envelope; the format's absolute maximum is 70,946 bytes, which no default accepts. Version 2 adds 67 to 130 bytes to a version 1 capability.
 - R-11 (MUST). The operation-to-worker map lives in the kernel's `KernelPolicy.operations`. The issuer and the kernel operator agree on what each operation name runs.
 
 **Revocation and rotation**
@@ -72,24 +72,21 @@ MUST means the kernel's claims do not hold without it.
 
 ## 4. What would show the issuer meets this
 
-Acceptance criteria. The library covers, with tests in `crates/stack-issuer/tests/issue.rs`: refusing a decision that lacks a seat, has a forged root, or is about other content; deriving the digests itself; no wildcard scope and a lifetime ceiling; and no issuance when the signer or the log is down. Not covered, because they need a service, a real signer or other components: forged-CNS-decision detection (see the crate README), rotation, revocation delivery, the secret scan of a deployed image, and reconciliation of the logs.
+Acceptance criteria, with what the library (`crates/stack-issuer`, tests in `tests/issue.rs` and `tests/hardening.rs`) covers:
 
-Original list:
-
-
-- It refuses to sign when the CNS decision is forged, lacks a required seat, has a seat at the wrong position, or does not match the subject content.
-- It refuses requester-supplied digests that differ from the ones it derived.
-- It never emits a wildcard scope or a lifetime above its configured maximum.
-- A rotation exercise with overlapping anchors leaves no window in which a valid capability is refused or a retired key is accepted.
-- A revocation reaches the kernel within the stated bound, and an in-flight run for the revoked capability is cancelled.
-- With the issuer stopped, an admission attempt fails and nothing runs.
-- A secret scan of the repository, the kernel image and its configuration finds no signing key.
-- The issuance log reconciles with the use store and the receipt log over a test period.
+- It refuses to sign when the CNS decision is forged, lacks a required seat, has a seat at the wrong position, or does not match the subject content. **Partly.** Covered: missing seat, wrong position, root mismatch, a decision about other content, and the shape checks the kernel's payload parser makes. Not covered: a forged but self-consistent decision, because the CNS proof cannot be checked outside CNS.
+- It refuses requester-supplied digests that differ from the ones it derived. **By absence.** The request type has no digest field, so none can be supplied.
+- It never emits a wildcard scope or a lifetime above its configured maximum. **Yes** for scopes outside the configured roots and for a prefix on `/`; **yes** for the lifetime ceiling.
+- A rotation exercise with overlapping anchors leaves no window in which a valid capability is refused or a retired key is accepted. Not covered.
+- A revocation reaches the kernel within the stated bound, and an in-flight run for the revoked capability is cancelled. Not covered.
+- With the issuer stopped, an admission attempt fails and nothing runs. **Partly:** with the signer, entropy or log down, `issue` returns no capability. No service exists to stop.
+- A secret scan of the repository, the kernel image and its configuration finds no signing key. Not run; `src/` of the crate holds no key and `ed25519-dalek` is a dev-dependency only.
+- The issuance log reconciles with the use store and the receipt log over a test period. Not covered; no reconciler exists.
 
 ## 5. Decisions for the owner (not made here)
 
-- Who operates the issuer, and on what key-custody system. (The library takes a `Signer`; no backend is chosen.)
-- Whether the Python `cns_interop` Ed25519 signing code (register D-19, not in this repository) becomes the issuer, or a new service does. (Decided for the library: a new component, `stack-issuer`, which only consumes CNS decisions.) Whichever it is, CNS must not become an authorization or execution authority; the issuer must stay separate from CNS's contract role.
+- Who operates the issuer, and on what key-custody system. (Owner decision recorded 2026-11-15: the library takes a `Signer` and no backend is chosen yet.)
+- Whether the Python `cns_interop` Ed25519 signing code (register D-19, not in this repository) becomes the issuer, or a new service does. (Owner decision recorded 2026-11-15, for the library: a new component, `stack-issuer`, which only consumes CNS decisions.) Whichever it is, CNS must not become an authorization or execution authority; the issuer must stay separate from CNS's contract role.
 - ~~Whether to add a capability format version that binds an arguments digest, the worker kind and the limits.~~ Decided and implemented as `stack-capability/2`. Open: when the issuer starts issuing it, and when the kernel's `require_execution_binding` is turned on.
 - The revocation transport and its maximum staleness.
 - The maximum lifetime and whether any reusable capability is ever acceptable.
