@@ -1,0 +1,25 @@
+[package]
+name = "stack-issuer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Capability issuer library: derives every bound field itself, signs through an external Signer, logs before it returns"
+
+[dependencies]
+stack-authority = { path = "../stack-authority" }
+stack-admission = { path = "../stack-admission" }
+stack-receipt = { path = "../stack-receipt" }
+stack-trident = { path = "../stack-trident" }
+serde_json.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# TEST FIXTURE signer only. Nothing in src/ holds or derives a key.
+ed25519-dalek.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true
