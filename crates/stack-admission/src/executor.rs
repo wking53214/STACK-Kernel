@@ -777,6 +777,69 @@ mod tests {
         assert!(!completed_conditions_hold(&late));
     }
 
+    // The arm of `outcome_from_report` that refuses to believe a `Completed` report without the supervisor's own evidence. The predicate has its
+    // own test above; these send each self-contradicting report through the mapping the executor actually uses, so deleting the guard from the arm
+    // (leaving the predicate in place) fails here. No worker is involved.
+
+    #[test]
+    fn a_completed_report_without_the_observed_evidence_is_unknown_and_never_a_completion() {
+        use stack_ffi::{ExitObserved as E, FrameStatus as F, SupervisedOutcome::Completed};
+        let buffer = [7u8; 16];
+        for (exit, frame, late) in [
+            (E::Exited(3), F::Valid, false),
+            (E::Exited(0), F::Missing, false),
+            (E::Exited(0), F::Malformed, false),
+            (E::Exited(0), F::Conflicting, false),
+            (E::Exited(0), F::Trailing, false),
+            (E::Exited(0), F::NotRead, false),
+            (E::Signaled(11), F::Valid, false),
+            (E::KilledBySupervisor(9), F::Valid, false),
+            (E::Unreaped, F::Valid, false),
+            (E::None, F::Valid, false),
+            (E::Exited(0), F::Valid, true), // the deadline passed
+        ] {
+            let mut r = ffi_report(Completed, exit, frame);
+            r.result_length = 4;
+            r.deadline_fired = late;
+            let outcome = outcome_from_report(&r, &buffer);
+            assert!(
+                matches!(&outcome, RunOutcome::Unknown { reason } if reason.contains("without an observed exit 0 and one valid frame")),
+                "{exit:?} {frame:?} late={late}: {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_honest_completion_carries_exactly_the_result_bytes() {
+        use stack_ffi::{ExitObserved as E, FrameStatus as F, SupervisedOutcome::Completed};
+        let mut r = ffi_report(Completed, E::Exited(0), F::Valid);
+        r.result_length = 3;
+        assert_eq!(outcome_from_report(&r, &[1, 2, 3, 9, 9]), RunOutcome::Completed { exit_code: 0, result: vec![1, 2, 3] });
+    }
+
+    #[test]
+    fn a_completion_whose_length_does_not_fit_the_buffer_is_unknown() {
+        use stack_ffi::{ExitObserved as E, FrameStatus as F, SupervisedOutcome::Completed};
+        let mut r = ffi_report(Completed, E::Exited(0), F::Valid);
+        r.result_length = 99;
+        assert!(matches!(outcome_from_report(&r, &[1, 2, 3]), RunOutcome::Unknown { .. }));
+    }
+
+    #[test]
+    fn no_other_supervisor_outcome_is_ever_read_as_a_completion() {
+        use stack_ffi::{ExitObserved as E, FrameStatus as F, SupervisedOutcome as O};
+        // Even with the evidence a completion would carry, every other outcome keeps its own ending.
+        for outcome in [
+            O::TimedOut, O::Crashed, O::SeccompViolation, O::ExitedNonZero, O::ResultMissing, O::ResultOversized, O::ResourceLimit,
+            O::SpawnFailed, O::SupervisorError, O::InvalidLimits, O::SigchldIgnored, O::Terminated, O::TerminationUnconfirmed,
+            O::Unrecognized(7),
+        ] {
+            let mut r = ffi_report(outcome, E::Exited(0), F::Valid);
+            r.result_length = 3;
+            assert!(!matches!(outcome_from_report(&r, &[1, 2, 3]), RunOutcome::Completed { .. }), "{outcome:?}");
+        }
+    }
+
     #[test]
     fn what_the_supervisor_observed_reaches_the_receipt_vocabulary_unchanged() {
         use stack_ffi::{ExitObserved as E, FrameStatus as F, SupervisedOutcome as O};
