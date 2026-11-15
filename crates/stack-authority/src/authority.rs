@@ -34,6 +34,8 @@
 //!     each refused for its own reason; a bound capability with no
 //!     description of the execution is refused; with
 //!     `require_execution_binding` a version 1 capability is refused.
+//!     (12b.) With `require_one_time`, a reusable capability is refused here,
+//!     before the use is recorded (`ReusableNotAllowed`).
 //! 13. The use store records the use. For a one-time capability this is
 //!     the atomic step that makes it one-time; it runs last so a request
 //!     refused for any other reason does not consume anything.
@@ -86,6 +88,11 @@ pub struct AuthorityConfig {
     /// refused. False by default, so existing issuers keep working; a
     /// deployment that has moved its issuer to version 2 sets it.
     pub require_execution_binding: bool,
+    /// Whether a capability that is not one-time is refused
+    /// ([`AuthzError::ReusableNotAllowed`]). False by default. The refusal comes
+    /// before the use is recorded, so a refused reusable capability uses no slot
+    /// in the use store's fixed capacity.
+    pub require_one_time: bool,
 }
 
 impl AuthorityConfig {
@@ -102,6 +109,7 @@ impl AuthorityConfig {
             max_capability_bytes: Self::DEFAULT_MAX_CAPABILITY_BYTES,
             require_durable_use_store: true,
             require_execution_binding: false,
+            require_one_time: false,
         }
     }
 
@@ -220,6 +228,9 @@ pub enum AuthzError {
     /// The capability binds other execution limits.
     #[error("limits digest mismatch")]
     LimitsMismatch,
+    /// The verifier requires one-time capabilities and this one is reusable.
+    #[error("capability is reusable and the verifier requires one-time capabilities")]
+    ReusableNotAllowed,
     /// The capability is about other content.
     #[error("subject digest mismatch")]
     SubjectMismatch,
@@ -556,6 +567,11 @@ impl Authority {
             (Some(_), None) => return Err(AuthzError::ExecutionNotDescribed),
             (None, _) if self.config.require_execution_binding => return Err(AuthzError::ExecutionBindingRequired),
             (None, _) => {}
+        }
+        // 12b. A verifier that requires one-time capabilities refuses a reusable one here, before
+        // anything is recorded, so a refusal uses no slot in the use store.
+        if self.config.require_one_time && !cap.one_time {
+            return Err(AuthzError::ReusableNotAllowed);
         }
         // 13. Record the use, last.
         let use_evidence = store.record_use_evidenced(

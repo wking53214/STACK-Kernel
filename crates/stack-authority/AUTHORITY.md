@@ -191,6 +191,9 @@ the rules is covered by nothing (`authorize::resource_scopes_are_exact_or_segmen
     version 1 capability is `ExecutionBindingRequired`. This runs before the
     use is recorded, so a refusal here consumes nothing
     (`tests/binding.rs::a_refused_binding_consumes_nothing_so_the_one_time_capability_still_works`).
+12b. With `require_one_time`, a reusable capability is refused (`ReusableNotAllowed`)
+    here, before the use is recorded, so a refusal uses no store slot
+    (`tests/one_time_required.rs`).
 13. The use store records the use, last.
 
 Steps 1 to 4 reveal only facts about the bytes presented and the

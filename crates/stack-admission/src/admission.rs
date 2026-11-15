@@ -553,6 +553,7 @@ impl Admission {
         )?;
         let authority_config = AuthorityConfig {
             require_execution_binding: policy.require_execution_binding,
+            require_one_time: policy.require_one_time_capabilities,
             ..AuthorityConfig::new(&policy.audience)
         };
         let authority = Authority::new(authority_config, parts.trust, parts.revocations).map_err(BuildError::Authority)?;
@@ -757,16 +758,13 @@ impl Admission {
             self.use_store.as_ref(),
         ) {
             Ok(a) => a,
+            // The authority refuses a reusable capability before it records the use, so the refusal
+            // uses no slot in the use store. It keeps its own reason here.
+            Err(AuthzError::ReusableNotAllowed) => {
+                return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::ReusableCapabilityNotAllowed))
+            }
             Err(e) => return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::Authorization(e))),
         };
-        // The authority has already checked this capability and recorded its first presentation
-        // in the use store (a reusable capability is recorded too), so this refusal does NOT leave
-        // the store untouched. A holder of many issuer-signed reusable capabilities can fill the
-        // store's fixed capacity this way, and honest requests then fail with StoreUnavailable.
-        // The refusal is recorded like any other authorization refusal.
-        if self.policy.require_one_time_capabilities && !action.one_time() {
-            return Err(Self::rejected(exec, Stage::Authorization, RefusalReason::ReusableCapabilityNotAllowed));
-        }
         // The permission exists. Record it; without the record nothing runs.
         let exec = exec.authorize(&action).map_err(|e| Refused {
             stage: Stage::Authorization,
