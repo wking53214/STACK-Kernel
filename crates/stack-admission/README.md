@@ -262,13 +262,14 @@ consumes nothing. `execution_binding` computes the three values the way the kern
 does, for an issuer. With the switch on, `refuse_arguments` can be turned off,
 because the capability then covers the arguments. With it off, version 1 and
 version 2 capabilities are both accepted. `tests/execution_binding.rs` pins it.
-The one-time check
-runs after the authority has accepted the capability and recorded its first
-presentation in the use store, so a refused reusable capability still uses a
-slot there; a holder of many issuer-signed reusable capabilities could fill the
-store and make honest requests fail with `StoreUnavailable`. The issuer must not
-issue reusable capabilities (`docs/issuer-requirements.md`, R-7); the switch is a
-second line, not a way to make them free to refuse.
+The one-time
+check is made by the authority (`AuthorityConfig::require_one_time`) before it
+records the use, so a refused reusable capability uses no slot in the use store's
+fixed capacity (`refused_reusable_capabilities_use_no_slot_in_the_use_store`).
+Until that was changed (an independent review found it), the check ran after the
+use was recorded, and a holder of a few issuer-signed reusable capabilities could
+fill the store and make honest requests fail with `StoreUnavailable`. The issuer
+should still not issue reusable capabilities (`docs/issuer-requirements.md`, R-7).
 
 ## 7. Defects found while building this crate
 
