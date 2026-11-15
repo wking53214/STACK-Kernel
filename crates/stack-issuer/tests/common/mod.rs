@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -17,7 +17,8 @@ use stack_authority::{
     SIGNATURE_BYTES,
 };
 use stack_issuer::{
-    Entropy, EntropyError, IssuanceLog, IssuanceRecord, Issuer, IssuerConfig, LogError, SignError, Signer,
+    AuthorizationRequest, Authorizer, ConfigError, DecisionVerifier, Entropy, EntropyError, IssuanceLog, IssuanceRecord, Issuer,
+    IssuerConfig, LogError, Refusal, SignError, Signer,
 };
 use stack_receipt::Provenance;
 use stack_trident::canonical::Limits;
@@ -61,9 +62,24 @@ pub fn canonical_limits() -> Limits {
 }
 
 pub const ROOTS: &[&str] = &["/data"];
+/// High, so the tests that issue many capabilities for one decision are not limited.
+pub const MAX_PER_DECISION: u32 = 1000;
 
 pub fn issuer_config() -> IssuerConfig {
-    IssuerConfig::from_kernel_policy(&kernel_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS).unwrap()
+    config_with_limit(MAX_PER_DECISION)
+}
+
+pub fn config_with_limit(max_per_decision: u32) -> IssuerConfig {
+    IssuerConfig::from_kernel_policy(
+        &kernel_policy(),
+        ISSUER,
+        POLICY_REF,
+        canonical_limits(),
+        MAX_LIFETIME_MS,
+        ROOTS,
+        max_per_decision,
+    )
+    .unwrap()
 }
 
 // ---- fixture signer -------------------------------------------------------
@@ -84,14 +100,16 @@ pub struct FixtureSigner {
     advertised: PublicKey,
     key: SigningKey,
     pub fail: bool,
+    /// How many times `sign` was called.
+    pub signs: Arc<AtomicUsize>,
 }
 
 impl FixtureSigner {
     pub fn honest(label: &str) -> Self {
-        Self { advertised: public_key(label), key: signing_key(label), fail: false }
+        Self { advertised: public_key(label), key: signing_key(label), fail: false, signs: Arc::default() }
     }
     pub fn pretend(advertised: &str, signs_with: &str) -> Self {
-        Self { advertised: public_key(advertised), key: signing_key(signs_with), fail: false }
+        Self { advertised: public_key(advertised), key: signing_key(signs_with), fail: false, signs: Arc::default() }
     }
     pub fn failing(label: &str) -> Self {
         Self { fail: true, ..Self::honest(label) }
@@ -103,6 +121,7 @@ impl Signer for FixtureSigner {
         self.advertised
     }
     fn sign(&self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], SignError> {
+        self.signs.fetch_add(1, Ordering::SeqCst);
         if self.fail {
             return Err(SignError::Unavailable("fixture device offline".into()));
         }
@@ -154,24 +173,107 @@ impl IssuanceLog for SharedLog {
     fn is_durable(&self) -> bool {
         !*self.not_durable.lock().unwrap()
     }
-    fn append(&self, record: &IssuanceRecord) -> Result<(), LogError> {
+    fn issued_for_decision(&self, decision_root: &str) -> Result<u32, LogError> {
+        Ok(self.records.lock().unwrap().iter().filter(|r| r.decision_root == decision_root).count() as u32)
+    }
+    fn append(&self, record: &IssuanceRecord, max_per_decision: u32) -> Result<(), LogError> {
         if *self.fail.lock().unwrap() {
             return Err(LogError::Unavailable("fixture log offline".into()));
         }
-        self.records.lock().unwrap().push(record.clone());
+        let mut records = self.records.lock().unwrap();
+        let same = records.iter().filter(|r| r.decision_root == record.decision_root).count();
+        if same >= max_per_decision as usize {
+            return Err(LogError::DecisionLimit);
+        }
+        records.push(record.clone());
         Ok(())
     }
 }
 
-pub fn issuer_with(signer: FixtureSigner, entropy: CounterEntropy, log: &SharedLog, now: u64) -> Issuer {
+/// The decision claim as a verifier received it: (seats, verdict count, claimed root hex).
+pub type SeenDecision = (Vec<String>, usize, String);
+
+/// TEST FIXTURE: a verifier that accepts every decision. The crate ships no such thing;
+/// a deployment that wrote this would be choosing to trust any well-formed decision.
+#[derive(Debug, Default, Clone)]
+pub struct FixtureAllowAllVerifier {
+    pub calls: Arc<Mutex<Vec<(String, String)>>>,
+    /// The decision claim as the verifier received it: (seats, verdicts, claimed root hex).
+    pub decisions: Arc<Mutex<Vec<SeenDecision>>>,
+    pub refuse: bool,
+}
+
+impl DecisionVerifier for FixtureAllowAllVerifier {
+    fn verify(&self, subject_digest: &stack_authority::Digest32, decision: &stack_admission::DecisionClaim, root: &stack_authority::Digest32) -> Result<(), Refusal> {
+        self.calls.lock().unwrap().push((subject_digest.to_hex(), root.to_hex()));
+        self.decisions.lock().unwrap().push((decision.seats.clone(), decision.verdicts.len(), decision.root.to_hex()));
+        if self.refuse {
+            return Err(Refusal("fixture verifier refuses".into()));
+        }
+        Ok(())
+    }
+}
+
+/// What the authorizer fixture saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    pub requester: String,
+    pub operation: String,
+    pub resources: Vec<String>,
+    pub lifetime_ms: u64,
+    pub args_digest: String,
+    pub subject_digest: String,
+    pub decision_root: String,
+}
+
+/// TEST FIXTURE: an authorizer that records what it saw and allows only the listed
+/// (requester, operation) pairs, or everything when `allow` is `None`.
+#[derive(Debug, Default, Clone)]
+pub struct FixtureAuthorizer {
+    pub seen: Arc<Mutex<Vec<Seen>>>,
+    pub allow: Option<Vec<(String, String)>>,
+}
+
+impl Authorizer for FixtureAuthorizer {
+    fn authorize(&self, r: &AuthorizationRequest<'_>) -> Result<(), Refusal> {
+        self.seen.lock().unwrap().push(Seen {
+            requester: r.requester.to_owned(),
+            operation: r.operation.to_owned(),
+            resources: r.resources.iter().map(|x| x.path().to_owned()).collect(),
+            lifetime_ms: r.lifetime_ms,
+            args_digest: r.args_digest.to_hex(),
+            subject_digest: r.subject_digest.to_hex(),
+            decision_root: r.decision_root.to_hex(),
+        });
+        match &self.allow {
+            None => Ok(()),
+            Some(list) if list.iter().any(|(q, o)| q == r.requester && o == r.operation) => Ok(()),
+            Some(_) => Err(Refusal("fixture authorizer denies".into())),
+        }
+    }
+}
+
+/// An issuer with the allow-all fixture hooks.
+pub fn new_issuer(
+    config: IssuerConfig,
+    signer: FixtureSigner,
+    entropy: impl Entropy + 'static,
+    log: impl IssuanceLog + 'static,
+    clock: impl stack_authority::Clock + 'static,
+) -> Result<Issuer, ConfigError> {
     Issuer::new(
-        issuer_config(),
+        config,
         Box::new(signer),
         Box::new(entropy),
-        Box::new(log.clone()),
-        Box::new(ManualClock::new(now)),
+        Box::new(log),
+        Box::new(clock),
+        Box::new(FixtureAllowAllVerifier::default()),
+        Box::new(FixtureAuthorizer::default()),
     )
-    .unwrap()
+}
+
+pub fn issuer_with(signer: FixtureSigner, entropy: CounterEntropy, log: &SharedLog, now: u64) -> Issuer {
+    new_issuer(issuer_config(), signer, entropy, log.clone(), ManualClock::new(now)).unwrap()
 }
 
 pub fn honest_issuer(log: &SharedLog) -> Issuer {
@@ -214,4 +316,31 @@ pub fn verifier() -> (Authority, MemoryUseStore) {
         ..AuthorityConfig::new(KERNEL)
     };
     (Authority::new(config, trust, RevocationList::new(1024)).unwrap(), MemoryUseStore::new(1024))
+}
+
+
+/// A scratch directory removed when it goes out of scope.
+pub struct TempDir(pub std::path::PathBuf);
+
+impl TempDir {
+    pub fn new(label: &str) -> Self {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!("stack-issuer-{}-{}-{label}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        std::fs::create_dir_all(&p).unwrap();
+        Self(p)
+    }
+    pub fn file(&self, name: &str) -> std::path::PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A well-formed issuance record line (with its newline) for a decision root.
+pub fn record_line(root_byte: u8) -> String {
+    format!("{{\"cap_id\":\"cap-x\",\"decision_root\":\"{}\"}}\n", hex::encode([root_byte; 32]))
 }

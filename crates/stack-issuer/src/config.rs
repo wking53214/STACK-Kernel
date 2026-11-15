@@ -30,6 +30,9 @@ pub enum ConfigError {
     /// binding, so a capability would cover arguments nothing binds (R-10).
     #[error("policy accepts arguments that no capability binds: set refuse_arguments or require_execution_binding")]
     UnsafePolicyPair,
+    /// `max_per_decision` is zero.
+    #[error("max_per_decision must be at least 1")]
+    DecisionLimit,
     /// The issuance log says it is not durable.
     #[error("the issuance log is not durable")]
     LogNotDurable,
@@ -49,6 +52,7 @@ pub struct IssuerConfig {
     pub(crate) max_lifetime_ms: u64,
     pub(crate) refuse_arguments: bool,
     pub(crate) roots: Vec<String>,
+    pub(crate) max_per_decision: u32,
 }
 
 fn text(name: &'static str, s: &str) -> Result<(), ConfigError> {
@@ -73,6 +77,12 @@ impl IssuerConfig {
     ///   boundary, so a prefix wider than a root is refused. There is no
     ///   default, and `/` is refused as a root.
     ///
+    /// * `max_per_decision` is the most capabilities one decision root may produce, counted
+    ///   in the issuance log so it survives a restart. It covers the records the log
+    ///   knows about: rotating the log without carrying its history resets it (see
+    ///   `FileIssuanceLog::open_with_history`), and a requester can change the root by
+    ///   altering the decision (see `DecisionVerifier`). At least 1; there is no default.
+    ///
     /// The policy is copied when this is called. If the kernel's policy changes
     /// later, this one does not follow; the kernel then refuses what no longer
     /// matches (a worker, limits or roster mismatch), it does not accept it.
@@ -83,10 +93,14 @@ impl IssuerConfig {
         canonical: Limits,
         max_lifetime_ms: u64,
         resource_roots: &[&str],
+        max_per_decision: u32,
     ) -> Result<Self, ConfigError> {
         policy.validate().map_err(|e| ConfigError::Policy(e.to_string()))?;
         if !policy.refuse_arguments && !policy.require_execution_binding {
             return Err(ConfigError::UnsafePolicyPair);
+        }
+        if max_per_decision == 0 {
+            return Err(ConfigError::DecisionLimit);
         }
         if resource_roots.is_empty() || resource_roots.iter().any(|r| *r == "/" || validate_path(r).is_err()) {
             return Err(ConfigError::Roots);
@@ -109,6 +123,7 @@ impl IssuerConfig {
             max_lifetime_ms,
             refuse_arguments: policy.refuse_arguments,
             roots: resource_roots.iter().map(|r| (*r).to_owned()).collect(),
+            max_per_decision,
         })
     }
 }

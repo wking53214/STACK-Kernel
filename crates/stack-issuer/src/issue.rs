@@ -12,6 +12,7 @@ use stack_trident::canonical::to_canonical_bytes;
 
 use crate::config::{ConfigError, IssuerConfig};
 use crate::entropy::{Entropy, EntropyError};
+use crate::hooks::{AuthorizationRequest, Authorizer, DecisionVerifier};
 use crate::log::{IssuanceLog, IssuanceRecord, LogError};
 use crate::signer::{SignError, Signer};
 
@@ -82,6 +83,15 @@ pub enum IssueError {
     /// The issuer's clock is unusable: zero, running backwards, or too close to the end of time.
     #[error("issuer clock: {0}")]
     Clock(&'static str),
+    /// The deployment's decision verifier refused.
+    #[error("decision not verified: {0}")]
+    DecisionNotVerified(String),
+    /// The deployment's authorizer refused.
+    #[error("not authorized: {0}")]
+    NotAuthorized(String),
+    /// This decision has already produced the most capabilities allowed.
+    #[error("this decision has reached its issuance limit")]
+    DecisionLimit,
     /// The kernel's policy has no such operation.
     #[error("unknown operation {0:?}")]
     UnknownOperation(String),
@@ -127,6 +137,8 @@ pub struct Issuer {
     entropy: Box<dyn Entropy>,
     log: Box<dyn IssuanceLog>,
     clock: Box<dyn Clock>,
+    verifier: Box<dyn DecisionVerifier>,
+    authorizer: Box<dyn Authorizer>,
     last_ms: AtomicU64,
 }
 
@@ -154,24 +166,29 @@ fn kind_label(kind: ScopeKind) -> &'static str {
 }
 
 impl Issuer {
-    /// An issuer over its policy, its signer, its entropy, its log and its clock.
-    /// Refuses a log that does not say it is durable.
+    /// An issuer over its policy, its signer, its entropy, its log, its clock, and the
+    /// two hooks every deployment must supply. Refuses a log that does not say it is
+    /// durable.
     pub fn new(
         config: IssuerConfig,
         signer: Box<dyn Signer>,
         entropy: Box<dyn Entropy>,
         log: Box<dyn IssuanceLog>,
         clock: Box<dyn Clock>,
+        verifier: Box<dyn DecisionVerifier>,
+        authorizer: Box<dyn Authorizer>,
     ) -> Result<Self, ConfigError> {
         if !log.is_durable() {
             return Err(ConfigError::LogNotDurable);
         }
-        Ok(Self { config, signer, entropy, log, clock, last_ms: AtomicU64::new(0) })
+        Ok(Self { config, signer, entropy, log, clock, verifier, authorizer, last_ms: AtomicU64::new(0) })
     }
 
-    /// Issues one capability, or none. Order: refuse what must be refused, take
-    /// randomness, sign and check the signature, write the log, and only then
-    /// return the capability.
+    /// Issues one capability, or none. Order: refuse what must be refused (shape, scope,
+    /// operation, lifetime, the kernel's own decision check), ask the authorizer, ask the
+    /// verifier, refuse an exhausted decision, take randomness, read the clock, sign and
+    /// check the signature, write the log (which checks the cap again, atomically), and
+    /// only then return the capability.
     pub fn issue(&self, req: &IssuanceRequest) -> Result<Issued, IssueError> {
         if req.requester.is_empty() || req.requester.len() > 128 || req.requester.chars().any(char::is_control) {
             return Err(IssueError::Text("requester"));
@@ -228,6 +245,27 @@ impl Issuer {
             .map_err(|e| IssueError::Arguments(format!("{e:?}")))?;
         let execution = execution_binding(&canonical_args, kind, &self.config.limits);
         let binding_for_record = execution.clone();
+        // The cheap local policy first, then the verifier, which is probably a call to CNS.
+        self.authorizer
+            .authorize(&AuthorizationRequest {
+                requester: &req.requester,
+                operation: &req.operation,
+                resources: &req.resources,
+                lifetime_ms: req.lifetime_ms,
+                args_digest: &execution.args_digest,
+                subject_digest: &subject_digest,
+                decision_root: &decision_root,
+            })
+            .map_err(|r| IssueError::NotAuthorized(r.0))?;
+        self.verifier
+            .verify(&subject_digest, &req.decision, &decision_root)
+            .map_err(|r| IssueError::DecisionNotVerified(r.0))?;
+        // A non-binding look at the count, so an exhausted decision does not cost a signature.
+        // The binding check is the log's `append`.
+        let root_hex = decision_root.to_hex();
+        if self.log.issued_for_decision(&root_hex).map_err(IssueError::Log)? >= self.config.max_per_decision {
+            return Err(IssueError::DecisionLimit);
+        }
 
         let mut nonce = [0u8; NONCE_BYTES];
         self.entropy.fill(&mut nonce)?;
@@ -291,7 +329,10 @@ impl Issuer {
             one_time: true,
             policy_ref: self.config.policy_ref.clone(),
         };
-        self.log.append(&record).map_err(IssueError::Log)?;
+        self.log.append(&record, self.config.max_per_decision).map_err(|e| match e {
+            LogError::DecisionLimit => IssueError::DecisionLimit,
+            other => IssueError::Log(other),
+        })?;
         Ok(Issued { wire, cap_id, digest })
     }
 }

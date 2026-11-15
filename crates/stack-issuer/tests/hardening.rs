@@ -135,7 +135,7 @@ fn more_than_the_most_scopes_is_refused_and_exactly_the_most_is_not() {
 #[test]
 fn the_roots_must_be_stated_and_may_not_be_the_whole_tree() {
     let p = kernel_policy();
-    let make = |roots: &[&str]| IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, roots);
+    let make = |roots: &[&str]| IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, roots, MAX_PER_DECISION);
     assert!(matches!(make(&[]), Err(ConfigError::Roots)));
     assert!(matches!(make(&["/"]), Err(ConfigError::Roots)));
     assert!(matches!(make(&["/a/../b"]), Err(ConfigError::Roots)));
@@ -203,12 +203,7 @@ fn the_id_and_the_nonce_are_independent_draws() {
 fn the_real_operating_system_entropy_issues_distinct_capabilities() {
     let case = case("all_pass");
     let log = SharedLog::default();
-    let issuer = Issuer::new(
-        issuer_config(),
-        Box::new(FixtureSigner::honest(ISSUER)),
-        Box::new(OsEntropy),
-        Box::new(log.clone()),
-        Box::new(ManualClock::new(T0)),
+    let issuer = new_issuer(issuer_config(), FixtureSigner::honest(ISSUER), OsEntropy, log.clone(), ManualClock::new(T0),
     )
     .unwrap();
     let a = issuer.issue(&request(&case)).unwrap();
@@ -250,13 +245,8 @@ fn refusing_args_policy() -> KernelPolicy {
 fn a_kernel_that_refuses_arguments_gets_no_capability_for_arguments() {
     let case = case("all_pass");
     let log = SharedLog::default();
-    let config = IssuerConfig::from_kernel_policy(&refusing_args_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS).unwrap();
-    let issuer = Issuer::new(
-        config,
-        Box::new(FixtureSigner::honest(ISSUER)),
-        Box::new(CounterEntropy::default()),
-        Box::new(log.clone()),
-        Box::new(ManualClock::new(T0)),
+    let config = IssuerConfig::from_kernel_policy(&refusing_args_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, MAX_PER_DECISION).unwrap();
+    let issuer = new_issuer(config, FixtureSigner::honest(ISSUER), CounterEntropy::default(), log.clone(), ManualClock::new(T0),
     )
     .unwrap();
     let mut req = request(&case);
@@ -275,43 +265,62 @@ fn a_kernel_that_refuses_arguments_gets_no_capability_for_arguments() {
 fn a_log_that_says_it_is_not_durable_is_refused_at_construction() {
     let log = SharedLog::default();
     *log.not_durable.lock().unwrap() = true;
-    let r = Issuer::new(
-        issuer_config(),
-        Box::new(FixtureSigner::honest(ISSUER)),
-        Box::new(CounterEntropy::default()),
-        Box::new(log),
-        Box::new(ManualClock::new(T0)),
+    let r = new_issuer(issuer_config(), FixtureSigner::honest(ISSUER), CounterEntropy::default(), log, ManualClock::new(T0),
     );
     assert!(matches!(r, Err(ConfigError::LogNotDurable)));
 }
 
 // ---- finding 5 and 15: the file log --------------------------------------------
 
-fn temp_log(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("stack-issuer-hard-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let p = dir.join("issuance.jsonl");
-    let _ = std::fs::remove_file(&p);
-    p
-}
-
 #[test]
 fn a_file_log_with_a_torn_last_line_is_refused_not_appended_to() {
-    let path = temp_log("torn");
+    let dir = TempDir::new("torn");
+    let path = dir.file("issuance.jsonl");
     std::fs::write(&path, b"{\"cap_id\":\"cap-torn\",\"capab").unwrap();
     assert!(FileIssuanceLog::open(&path).is_err());
+    // A complete record that lacks its newline is the case the unterminated-line check exists for.
+    let complete = record_line(1);
+    std::fs::write(&path, complete.trim_end().as_bytes()).unwrap();
+    let e = FileIssuanceLog::open(&path).unwrap_err().to_string();
+    assert!(e.contains("unterminated"), "{e}");
     // A log that ends in a newline, and an empty one, open fine.
-    std::fs::write(&path, b"{\"a\":1}\n").unwrap();
+    std::fs::write(&path, complete.as_bytes()).unwrap();
     assert!(FileIssuanceLog::open(&path).is_ok());
     std::fs::write(&path, b"").unwrap();
     assert!(FileIssuanceLog::open(&path).is_ok());
+}
+
+#[test]
+fn a_file_log_line_that_is_not_an_issuance_record_is_refused() {
+    let dir = TempDir::new("notrecord");
+    let path = dir.file("issuance.jsonl");
+    let upper = format!("{{\"cap_id\":\"c\",\"decision_root\":\"{}\"}}\n", hex::encode([0xAB; 32]).to_uppercase());
+    let short = "{\"cap_id\":\"c\",\"decision_root\":\"ab\"}\n".to_owned();
+    let no_cap = format!("{{\"decision_root\":\"{}\"}}\n", hex::encode([1; 32]));
+    let number = "{\"cap_id\":\"c\",\"decision_root\":5}\n".to_owned();
+    for (what, bad) in [
+        ("an object without the fields", "{\"a\":1}\n".to_owned()),
+        ("not json", "not json\n".to_owned()),
+        ("an empty line", "\n".to_owned()),
+        ("an upper-case root", upper),
+        ("a short root", short),
+        ("no cap_id", no_cap),
+        ("a numeric root", number),
+    ] {
+        std::fs::write(&path, format!("{}{bad}", record_line(1))).unwrap();
+        assert!(FileIssuanceLog::open(&path).is_err(), "{what}");
+    }
+    std::fs::write(&path, [0xFF, 0xFE, b'\n']).unwrap();
+    let e = FileIssuanceLog::open(&path).unwrap_err().to_string();
+    assert!(e.contains("UTF-8") && e.contains("line 1"), "{e}");
 }
 
 #[cfg(unix)]
 #[test]
 fn a_new_file_log_is_readable_by_its_owner_only() {
     use std::os::unix::fs::PermissionsExt;
-    let path = temp_log("mode");
+    let dir = TempDir::new("mode");
+    let path = dir.file("issuance.jsonl");
     let _log = FileIssuanceLog::open(&path).unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
 }
@@ -319,13 +328,7 @@ fn a_new_file_log_is_readable_by_its_owner_only() {
 // ---- finding 9: the clock -------------------------------------------------------
 
 fn issuer_at(log: &SharedLog, clock: ManualClock) -> Issuer {
-    Issuer::new(
-        issuer_config(),
-        Box::new(FixtureSigner::honest(ISSUER)),
-        Box::new(CounterEntropy::default()),
-        Box::new(log.clone()),
-        Box::new(clock),
-    )
+    new_issuer(issuer_config(), FixtureSigner::honest(ISSUER), CounterEntropy::default(), log.clone(), clock)
     .unwrap()
 }
 
@@ -357,12 +360,7 @@ fn a_clock_that_goes_backwards_between_issuances_is_refused() {
             self.0.now_unix_ms()
         }
     }
-    let issuer = Issuer::new(
-        issuer_config(),
-        Box::new(FixtureSigner::honest(ISSUER)),
-        Box::new(CounterEntropy::default()),
-        Box::new(log.clone()),
-        Box::new(Shared(clock.clone())),
+    let issuer = new_issuer(issuer_config(), FixtureSigner::honest(ISSUER), CounterEntropy::default(), log.clone(), Shared(clock.clone()),
     )
     .unwrap();
     assert!(issuer.issue(&request(&case)).is_ok());
@@ -377,7 +375,7 @@ fn a_clock_that_goes_backwards_between_issuances_is_refused() {
 #[test]
 fn a_policy_that_neither_refuses_arguments_nor_requires_a_binding_is_refused() {
     let p = KernelPolicy { refuse_arguments: false, require_execution_binding: false, ..kernel_policy() };
-    let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS);
+    let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, MAX_PER_DECISION);
     assert!(matches!(r, Err(ConfigError::UnsafePolicyPair)));
 }
 
@@ -404,9 +402,77 @@ fn after_a_failed_write_the_file_log_refuses_every_later_append_until_reopened()
         one_time: true,
         policy_ref: POLICY_REF.into(),
     };
-    // /dev/full accepts the open and fails every write with ENOSPC.
-    let log = FileIssuanceLog::open(std::path::Path::new("/dev/full")).unwrap();
-    assert!(log.append(&record).is_err());
-    let second = log.append(&record).unwrap_err().to_string();
+    // /dev/null accepts the open and the write, and refuses to flush it (EINVAL): a write that
+    // did not become durable.
+    let log = FileIssuanceLog::open(std::path::Path::new("/dev/null")).unwrap();
+    assert!(log.append(&record, 10).is_err());
+    let second = log.append(&record, 10).unwrap_err().to_string();
     assert!(second.contains("earlier write failed"), "{second}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_failed_write_latch_holds_under_concurrent_appends() {
+    use stack_issuer::{IssuanceLog, IssuanceRecord};
+    let record = IssuanceRecord {
+        cap_id: "cap-x".into(),
+        capability_digest: "00".repeat(32),
+        issuer_id: ISSUER.into(),
+        key_id: "00".repeat(32),
+        requester: "r".into(),
+        subject_digest: "00".repeat(32),
+        decision_root: "00".repeat(32),
+        operation: "echo".into(),
+        args_digest: "00".repeat(32),
+        worker: "return_bytes".into(),
+        limits_digest: "00".repeat(32),
+        resources: vec!["exact:/data/a".into()],
+        not_before_ms: 1,
+        expires_at_ms: 2,
+        issued_at_ms: 1,
+        one_time: true,
+        policy_ref: POLICY_REF.into(),
+    };
+    // On /dev/null the write succeeds and the flush fails. Exactly one append may reach the
+    // device and fail there; every other one must be stopped by the latch, whatever the timing.
+    for _round in 0..50 {
+        let log = std::sync::Arc::new(FileIssuanceLog::open(std::path::Path::new("/dev/null")).unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (log, barrier, record) = (log.clone(), barrier.clone(), record.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    log.append(&record, 1000).unwrap_err().to_string()
+                })
+            })
+            .collect();
+        let errors: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let reached_device = errors.iter().filter(|e| !e.contains("earlier write failed")).count();
+        assert_eq!(reached_device, 1, "{errors:?}");
+    }
+}
+
+// ---- review 5: shape and config text checks that were unpinned --------------------
+
+#[test]
+fn a_seat_name_that_is_empty_too_long_or_holds_a_control_character_is_refused() {
+    let case = case("all_pass");
+    for bad in [String::new(), "x".repeat(stack_receipt::MAX_ID_BYTES + 1), "a\nb".to_owned()] {
+        let mut req = request(&case);
+        req.decision.seats[0] = bad;
+        assert!(matches!(honest_issuer(&SharedLog::default()).issue(&req), Err(IssueError::DecisionShape(_))));
+    }
+}
+
+#[test]
+fn issuer_id_and_policy_ref_are_checked_at_configuration() {
+    let p = kernel_policy();
+    let make = |id: &str, pref: &str| IssuerConfig::from_kernel_policy(&p, id, pref, canonical_limits(), MAX_LIFETIME_MS, ROOTS, MAX_PER_DECISION);
+    assert!(matches!(make("", POLICY_REF), Err(ConfigError::Text("issuer_id"))));
+    assert!(matches!(make("bad\nid", POLICY_REF), Err(ConfigError::Text("issuer_id"))));
+    assert!(matches!(make(&"x".repeat(129), POLICY_REF), Err(ConfigError::Text("issuer_id"))));
+    assert!(matches!(make(ISSUER, &"x".repeat(257)), Err(ConfigError::Text("policy_ref"))));
+    assert!(matches!(make(ISSUER, "bad\nref"), Err(ConfigError::Text("policy_ref"))));
+    assert!(make(ISSUER, "").is_ok(), "an empty policy_ref is allowed");
 }

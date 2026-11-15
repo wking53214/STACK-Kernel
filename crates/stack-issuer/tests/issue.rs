@@ -261,18 +261,11 @@ fn the_log_record_describes_what_was_issued_and_its_digest_is_the_wires() {
 #[test]
 fn the_file_log_appends_one_line_per_issuance_and_never_rewrites() {
     use stack_issuer::FileIssuanceLog;
-    let dir = std::env::temp_dir().join(format!("stack-issuer-log-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("issuance.jsonl");
-    let _ = std::fs::remove_file(&path);
+    let dir = TempDir::new("issuelog");
+    let path = dir.file("issuance.jsonl");
     let case = case("all_pass");
     let make = || {
-        stack_issuer::Issuer::new(
-            issuer_config(),
-            Box::new(FixtureSigner::honest(ISSUER)),
-            Box::new(CounterEntropy::default()),
-            Box::new(FileIssuanceLog::open(&path).unwrap()),
-            Box::new(ManualClock::new(T0)),
+        new_issuer(issuer_config(), FixtureSigner::honest(ISSUER), CounterEntropy::default(), FileIssuanceLog::open(&path).unwrap(), ManualClock::new(T0),
         )
         .unwrap()
     };
@@ -294,8 +287,8 @@ fn the_config_refuses_a_lifetime_ceiling_beyond_what_a_verifier_accepts() {
     use stack_issuer::{ConfigError, IssuerConfig};
     let p = kernel_policy();
     for bad in [0, 24 * HOUR + 1] {
-        let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), bad, ROOTS);
+        let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), bad, ROOTS, MAX_PER_DECISION);
         assert!(matches!(r, Err(ConfigError::MaxLifetime)), "{bad}");
     }
-    assert!(IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), 24 * HOUR, ROOTS).is_ok());
+    assert!(IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), 24 * HOUR, ROOTS, MAX_PER_DECISION).is_ok());
 }

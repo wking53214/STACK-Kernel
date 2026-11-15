@@ -17,6 +17,12 @@
 //!   production signer (an HSM or KMS adapter) is a deployment decision this
 //!   crate does not make; tests use a fixture signer. It checks every signature
 //!   against the signer's own public key before anything leaves.
+//! * Two hooks have no default: a [`DecisionVerifier`] (is the CNS decision real?) and an
+//!   [`Authorizer`] (may this requester be issued this?). The crate ships only refusing
+//!   placeholders.
+//! * One decision root may produce at most a configured number of capabilities, counted in
+//!   the issuance log so the count survives a restart. The count covers the records the log
+//!   knows about: rotating the log without carrying its history resets it.
 //! * It appends an [`IssuanceRecord`] to an [`IssuanceLog`] *before* it returns
 //!   the capability. If the record cannot be written, no capability is returned.
 //!
@@ -29,12 +35,14 @@
 
 mod config;
 mod entropy;
+mod hooks;
 mod issue;
 mod log;
 mod signer;
 
 pub use config::{ConfigError, IssuerConfig, MAX_LIFETIME_CEILING_MS};
 pub use entropy::{Entropy, EntropyError, OsEntropy};
+pub use hooks::{AuthorizationRequest, Authorizer, DecisionVerifier, DenyAllRequests, RefuseAllDecisions, Refusal};
 pub use issue::{IssuanceRequest, IssueError, Issued, Issuer, MAX_RESOURCES_PER_CAPABILITY};
-pub use log::{FileIssuanceLog, IssuanceLog, IssuanceRecord, LogError};
+pub use log::{FileIssuanceLog, IssuanceLog, IssuanceRecord, LogError, MAX_RECORD_LINE_BYTES};
 pub use signer::{SignError, Signer};
