@@ -123,11 +123,11 @@ jobs:
       # A worker that fell back to dynamic linking would not be covered by the image digest.
       STACK_REQUIRE_STATIC_WORKER: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0 branch
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Clippy, all targets, warnings are errors
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test the workspace without the ANC crates
@@ -139,9 +139,9 @@ jobs:
     # The crate that reads governed limits and emits trap events.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Test stack-p3-2
         run: cargo test -p stack-p3-2 --locked
       - name: Build the workload example
@@ -152,9 +152,9 @@ jobs:
     # (tests/fixtures/cns-digest-vectors.json, a copy of CNS's contracts/digest-vectors.json).
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Test the CNS digest vectors
         run: cargo test -p stack-sentinel --test cns_vectors --locked
 
@@ -171,14 +171,14 @@ jobs:
     # behaviour and does not hold on Python 3.13.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: wking53214/sentinel_os
           ref: e97683cfce91d95475998d24e8b3df4f2ad1b5d8
           path: sentinel_os
           token: ${{ secrets.SENTINEL_OS_READ_TOKEN || github.token }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
       - name: Install the verifier's Python dependencies
@@ -186,8 +186,8 @@ jobs:
           python -m pip install --upgrade pip
           grep -E '^(cryptography|cns)' sentinel_os/sentinel_os/requirements.txt > verifier-requirements.txt
           python -m pip install -r verifier-requirements.txt
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Cross-check the Python and Rust verifiers
         env:
           SENTINEL_OS_DIR: ${{ github.workspace }}/sentinel_os
@@ -207,7 +207,7 @@ jobs:
     # deterministic in RACE-02 step 5b; see cpp/CONTAINMENT.md.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install cmake, g++ and Catch2
         run: |
           # The runner's apt mirrors sometimes fail to resolve security.ubuntu.com for a
@@ -238,9 +238,9 @@ jobs:
     # still run real pads and were steadier that way in local runs.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Test the ANC crates (deterministic tests)
         run: |
           skip=()
@@ -259,9 +259,9 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Test the ANC crates (wall-clock tests)
         run: |
           cargo test --release --locked -p stack-anc-harness -p stack-anc-ceiling \
