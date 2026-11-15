@@ -2,7 +2,7 @@
 
 A capability issuer, as a library. It makes the `stack-capability/2` capabilities the kernel verifies. It holds no key, runs no service, and decides nothing about where it is deployed.
 
-Status: library and tests. There is no service wrapper, no production signer, no requester authentication and no issuance authorization policy. See "What this does not do" before relying on it.
+Status: library and tests. There is no service wrapper, no production signer, no requester authentication, no real decision verifier and no real authorization policy. Two hooks that a deployment must supply are required by the type system, and only refusing placeholders ship. See "What this does not do" before relying on it.
 
 ## What it does
 
@@ -29,25 +29,47 @@ It refuses:
 
 Every capability it issues is one-time and version 2.
 
+## The two required hooks and the per-decision cap
+
+`Issuer::new` takes a `DecisionVerifier` and an `Authorizer`. Neither has a default and the crate ships nothing that allows anything: `RefuseAllDecisions` and `DenyAllRequests` refuse everything, so an issuer built with them issues nothing.
+
+- `Authorizer::authorize(requester, operation, scopes, lifetime, args_digest, subject_digest, decision_root)`: may this requester be issued this? A passing CNS decision is about a subject, not about an operation or a requester. It runs first: it is cheap local policy.
+- `DecisionVerifier::verify(subject_digest, decision, decision_root)`: is this CNS decision genuine? The issuer cannot tell by itself (the CNS proof is an HMAC local to CNS). It runs second, because it is probably a call to CNS, so a requester the policy refuses costs no lookup.
+
+Both run before the issuer takes entropy, reads the clock or asks the signer for anything, and after the issuer's own structural checks, with the values it recomputed. A refusal from either means no capability, no log record and no cap slot. Hooks are called concurrently, may be called for a request that is refused later, have no timeout, and report only a refusal text (an outage and a forged decision look the same). Do not forward that text to a requester: error text can name roster seats and internal policy. A hook that holds a key must not derive `Debug` over it.
+
+**Per-decision cap.** `IssuerConfig` requires `max_per_decision` (at least 1, no default): the most capabilities one decision *root* may produce, among the records the log knows about. The count lives in the issuance log. `IssuanceLog::append` checks and records atomically, and the issuer reads the count first so an exhausted decision costs no signature. What the cap does and does not give you:
+
+- It survives a restart (`FileIssuanceLog` rebuilds the counts from the file at open).
+- **Rotating the log resets it.** To rotate without re-arming spent decisions, open the new file with `FileIssuanceLog::open_with_history` and list every earlier segment.
+- **It is keyed on the decision root.** A requester holding one genuine decision can change a verdict's identity label, or add a PASS verdict for an extra seat, recompute the root, and pass the structural checks: that is a new root with a new count. Only a verifier that accepts exactly the roots CNS produced makes the cap meaningful.
+- **It is not per requester.** An authorized requester can use up a decision's allowance (for example with 1 ms lifetimes) and every other user of that decision is then refused. Slots are never released. The authorizer must rate-limit, or the limit must be generous and the decision treated as single purpose.
+- A slot is taken when the record is written. If the write reached the file but the flush failed, no capability is released and the record may still count after the next open.
+
 ## Signing, entropy and the log
 
 - `Signer` is the only way it signs. Implementations (an HSM or KMS adapter) live outside this crate and must not expose key bytes through `Debug`. The issuer checks each signature against the signer's own public key before anything leaves. That proves the signature matches the key the signer advertises; whether the kernel trusts that key is the kernel's trust set, and a wrong key fails closed there.
 - `Entropy` supplies the capability id and nonce as two separate draws. `OsEntropy` reads `/dev/urandom`.
 - `IssuanceLog` takes one record per capability, written before the capability is returned. If the write fails, no capability is returned. A log must say it is durable or `Issuer::new` refuses it. A record means "the issuer produced this", not "it was delivered".
-- `FileIssuanceLog` is append-only JSON lines, flushed to stable storage per record, created owner-readable only. It refuses to open a file whose last line is unterminated, and after a failed write it refuses every later append until reopened.
+- `FileIssuanceLog` is append-only JSON lines, flushed to stable storage per record, created owner-readable only. It takes an exclusive advisory lock for the life of the handle, so a second handle in this or another process is refused. Opening streams the file line by line (no size limit; one line may be at most 1 MiB) and refuses an unterminated last line, an empty line, invalid UTF-8, and any line that is not a record. After a failed write or flush it refuses every later append, including concurrent ones, until reopened.
 
 ## Tests
 
-41 tests: `tests/issue.rs` (18) and `tests/hardening.rs` (23). The verifier is the real `stack_authority::Authority`, the CNS decision is a case the real SuperGate produced (the admission crate's fixture), and keys are test fixtures.
+66 tests: `tests/issue.rs` (18), `tests/hardening.rs` (27) and `tests/hooks.rs` (21). The verifier in the end-to-end issue test is the real `stack_authority::Authority`, the CNS decision is a case the real SuperGate produced (the admission crate's fixture), and keys, hooks and the in-memory log are test fixtures, named as such. The cap and file-log behaviour is tested against the real `FileIssuanceLog`.
 
-Mutation checks: the original nine mutations were each caught, but an independent review then found eleven further mutations that survived the 18 tests (required seats ignored, positions ignored, scope limits, requester check, ordering, id from nonce, record fields and others). `tests/hardening.rs` pins those. Of 23 mutations run on the current tests, 22 are caught. The one that survives is removing the parse-after-sign check: the bytes come straight from the encoder, so it is a redundant second guard that no input can reach. The reviewer also ran an end-to-end test through the real `Admission` and worker in a scratch copy and it passed; that test is not in this repository, because it needs a dev-dependency cycle with `stack-admission`.
+Mutation checks. Three independent reviews each found that my tests were weaker than I had said, so the figures are given with their history:
+- The first nine mutations were caught by the first 18 tests. Review 4 then found eleven more that survived; `hardening.rs` pins them.
+- Review 5 found 18 meaningful survivors in the hook, cap, log and hardening code. All of them, and the new behaviour added to fix its findings, were run again against the current tests: 22 mutations, all caught. Two earlier survivors are not re-run because they are equivalent: removing the parse-after-sign check (the bytes come straight from the encoder), and burning a slot on a failed write (the latch then refuses every later append).
+- Concurrency tests are probabilistic by nature; the latch and the cap are each run for 40 to 50 rounds of 8 threads.
+
+The reviewer also ran an end-to-end test through the real `Admission` and worker in a scratch copy and it passed; that test is not in this repository, because it needs a dev-dependency cycle with `stack-admission`.
 
 ## What this does not do
 
-- **It cannot show that a real CNS decision exists.** The CNS proof is an HMAC under a key local to CNS. The issuer checks everything the kernel checks and nothing more, so a forged but self-consistent decision of PASS verdicts passes. Until a verification channel to CNS exists, the issuer adds no security beyond who is allowed to call `issue`. Owner decision.
-- **It is not an authorization decision.** Any caller of `issue` gets any operation, scope (within the roots) and arguments for any passing decision, and the same decision can be turned into any number of one-time capabilities. `requester` is only a label in the log. The caller must authenticate and authorize the requester and limit issuance per decision. A required authorizer hook is an owner decision.
+- **No real decision verifier exists.** The CNS proof is an HMAC under a key local to CNS. The issuer checks everything the kernel checks, and a forged but self-consistent decision of PASS verdicts passes those checks. The `DecisionVerifier` hook makes the deployment say what it does about that; until someone writes a verifier backed by a channel to CNS, the safe configuration is `RefuseAllDecisions`, which issues nothing. A deployment that plugs in an allow-all verifier gets exactly the weakness the hook was added to expose.
+- **No real authorization policy exists.** The `Authorizer` hook is where a deployment decides who may be issued what. `requester` is a label the caller supplies; authenticating the requester is the caller's job, and the hook is only as good as that authentication. The per-decision cap limits how many capabilities one decision can ever produce; it does not say who gets them.
 - **No production signer.** Key custody (R-1, R-2, R-3) is deployment. The kernel's trust set decides which key it believes.
-- **The log is not tamper-evident** (no hash chain, no signature), the directory entry is not flushed, and it takes no lock: one issuer process per file.
-- **Not done:** revocation and rotation operations (R-12 to R-15), a reconciler between the issuance log, the use store and the receipt log (R-17), clock agreement between issuer and kernel (R-19; the issuer sets `not_before` to now, so a kernel clock behind the issuer's refuses a fresh capability as not yet valid), a shared use store for several kernels (R-20), a size check against the Trident envelope.
+- **The log is not tamper-evident** (no hash chain, no signature), and the directory entry is not flushed. The lock stops a second issuer, not another program editing the file; truncating or hand-editing the log resets the counts.
+- **Not done:** revocation and rotation operations (R-12 to R-15), a reconciler between the issuance log, the use store and the receipt log (R-17), clock agreement between issuer and kernel (R-19; the issuer sets `not_before` to now, so a kernel clock behind the issuer's refuses a fresh capability as not yet valid), a shared use store for several kernels (R-20), a size check against the Trident envelope, an operator path to reset or raise one decision's allowance, a release of slots for capabilities that expired unused.
 - **Coupling.** This crate depends on `stack-admission`, which links the C++ host library, to reuse the kernel's own binding functions. Extracting those into a small shared crate would let an issuer be built without the worker.
 - `null` and `{}` bind different digests. The issuer binds the arguments exactly as given.
