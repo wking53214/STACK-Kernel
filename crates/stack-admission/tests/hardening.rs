@@ -70,6 +70,34 @@ fn a_reusable_capability_is_refused_when_the_policy_requires_one_time() {
 }
 
 #[test]
+fn refused_reusable_capabilities_use_no_slot_in_the_use_store() {
+    // Found by the independent review. The use store has a fixed capacity; the kernel used to refuse
+    // a reusable capability only after the authority had recorded its first presentation, so each
+    // refusal used a slot and a holder of a few reusable capabilities filled the store and made
+    // honest requests fail with StoreUnavailable. Capacity 2, three reusable capabilities refused,
+    // then an honest one-time request.
+    let dir = TempDir::new("hardening-reusable-no-slot");
+    let store = stack_authority::FileUseStore::open(uses_path(dir.path()), 2).unwrap();
+    let h = Builder::new(dir.path())
+        .policy(strict_policy())
+        .use_store(Box::new(store))
+        .start();
+    let case = all_pass();
+    for _ in 0..3 {
+        let cap = reusable_cap(&case);
+        let mut payload = payload_with(&case, &cap, "echo", RESOURCE);
+        payload["args"] = Value::Null;
+        let r = h.refusal(payload);
+        assert_eq!(r.reason, RefusalReason::ReusableCapabilityNotAllowed);
+    }
+    let mut payload = honest_payload(&case, "echo");
+    payload["args"] = Value::Null;
+    let r = h.process(payload);
+    assert!(r.is_success(), "an honest request after three refusals: {r:?}");
+    assert_eq!(h.runs(), 1);
+}
+
+#[test]
 fn a_one_time_capability_still_runs_under_the_strict_policy() {
     let dir = TempDir::new("hardening-onetime-runs");
     let h = Builder::new(dir.path()).policy(strict_policy()).start();
