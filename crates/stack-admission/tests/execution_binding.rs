@@ -43,17 +43,29 @@ fn the_limits_digest_has_a_fixed_layout_known_answer() {
     // SHA-256 of "stack-admission/limits/1\n" then the six limits big-endian: five u64 and a u32, in
     // declaration order. The expected value was computed independently (Python hashlib). If this
     // changes, every capability already issued for these limits stops matching.
+    // Six distinct non-zero values, so a transposition of any two fields changes the digest.
     let limits = ExecutionLimits {
         wall_clock_deadline_ns: 300_000_000,
-        cpu_seconds: 0,
+        cpu_seconds: 7,
         address_space_bytes: 4 << 30,
         max_output_bytes: 4096,
-        file_size_bytes: 0,
-        nofile: 0,
+        file_size_bytes: 13,
+        nofile: 1024,
     };
     assert_eq!(
         limits.binding_digest().to_hex(),
-        "d900e0da0bd947058ff6ade2338ba7b90586aa7ccf85c2038463d0ca1e536309"
+        "d1a53eb3bc2d7fec99fb97c70fa08653b80c3c204641306964ac94579167f56e"
+    );
+    // The same values with cpu_seconds and file_size_bytes swapped: a different digest, also
+    // computed independently. The old known-answer value could not tell these apart.
+    let swapped = ExecutionLimits {
+        cpu_seconds: 13,
+        file_size_bytes: 7,
+        ..limits
+    };
+    assert_eq!(
+        swapped.binding_digest().to_hex(),
+        "43a890d7570b0571170bca83f13f9fe161dc4d97e9c7a260a7117e7a7a381556"
     );
 }
 

@@ -799,8 +799,15 @@ impl ReceiptLog for FileReceiptLog {
             return Err(LogError::TooLarge);
         }
         file.seek(SeekFrom::Start(0)).map_err(|e| LogError::io("seek", &e))?;
+        // Bounded read: the stat above can be stale if a writer that ignores the lock grows the file,
+        // so never read more than one byte past the cap.
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(|e| LogError::io("read", &e))?;
+        file.take(MAX_LOG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| LogError::io("read", &e))?;
+        if bytes.len() as u64 > MAX_LOG_BYTES {
+            return Err(LogError::TooLarge);
+        }
         let parsed = parse_log(&bytes)?;
         // The lock is advisory: a writer that ignores it can edit this inode in place. What the
         // handle holds is what `open` verified plus what `append` wrote since, so the file must still
