@@ -222,6 +222,8 @@ fn two_lanes() -> LanedPad {
     .unwrap()
 }
 
+/// Despite its name this checks the raw and second-order differences, the calibration and the
+/// overrun rate, not the cropped percentiles: that check is the open finding below.
 #[test]
 fn the_fast_lane_hides_the_cost_of_cheap_operations() {
     let lanes = two_lanes();
