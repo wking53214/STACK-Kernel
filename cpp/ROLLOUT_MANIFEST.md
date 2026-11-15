@@ -30,7 +30,7 @@ headers has to do, and what state the layer is in.
 | Build and tests | 26 ctest entries in this build. CI job `cpp` runs 25 of them; the 26th is root-only. All are compiled with `-Werror`. |
 | Supervised execution | Implemented and tested on x86_64 (`supervised_exec_tests.cpp`, the worker tests and the FFI tests). aarch64 not built. |
 | In-process path | Cooperative deadline; D-01 and D-03 fixed; D-02 not fixable on this path. |
-| Capability model | C++ layer: mask check only; no authorization, issuer, expiry or revocation. The Rust `stack-authority` crate adds signed-capability checks for the authorized FFI entry points; no capability issuer is built (see `docs/issuer-requirements.md`). |
+| Capability model | C++ layer: mask check only; no authorization, issuer, expiry or revocation. The Rust `stack-authority` crate adds signed-capability checks for the authorized FFI entry points; an issuer library exists (`crates/stack-issuer`) but no issuer service or production signer (see `docs/issuer-requirements.md`). |
 | Audit as receipt | Not usable: the signing is an XOR placeholder, so the ring is telemetry only. |
 | FFI | Distinct failure codes; `supervised_run` exposed. Transactions are token-bucket limited to 1000 tokens per second per domain, by design. The earlier reserved-floor bug that rate-limited every Standard transaction is fixed (R2-K-01). |
 | Known test issues | None recorded as open. The two scheduling-dependent cases were made deterministic in RACE-02 step 5b; see `CONTAINMENT.md`. |

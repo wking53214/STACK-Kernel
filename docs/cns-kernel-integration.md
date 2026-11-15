@@ -176,9 +176,10 @@ the decision (policy is the issuer's), then sign, with its Ed25519 key:
 | `one_time` | true for an irreversible action; consumed in a durable store | `Replay` |
 | `issuer_id`, signing key | present in the kernel's trust set | `UnknownIssuer`, `UntrustedKey`, `BadSignature` |
 
-Not in the capability: the arguments, the worker, any limit. `args` are
-neither covered by the subject digest nor by the capability (R2-X-02), and
-no built-in worker reads them. The kernel maps an operation name to a
+A version 1 capability does not cover the arguments, the worker or any
+limit; a version 2 capability binds a digest of the arguments, the worker
+label and a digest of the limits. `args` are not covered by the subject
+digest, and no built-in worker reads them (R2-X-02). The kernel maps an operation name to a
 worker and limits by its own configuration; a capability cannot choose
 either.
 
@@ -208,7 +209,7 @@ result is genuine.
 
 | Item | State |
 |---|---|
-| A real issuer, its key custody, and its decision-checking policy | BLOCKED (outside this repository; decision E places it outside the kernel and CNS) |
+| A real issuer deployment, its key custody, and its decision-checking policy | BLOCKED (decision E places it outside the kernel and CNS). A library exists in `crates/stack-issuer`; there is no service and no production signer, and it cannot tell whether a CNS decision is genuine |
 | UAI-1 as the decision carrier | BLOCKED (R2-E-06) |
 | Two or more kernel hosts with shared replay, use and receipt state | BLOCKED (single VM; stores are single-writer) |
 | CNS Node implementation, and the PostgreSQL ledger, in the chain | not exercised |
