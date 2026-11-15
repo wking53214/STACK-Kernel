@@ -660,64 +660,7 @@ impl SupervisedExecutor {
             None => stack_ffi::supervised_run_governed(authorization, &request, &ffi_limits, &mut out),
         };
         let report = result.map_err(|e| ExecutorError::Refused(format!("{e:?}")))?;
-        use stack_ffi::SupervisedOutcome as O;
-        let outcome = match report.outcome {
-            O::Completed if !completed_conditions_hold(&report) => RunOutcome::Unknown {
-                reason: "supervisor reported a completion without an observed exit 0 and one valid frame".to_owned(),
-            },
-            O::Completed => match usize::try_from(report.result_length).ok().and_then(|n| out.get(..n)) {
-                Some(bytes) => RunOutcome::Completed {
-                    exit_code: report.exit_code,
-                    result: bytes.to_vec(),
-                },
-                // A completion whose bytes cannot be read is not a completion.
-                None => RunOutcome::Unknown {
-                    reason: "supervisor reported a result longer than the buffer".to_owned(),
-                },
-            },
-            O::TimedOut => RunOutcome::TimedOut,
-            O::Crashed => RunOutcome::Crashed {
-                signal: report.signal_number,
-            },
-            O::SeccompViolation => RunOutcome::SeccompViolation {
-                signal: report.signal_number,
-            },
-            O::ExitedNonZero => RunOutcome::ExitedNonZero {
-                exit_code: report.exit_code,
-            },
-            O::ResultMissing => RunOutcome::ResultMissing {
-                exit_code: report.exit_code,
-            },
-            O::ResultOversized => RunOutcome::ResultOversized,
-            O::ResourceLimit => RunOutcome::ResourceLimit {
-                signal: report.signal_number,
-            },
-            O::SpawnFailed => RunOutcome::Unknown {
-                reason: format!("spawn failed (errno {})", report.error_number),
-            },
-            O::SupervisorError => RunOutcome::Unknown {
-                reason: format!("supervisor error (errno {})", report.error_number),
-            },
-            O::InvalidLimits => RunOutcome::Unknown {
-                reason: "limits refused by the supervisor".to_owned(),
-            },
-            O::SigchldIgnored => RunOutcome::Unknown {
-                reason: "SIGCHLD is ignored in this process; the supervisor refused to run".to_owned(),
-            },
-            // A pending capability revocation killed the worker (R2-K-24).
-            O::Terminated => RunOutcome::Terminated {
-                signal: report.signal_number,
-            },
-            O::TerminationUnconfirmed => RunOutcome::TerminationUnconfirmed {
-                reason: format!(
-                    "SIGKILL sent and the worker (pid {}) was not reaped within the bound; it may still be running",
-                    report.child_pid
-                ),
-            },
-            O::Unrecognized(code) => RunOutcome::Unknown {
-                reason: format!("unrecognized supervisor outcome code {code}"),
-            },
-        };
+        let outcome = outcome_from_report(&report, &out);
         Ok((
             RunReport {
                 outcome,
@@ -726,6 +669,71 @@ impl SupervisedExecutor {
             },
             receipt_observed(&report),
         ))
+    }
+}
+
+/// What the supervisor's report means, and nothing more. `Completed` needs the supervisor's OWN observations to say so
+/// (`completed_conditions_hold`: an observed exit 0, one valid frame, the deadline not passed) and a result length that fits the buffer;
+/// a report that says `Completed` without them is `Unknown`, never a success. Pure, so that each contradictory combination can be tested
+/// without a worker.
+fn outcome_from_report(report: &stack_ffi::SupervisedReport, out: &[u8]) -> RunOutcome {
+    use stack_ffi::SupervisedOutcome as O;
+    match report.outcome {
+        O::Completed if !completed_conditions_hold(report) => RunOutcome::Unknown {
+            reason: "supervisor reported a completion without an observed exit 0 and one valid frame".to_owned(),
+        },
+        O::Completed => match usize::try_from(report.result_length).ok().and_then(|n| out.get(..n)) {
+            Some(bytes) => RunOutcome::Completed {
+                exit_code: report.exit_code,
+                result: bytes.to_vec(),
+            },
+            // A completion whose bytes cannot be read is not a completion.
+            None => RunOutcome::Unknown {
+                reason: "supervisor reported a result longer than the buffer".to_owned(),
+            },
+        },
+        O::TimedOut => RunOutcome::TimedOut,
+        O::Crashed => RunOutcome::Crashed {
+            signal: report.signal_number,
+        },
+        O::SeccompViolation => RunOutcome::SeccompViolation {
+            signal: report.signal_number,
+        },
+        O::ExitedNonZero => RunOutcome::ExitedNonZero {
+            exit_code: report.exit_code,
+        },
+        O::ResultMissing => RunOutcome::ResultMissing {
+            exit_code: report.exit_code,
+        },
+        O::ResultOversized => RunOutcome::ResultOversized,
+        O::ResourceLimit => RunOutcome::ResourceLimit {
+            signal: report.signal_number,
+        },
+        O::SpawnFailed => RunOutcome::Unknown {
+            reason: format!("spawn failed (errno {})", report.error_number),
+        },
+        O::SupervisorError => RunOutcome::Unknown {
+            reason: format!("supervisor error (errno {})", report.error_number),
+        },
+        O::InvalidLimits => RunOutcome::Unknown {
+            reason: "limits refused by the supervisor".to_owned(),
+        },
+        O::SigchldIgnored => RunOutcome::Unknown {
+            reason: "SIGCHLD is ignored in this process; the supervisor refused to run".to_owned(),
+        },
+        // A pending capability revocation killed the worker (R2-K-24).
+        O::Terminated => RunOutcome::Terminated {
+            signal: report.signal_number,
+        },
+        O::TerminationUnconfirmed => RunOutcome::TerminationUnconfirmed {
+            reason: format!(
+                "SIGKILL sent and the worker (pid {}) was not reaped within the bound; it may still be running",
+                report.child_pid
+            ),
+        },
+        O::Unrecognized(code) => RunOutcome::Unknown {
+            reason: format!("unrecognized supervisor outcome code {code}"),
+        },
     }
 }
 
