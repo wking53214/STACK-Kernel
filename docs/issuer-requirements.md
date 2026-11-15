@@ -1,6 +1,6 @@
 # Requirements for a real capability issuer
 
-Status: requirements only. No issuer exists in this repository. Every capability in the tests is signed by a fixture key derived from a public label (`crates/stack-authority/tests/common/mod.rs`, `crates/stack-admission/tests/common/mod.rs`). This document states what an issuer must do for the kernel's claims to hold. It contains no key material, no service code and no new wire format.
+Status: requirements, plus a library (`crates/stack-issuer`) that implements part of them. There is no issuer service, no production signer and no requester authentication; see that crate's README for what is covered and what is not. Every capability in the tests is signed by a fixture key derived from a public label (`crates/stack-authority/tests/common/mod.rs`, `crates/stack-admission/tests/common/mod.rs`). This document states what an issuer must do for the kernel's claims to hold. It contains no key material, no service code and no new wire format.
 
 Evidence labels: INSPECTED means read in the source named. DECISION means the repository owner must decide it; nothing here decides it.
 
@@ -72,7 +72,10 @@ MUST means the kernel's claims do not hold without it.
 
 ## 4. What would show the issuer meets this
 
-These are acceptance criteria for a future issuer. None is implemented or run today, because no issuer exists:
+Acceptance criteria. The library covers, with tests in `crates/stack-issuer/tests/issue.rs`: refusing a decision that lacks a seat, has a forged root, or is about other content; deriving the digests itself; no wildcard scope and a lifetime ceiling; and no issuance when the signer or the log is down. Not covered, because they need a service, a real signer or other components: forged-CNS-decision detection (see the crate README), rotation, revocation delivery, the secret scan of a deployed image, and reconciliation of the logs.
+
+Original list:
+
 
 - It refuses to sign when the CNS decision is forged, lacks a required seat, has a seat at the wrong position, or does not match the subject content.
 - It refuses requester-supplied digests that differ from the ones it derived.
@@ -85,8 +88,8 @@ These are acceptance criteria for a future issuer. None is implemented or run to
 
 ## 5. Decisions for the owner (not made here)
 
-- Who operates the issuer, and on what key-custody system.
-- Whether the Python `cns_interop` Ed25519 signing code (register D-19, not in this repository) becomes the issuer, or a new service does. Whichever it is, CNS must not become an authorization or execution authority; the issuer must stay separate from CNS's contract role.
+- Who operates the issuer, and on what key-custody system. (The library takes a `Signer`; no backend is chosen.)
+- Whether the Python `cns_interop` Ed25519 signing code (register D-19, not in this repository) becomes the issuer, or a new service does. (Decided for the library: a new component, `stack-issuer`, which only consumes CNS decisions.) Whichever it is, CNS must not become an authorization or execution authority; the issuer must stay separate from CNS's contract role.
 - ~~Whether to add a capability format version that binds an arguments digest, the worker kind and the limits.~~ Decided and implemented as `stack-capability/2`. Open: when the issuer starts issuing it, and when the kernel's `require_execution_binding` is turned on.
 - The revocation transport and its maximum staleness.
 - The maximum lifetime and whether any reusable capability is ever acceptable.
