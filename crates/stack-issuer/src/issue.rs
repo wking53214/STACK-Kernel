@@ -1,6 +1,7 @@
 //! Issuing one capability.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fmt;
+use std::sync::Mutex;
 
 use serde_json::Value;
 use stack_admission::{binding, execution_binding, BindingFinding, DecisionClaim};
@@ -26,7 +27,7 @@ const VERIFIER_DEFAULT_MAX_BYTES: usize = 16 * 1024;
 /// What a requester may say. There is no field for a digest, an audience, a
 /// worker or a limit: the issuer derives those, so the requester cannot supply
 /// one that differs from the truth.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IssuanceRequest {
     /// Who is asking, as the caller authenticated them. 1 to 128 bytes.
     pub requester: String,
@@ -46,7 +47,7 @@ pub struct IssuanceRequest {
 }
 
 /// What a successful issuance returns.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Issued {
     /// The signed capability, ready to hex-encode into a payload.
     pub wire: Vec<u8>,
@@ -54,6 +55,25 @@ pub struct Issued {
     pub cap_id: String,
     /// Its digest over the whole wire form.
     pub digest: CapabilityDigest,
+}
+
+impl fmt::Debug for IssuanceRequest {
+    /// Names the request without printing the subject, the decision or the arguments.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IssuanceRequest")
+            .field("requester", &self.requester)
+            .field("operation", &self.operation)
+            .field("resources", &self.resources.len())
+            .field("lifetime_ms", &self.lifetime_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Issued {
+    /// Names the capability without printing it: the wire form is a bearer credential.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Issued").field("cap_id", &self.cap_id).field("digest", &self.digest.to_hex()).finish_non_exhaustive()
+    }
 }
 
 /// Why nothing was issued. Every variant means no capability exists.
@@ -69,7 +89,7 @@ pub enum IssueError {
     #[error("arguments: {0}")]
     Arguments(String),
     /// The decision is not a bound, policy-complete decision about this subject.
-    #[error("decision refused: {0:?}")]
+    #[error("decision refused")]
     DecisionRefused(Vec<BindingFinding>),
     /// The decision or subject is malformed in a way the kernel's payload parser refuses.
     #[error("decision shape: {0}")]
@@ -84,10 +104,10 @@ pub enum IssueError {
     #[error("issuer clock: {0}")]
     Clock(&'static str),
     /// The deployment's decision verifier refused.
-    #[error("decision not verified: {0}")]
+    #[error("decision not verified")]
     DecisionNotVerified(String),
     /// The deployment's authorizer refused.
-    #[error("not authorized: {0}")]
+    #[error("not authorized")]
     NotAuthorized(String),
     /// This decision has already produced the most capabilities allowed.
     #[error("this decision has reached its issuance limit")]
@@ -129,6 +149,19 @@ pub enum IssueError {
     Log(LogError),
 }
 
+impl IssueError {
+    /// Detail for the operator's log, never for the requester. `Display` is neutral on
+    /// purpose: a refused decision names the roster seats, a hook's reason can name
+    /// internal policy.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::DecisionRefused(findings) => Some(format!("{findings:?}")),
+            Self::DecisionNotVerified(reason) | Self::NotAuthorized(reason) => Some(reason.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// The issuer.
 #[derive(Debug)]
 pub struct Issuer {
@@ -139,7 +172,8 @@ pub struct Issuer {
     clock: Box<dyn Clock>,
     verifier: Box<dyn DecisionVerifier>,
     authorizer: Box<dyn Authorizer>,
-    last_ms: AtomicU64,
+    /// The latest clock reading of a completed issuance. Only a completed issuance moves it.
+    last_ms: Mutex<u64>,
 }
 
 fn args_are_empty(args: &Value) -> bool {
@@ -181,7 +215,7 @@ impl Issuer {
         if !log.is_durable() {
             return Err(ConfigError::LogNotDurable);
         }
-        Ok(Self { config, signer, entropy, log, clock, verifier, authorizer, last_ms: AtomicU64::new(0) })
+        Ok(Self { config, signer, entropy, log, clock, verifier, authorizer, last_ms: Mutex::new(0) })
     }
 
     /// Issues one capability, or none. Order: refuse what must be refused (shape, scope,
@@ -252,6 +286,7 @@ impl Issuer {
                 operation: &req.operation,
                 resources: &req.resources,
                 lifetime_ms: req.lifetime_ms,
+                args: &req.args,
                 args_digest: &execution.args_digest,
                 subject_digest: &subject_digest,
                 decision_root: &decision_root,
@@ -273,13 +308,20 @@ impl Issuer {
         self.entropy.fill(&mut id_bytes)?;
         let cap_id = format!("cap-{}", hex::encode(id_bytes));
 
-        let now = self.clock.now_unix_ms();
-        if now == 0 {
-            return Err(IssueError::Clock("the clock reads zero"));
-        }
-        if self.last_ms.fetch_max(now, Ordering::SeqCst) > now {
-            return Err(IssueError::Clock("the clock went backwards since the last issuance"));
-        }
+        // Read and compare under one lock so concurrent readers are ordered, but only a
+        // completed issuance advances the guard: a refused or failed request, or one wild
+        // reading, must not block the issuer afterwards.
+        let now = {
+            let last = self.last_ms.lock().map_err(|_| IssueError::Clock("the clock guard is poisoned"))?;
+            let now = self.clock.now_unix_ms();
+            if now == 0 {
+                return Err(IssueError::Clock("the clock reads zero"));
+            }
+            if now < *last {
+                return Err(IssueError::Clock("the clock went backwards since the last issuance"));
+            }
+            now
+        };
         let expires = now.checked_add(req.lifetime_ms).ok_or(IssueError::Clock("the window would overflow"))?;
 
         let mut cap = Capability {
@@ -333,6 +375,11 @@ impl Issuer {
             LogError::DecisionLimit => IssueError::DecisionLimit,
             other => IssueError::Log(other),
         })?;
+        if let Ok(mut last) = self.last_ms.lock() {
+            if now > *last {
+                *last = now;
+            }
+        }
         Ok(Issued { wire, cap_id, digest })
     }
 }

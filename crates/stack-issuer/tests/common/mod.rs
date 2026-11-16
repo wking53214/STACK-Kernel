@@ -136,10 +136,13 @@ impl Signer for FixtureSigner {
 pub struct CounterEntropy {
     pub n: AtomicU64,
     pub fail: bool,
+    /// How many times `fill` was called.
+    pub fills: Arc<AtomicUsize>,
 }
 
 impl Entropy for CounterEntropy {
     fn fill(&self, buf: &mut [u8]) -> Result<(), EntropyError> {
+        self.fills.fetch_add(1, Ordering::SeqCst);
         if self.fail {
             return Err(EntropyError::Unavailable("fixture entropy offline".into()));
         }
@@ -221,6 +224,7 @@ pub struct Seen {
     pub operation: String,
     pub resources: Vec<String>,
     pub lifetime_ms: u64,
+    pub args: String,
     pub args_digest: String,
     pub subject_digest: String,
     pub decision_root: String,
@@ -241,6 +245,7 @@ impl Authorizer for FixtureAuthorizer {
             operation: r.operation.to_owned(),
             resources: r.resources.iter().map(|x| x.path().to_owned()).collect(),
             lifetime_ms: r.lifetime_ms,
+            args: r.args.to_string(),
             args_digest: r.args_digest.to_hex(),
             subject_digest: r.subject_digest.to_hex(),
             decision_root: r.decision_root.to_hex(),
@@ -343,4 +348,18 @@ impl Drop for TempDir {
 /// A well-formed issuance record line (with its newline) for a decision root.
 pub fn record_line(root_byte: u8) -> String {
     format!("{{\"cap_id\":\"cap-x\",\"decision_root\":\"{}\"}}\n", hex::encode([root_byte; 32]))
+}
+
+/// A clock that counts its readings.
+#[derive(Debug)]
+pub struct CountingClock {
+    pub reads: Arc<AtomicUsize>,
+    pub now: u64,
+}
+
+impl stack_authority::Clock for CountingClock {
+    fn now_unix_ms(&self) -> u64 {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.now
+    }
 }

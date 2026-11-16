@@ -1,6 +1,6 @@
 # Requirements for a real capability issuer
 
-Status: requirements, plus a library (`crates/stack-issuer`) that implements part of them. There is no issuer service, no production signer and no requester authentication; see that crate's README for what is covered and what is not. Every capability in the tests is signed by a fixture key derived from a public label (`crates/stack-authority/tests/common/mod.rs`, `crates/stack-admission/tests/common/mod.rs`). This document states what an issuer must do for the kernel's claims to hold. It contains no key material, no service code and no new wire format.
+Status: requirements, plus a library (`crates/stack-issuer`) that implements part of them. There is no issuer service, no production signer and no requester authentication; see that crate's README for what is covered and what is not. Every capability in the tests is signed by a fixture key derived from a public label (`crates/stack-authority/tests/common/mod.rs`, `crates/stack-admission/tests/common/mod.rs`, `crates/stack-issuer/tests/common/mod.rs`). This document states what an issuer must do for the kernel's claims to hold. It contains no key material, no service code and no new wire format.
 
 Evidence labels: INSPECTED means read in the source named. DECISION means the repository owner must decide it; this document does not decide it. Where an owner answer is recorded below, it is labelled as one.
 
@@ -8,7 +8,7 @@ Identifiers such as `D-19` refer to a project decision register that is not in t
 
 ## 1. What the kernel already checks, so the issuer need not duplicate it
 
-`Authority::authorize` (`crates/stack-authority/src/authority.rs`) checks, in the order the code does:
+`Authority::authorize` (`crates/stack-authority/src/authority.rs`) checks the following. The table groups them; it is not the order the code runs them (the code resolves the trust anchor before verifying the signature, checks the window before the audience, checks the binding before recording the use, and refuses a reusable capability under `require_one_time` before recording it):
 
 | Check | Where | Label |
 |---|---|---|
@@ -77,7 +77,7 @@ Acceptance criteria, with what the library (`crates/stack-issuer`, tests in `tes
 - It refuses to sign when the CNS decision is forged, lacks a required seat, has a seat at the wrong position, or does not match the subject content. **Partly.** Covered: missing seat, wrong position, root mismatch, a decision about other content, and the shape checks the kernel's payload parser makes. A required `DecisionVerifier` hook is called for the rest; the crate ships only a refuse-all placeholder. Not covered: a forged but self-consistent decision, until a verifier backed by a channel to CNS exists.
 - It refuses requester-supplied digests that differ from the ones it derived. **By absence.** The request type has no digest field, so none can be supplied.
 - It never emits a wildcard scope or a lifetime above its configured maximum. **Yes** for scopes outside the configured roots and for a prefix on `/`; **yes** for the lifetime ceiling.
-- One decision cannot produce more than a configured number of capabilities. **Partly** (`max_per_decision`). It holds for one open log handle, across restarts, with concurrent callers. It does not hold if the log is rotated without carrying its history, or if a requester varies the decision root (only a verifier that accepts exactly CNS-produced roots stops that). It is per root, not per requester.
+- One decision cannot produce more than a configured number of capabilities. **Partly** (`max_per_decision`). It holds for one open log handle on a regular file, across restarts, with concurrent callers; the handle refuses to continue if the file is renamed, replaced or removed, or if the process forked. It does not hold if the log is rotated without carrying its history (and the old issuer stopped), if an operator edits or truncates the file, or if a requester varies the decision root (a relabelled verdict, an extra PASS seat or a reordered roster each give a new root; only a verifier that accepts exactly CNS-produced roots stops that). It is per root, not per requester.
 - A requester is issued only what a policy allows. **Hook only:** a required `Authorizer` is called before signing; no real policy ships.
 - A rotation exercise with overlapping anchors leaves no window in which a valid capability is refused or a retired key is accepted. Not covered.
 - A revocation reaches the kernel within the stated bound, and an in-flight run for the revoked capability is cancelled. Not covered.

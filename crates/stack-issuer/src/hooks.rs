@@ -20,8 +20,8 @@
 //!   log). A hook with side effects, such as a quota or a one-time ticket, must expect that.
 //! * There is no timeout. A hook that hangs hangs `issue`; bound your own calls.
 //! * `Refusal` is the only failure shape: an outage and a forged decision look the same to
-//!   the caller. Do not forward the text to a requester. It can name roster seats and
-//!   internal policy.
+//!   the caller. The reason is kept in `IssueError::detail()` for the operator; the error's
+//!   `Display` is neutral. Do not forward the detail to a requester.
 //! * Both require `Debug`, and `Issuer` derives `Debug`. A hook that holds a key must not
 //!   derive `Debug` over it.
 
@@ -60,6 +60,9 @@ pub struct AuthorizationRequest<'a> {
     pub resources: &'a [ResourceScope],
     /// How long the capability will live, in milliseconds from issue.
     pub lifetime_ms: u64,
+    /// The arguments as requested. What the capability binds is their digest; an
+    /// authorizer that allows an operation only with certain arguments needs to see them.
+    pub args: &'a serde_json::Value,
     /// The digest of the canonical arguments that will be bound.
     pub args_digest: &'a Digest32,
     /// The recomputed subject digest.

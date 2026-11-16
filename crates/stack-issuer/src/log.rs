@@ -2,10 +2,10 @@
 //! separate from the kernel's receipt log.
 
 use std::fmt;
-use std::collections::HashMap;
-use std::fs::{File, OpenOptions, TryLockError};
+use std::collections::{HashMap, HashSet};
+use std::fs::{File, Metadata, OpenOptions, TryLockError};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde_json::json;
@@ -93,10 +93,10 @@ impl IssuanceRecord {
 /// capability and returns none if `append` fails.
 ///
 /// A record means "the issuer produced this capability", not "it was delivered":
-/// if the record is written and a later step fails, the capability is dropped
-/// but the record stays. If the write reached the file but could not be flushed,
-/// `append` reports an error, no capability is released, and the record may still
-/// be counted after the log is next opened.
+/// the issuer returns the capability only after `append` succeeds, and the caller's
+/// own later steps can still lose it. If the write reached the file but could not be
+/// flushed, `append` reports an error, no capability is released, and the record may
+/// still be counted after the log is next opened.
 pub trait IssuanceLog: Send + Sync + fmt::Debug {
     /// Whether `append` is durable. The issuer refuses a log that says no, as
     /// the kernel refuses a store that is not durable.
@@ -121,28 +121,44 @@ pub trait IssuanceLog: Send + Sync + fmt::Debug {
 pub const MAX_RECORD_LINE_BYTES: usize = 1 << 20;
 
 /// A file of JSON lines, opened for append. Each record is flushed to stable storage
-/// before `append` returns. A new file is readable by its owner only.
+/// before `append` returns. A new file is created readable by its owner only (Unix;
+/// an existing file keeps its mode).
 ///
 /// * Opening takes an exclusive advisory lock (`File::try_lock`) held for the life of
-///   the handle, so a second handle on the same file, in this process or another,
-///   is refused. The lock is advisory: it stops another issuer, not another program.
+///   the handle, so a second handle on the same file is refused. **The lock belongs to
+///   the file, not to the path, and to the open file description, not to the process.**
+///   Renaming, replacing or removing the file while it is open, or forking with the
+///   handle open, defeats it; `append` therefore checks that the path still names the
+///   file it holds and that the process is the one that opened it, and latches the
+///   handle if not (Unix). The check is not atomic with the write. It does not help on
+///   a network filesystem whose locks are client-local.
 /// * Opening reads the file once, line by line. It refuses an unterminated last line
 ///   (a torn write: appending would fuse two records), an empty line, a line that is not
 ///   a record (a JSON object with a string `cap_id` and a 64-character lowercase hex
-///   `decision_root`), invalid UTF-8, and a line over [`MAX_RECORD_LINE_BYTES`].
+///   `decision_root`), invalid UTF-8, and a line over [`MAX_RECORD_LINE_BYTES`]. `append`
+///   refuses to write a record that `open` would refuse.
+/// * It refuses a symlink, a FIFO and a socket. `is_durable` is true only for a regular
+///   file, so `Issuer::new` refuses a log on a device.
 /// * The per-decision counts are rebuilt from the file. **Rotation resets them.** To
 ///   rotate without re-arming spent decisions, open the new file with
-///   [`FileIssuanceLog::open_with_history`] and list every earlier segment.
+///   [`FileIssuanceLog::open_with_history`] and list every earlier segment. The old
+///   issuer must be stopped first: history segments are read under a shared lock, so a
+///   segment still held by a running issuer makes the open fail.
+/// * Counts and open time grow with the number of distinct decision roots ever logged.
 /// * After a failed write or flush the handle refuses every later append until it is
 ///   reopened after the log is repaired.
-/// * It is not tamper-evident (no hash chain, no signature), and the directory entry
-///   is not flushed.
+/// * It is not tamper-evident (no hash chain, no signature), and the directory entry is
+///   not flushed.
 pub struct FileIssuanceLog {
     inner: Mutex<FileInner>,
+    durable: bool,
 }
 
 struct FileInner {
     file: File,
+    path: PathBuf,
+    pid: u32,
+    ident: Option<(u64, u64)>,
     counts: HashMap<String, u32>,
     failed: bool,
 }
@@ -155,6 +171,20 @@ impl fmt::Debug for FileIssuanceLog {
 
 fn is_lower_hex_64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The (device, inode) of a file, where the platform has them.
+fn ident(meta: &Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
 }
 
 /// Counts the decisions in `reader`, line by line, adding to `counts`.
@@ -196,6 +226,17 @@ fn count_into(reader: impl Read, counts: &mut HashMap<String, u32>, name: &str) 
     }
 }
 
+fn unavailable(e: std::io::Error) -> LogError {
+    LogError::Unavailable(e.to_string())
+}
+
+fn lock_error(e: TryLockError, what: &str) -> LogError {
+    match e {
+        TryLockError::WouldBlock => LogError::Unavailable(format!("{what} is in use by another handle or process")),
+        TryLockError::Error(e) => unavailable(e),
+    }
+}
+
 impl FileIssuanceLog {
     /// Opens or creates `path` for append, locks it, and counts what is in it.
     pub fn open(path: &Path) -> Result<Self, LogError> {
@@ -203,10 +244,43 @@ impl FileIssuanceLog {
     }
 
     /// Like [`FileIssuanceLog::open`], and also counts the records in each earlier
-    /// segment listed in `history`, read-only, so that rotating the log does not give a
-    /// spent decision a fresh allowance. List every segment you have kept.
+    /// segment listed in `history`, so that rotating the log does not give a spent
+    /// decision a fresh allowance. List every segment you have kept, once each. Every
+    /// segment must be a regular file, must not be the live file, and must not be held
+    /// by a running issuer (it is read under a shared lock). The segments are checked
+    /// before the live file is created.
     pub fn open_with_history(path: &Path, history: &[&Path]) -> Result<Self, LogError> {
-        let unavailable = |e: std::io::Error| LogError::Unavailable(e.to_string());
+        let mut counts: HashMap<String, u32> = HashMap::new();
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
+        for segment in history {
+            let name = segment.display().to_string();
+            let f = File::open(segment).map_err(unavailable)?;
+            let meta = f.metadata().map_err(unavailable)?;
+            if !meta.is_file() {
+                return Err(LogError::Unavailable(format!("{name}: a history segment must be a regular file")));
+            }
+            if let Some(id) = ident(&meta) {
+                if !seen.insert(id) {
+                    return Err(LogError::Unavailable(format!("{name}: listed twice (or the same file as another segment)")));
+                }
+            }
+            f.try_lock_shared().map_err(|e| lock_error(e, &name))?;
+            count_into(&f, &mut counts, &name)?;
+        }
+
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            #[cfg(unix)]
+            let special = {
+                use std::os::unix::fs::FileTypeExt;
+                let t = meta.file_type();
+                t.is_fifo() || t.is_socket()
+            };
+            #[cfg(not(unix))]
+            let special = false;
+            if meta.file_type().is_symlink() || special {
+                return Err(LogError::Unavailable("the log path is a symlink, FIFO or socket".into()));
+            }
+        }
         let mut options = OpenOptions::new();
         options.create(true).append(true).read(true);
         #[cfg(unix)]
@@ -215,27 +289,31 @@ impl FileIssuanceLog {
             options.mode(0o600);
         }
         let file = options.open(path).map_err(unavailable)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                return Err(LogError::Unavailable("the log is in use by another handle or process".into()));
-            }
-            Err(TryLockError::Error(e)) => return Err(unavailable(e)),
+        file.try_lock().map_err(|e| lock_error(e, "the log"))?;
+        let meta = file.metadata().map_err(unavailable)?;
+        let id = ident(&meta);
+        if id.is_some_and(|id| seen.contains(&id)) {
+            return Err(LogError::Unavailable("the live log is also listed as a history segment".into()));
         }
-        let mut counts: HashMap<String, u32> = HashMap::new();
         // The same handle is read and then appended to, so the file counted is the file written.
         count_into(&file, &mut counts, &path.display().to_string())?;
-        for segment in history {
-            let f = File::open(segment).map_err(unavailable)?;
-            count_into(f, &mut counts, &segment.display().to_string())?;
-        }
-        Ok(Self { inner: Mutex::new(FileInner { file, counts, failed: false }) })
+        Ok(Self {
+            inner: Mutex::new(FileInner {
+                file,
+                path: path.to_owned(),
+                pid: std::process::id(),
+                ident: id,
+                counts,
+                failed: false,
+            }),
+            durable: meta.is_file(),
+        })
     }
 }
 
 impl IssuanceLog for FileIssuanceLog {
     fn is_durable(&self) -> bool {
-        true
+        self.durable
     }
 
     fn issued_for_decision(&self, decision_root: &str) -> Result<u32, LogError> {
@@ -244,12 +322,29 @@ impl IssuanceLog for FileIssuanceLog {
     }
 
     fn append(&self, record: &IssuanceRecord, max_per_decision: u32) -> Result<(), LogError> {
+        // Refuse a record `open` would refuse, before anything is written.
         let mut line = record.to_json_line();
+        if !is_lower_hex_64(&record.decision_root) || line.len() > MAX_RECORD_LINE_BYTES {
+            return Err(LogError::Unavailable("the record would not be readable when the log is reopened".into()));
+        }
         line.push('\n');
         let mut inner = self.inner.lock().map_err(|_| LogError::Unavailable("log lock poisoned".into()))?;
         // Checked under the lock, so a thread that was waiting cannot write after another failed.
         if inner.failed {
             return Err(LogError::Unavailable("an earlier write failed; reopen after repairing the log".into()));
+        }
+        if inner.pid != std::process::id() {
+            inner.failed = true;
+            return Err(LogError::Unavailable("the log handle is being used by a forked process".into()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let same = std::fs::metadata(&inner.path).is_ok_and(|m| ident(&m) == inner.ident && m.nlink() > 0);
+            if !same {
+                inner.failed = true;
+                return Err(LogError::Unavailable("the log file was renamed, replaced or removed while open".into()));
+            }
         }
         if inner.counts.get(&record.decision_root).copied().unwrap_or(0) >= max_per_decision {
             return Err(LogError::DecisionLimit);
@@ -261,5 +356,45 @@ impl IssuanceLog for FileIssuanceLog {
         let c = inner.counts.entry(record.decision_root.clone()).or_insert(0);
         *c = c.saturating_add(1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_handle_used_by_a_process_that_did_not_open_it_is_latched() {
+        let dir = std::env::temp_dir().join(format!("stack-issuer-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("issuance.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let log = FileIssuanceLog::open(&path).unwrap();
+        // Stand in for a forked child: the handle records the pid that opened it.
+        log.inner.lock().unwrap().pid = std::process::id().wrapping_add(1);
+        let record = IssuanceRecord {
+            cap_id: "c".into(),
+            capability_digest: String::new(),
+            issuer_id: String::new(),
+            key_id: String::new(),
+            requester: String::new(),
+            subject_digest: String::new(),
+            decision_root: "ab".repeat(32),
+            operation: String::new(),
+            args_digest: String::new(),
+            worker: String::new(),
+            limits_digest: String::new(),
+            resources: vec![],
+            not_before_ms: 0,
+            expires_at_ms: 0,
+            issued_at_ms: 0,
+            one_time: true,
+            policy_ref: String::new(),
+        };
+        let e = log.append(&record, 5).unwrap_err().to_string();
+        assert!(e.contains("forked"), "{e}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        drop(log);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
