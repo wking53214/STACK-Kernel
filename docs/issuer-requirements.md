@@ -72,11 +72,13 @@ MUST means the kernel's claims do not hold without it.
 
 ## 4. What would show the issuer meets this
 
-Acceptance criteria, with what the library (`crates/stack-issuer`, tests in `tests/issue.rs` and `tests/hardening.rs`) covers:
+Acceptance criteria, with what the library (`crates/stack-issuer`, tests in `tests/issue.rs`, `tests/hardening.rs` and `tests/hooks.rs`) covers:
 
-- It refuses to sign when the CNS decision is forged, lacks a required seat, has a seat at the wrong position, or does not match the subject content. **Partly.** Covered: missing seat, wrong position, root mismatch, a decision about other content, and the shape checks the kernel's payload parser makes. Not covered: a forged but self-consistent decision, because the CNS proof cannot be checked outside CNS.
+- It refuses to sign when the CNS decision is forged, lacks a required seat, has a seat at the wrong position, or does not match the subject content. **Partly.** Covered: missing seat, wrong position, root mismatch, a decision about other content, and the shape checks the kernel's payload parser makes. A required `DecisionVerifier` hook is called for the rest; the crate ships only a refuse-all placeholder. Not covered: a forged but self-consistent decision, until a verifier backed by a channel to CNS exists.
 - It refuses requester-supplied digests that differ from the ones it derived. **By absence.** The request type has no digest field, so none can be supplied.
 - It never emits a wildcard scope or a lifetime above its configured maximum. **Yes** for scopes outside the configured roots and for a prefix on `/`; **yes** for the lifetime ceiling.
+- One decision cannot produce more than a configured number of capabilities. **Partly** (`max_per_decision`). It holds for one open log handle, across restarts, with concurrent callers. It does not hold if the log is rotated without carrying its history, or if a requester varies the decision root (only a verifier that accepts exactly CNS-produced roots stops that). It is per root, not per requester.
+- A requester is issued only what a policy allows. **Hook only:** a required `Authorizer` is called before signing; no real policy ships.
 - A rotation exercise with overlapping anchors leaves no window in which a valid capability is refused or a retired key is accepted. Not covered.
 - A revocation reaches the kernel within the stated bound, and an in-flight run for the revoked capability is cancelled. Not covered.
 - With the issuer stopped, an admission attempt fails and nothing runs. **Partly:** with the signer, entropy or log down, `issue` returns no capability. No service exists to stop.
