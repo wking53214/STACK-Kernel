@@ -14,12 +14,12 @@ stack-receipt = { path = "../stack-receipt" }
 stack-trident = { path = "../stack-trident" }
 serde_json.workspace = true
 hex.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 # TEST FIXTURE signer only. Nothing in src/ holds or derives a key.
 ed25519-dalek.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

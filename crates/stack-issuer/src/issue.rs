@@ -14,7 +14,7 @@ use stack_trident::canonical::to_canonical_bytes;
 use crate::config::{ConfigError, IssuerConfig};
 use crate::entropy::{Entropy, EntropyError};
 use crate::hooks::{AuthorizationRequest, Authorizer, DecisionVerifier};
-use crate::log::{IssuanceLog, IssuanceRecord, LogError};
+use crate::log::{AppendLimits, IssuanceLog, IssuanceRecord, LogError, ResetRecord};
 use crate::signer::{SignError, Signer};
 
 /// The most scopes one capability may carry. A small number on purpose: the
@@ -112,6 +112,18 @@ pub enum IssueError {
     /// This decision has already produced the most capabilities allowed.
     #[error("this decision has reached its issuance limit")]
     DecisionLimit,
+    /// This subject has already produced the most capabilities allowed.
+    #[error("this subject has reached its issuance limit")]
+    SubjectLimit,
+    /// The log holds the most distinct decisions allowed and this one is new.
+    #[error("the log holds the most distinct decisions allowed")]
+    DistinctDecisionsLimit,
+    /// The decision named in a reset has nothing to reset.
+    #[error("the decision has no issuances to reset")]
+    NothingToReset,
+    /// A reset was not well formed.
+    #[error("the reset is not well formed")]
+    BadReset,
     /// The kernel's policy has no such operation.
     #[error("unknown operation {0:?}")]
     UnknownOperation(String),
@@ -218,6 +230,27 @@ impl Issuer {
         Ok(Self { config, signer, entropy, log, clock, verifier, authorizer, last_ms: Mutex::new(0) })
     }
 
+    /// Re-allows one decision root: a deliberate, logged operator action. The reset is written
+    /// into the issuance log (so it survives a restart and is auditable), the root's count goes
+    /// back to zero, and what it had is taken off its subject's count. Returns the count it had.
+    ///
+    /// **Who may call this is the caller's job**: the issuer does not authenticate `operator`,
+    /// it only records it. A reset undoes a cap, so treat the ability to call it as you treat the
+    /// signing key.
+    pub fn reset_decision(&self, decision_root_hex: &str, operator: &str, reason: &str) -> Result<u32, IssueError> {
+        let reset = ResetRecord {
+            decision_root: decision_root_hex.to_owned(),
+            operator: operator.to_owned(),
+            reason: reason.to_owned(),
+            reset_at_ms: self.clock.now_unix_ms(),
+        };
+        self.log.reset_decision(&reset).map_err(|e| match e {
+            LogError::NothingToReset => IssueError::NothingToReset,
+            LogError::BadReset => IssueError::BadReset,
+            other => IssueError::Log(other),
+        })
+    }
+
     /// Issues one capability, or none. Order: refuse what must be refused (shape, scope,
     /// operation, lifetime, the kernel's own decision check), ask the authorizer, ask the
     /// verifier, refuse an exhausted decision, take randomness, read the clock, sign and
@@ -295,11 +328,19 @@ impl Issuer {
         self.verifier
             .verify(&subject_digest, &req.decision, &decision_root)
             .map_err(|r| IssueError::DecisionNotVerified(r.0))?;
-        // A non-binding look at the count, so an exhausted decision does not cost a signature.
+        // A non-binding look at the counts, so an exhausted request does not cost a signature.
         // The binding check is the log's `append`.
         let root_hex = decision_root.to_hex();
-        if self.log.issued_for_decision(&root_hex).map_err(IssueError::Log)? >= self.config.max_per_decision {
+        let subject_hex = subject_digest.to_hex();
+        let used = self.log.usage(&root_hex, &subject_hex).map_err(IssueError::Log)?;
+        if used.decision >= self.config.caps.per_decision {
             return Err(IssueError::DecisionLimit);
+        }
+        if used.subject >= self.config.caps.per_subject {
+            return Err(IssueError::SubjectLimit);
+        }
+        if !used.decision_known && used.distinct_decisions >= self.config.caps.distinct_decisions {
+            return Err(IssueError::DistinctDecisionsLimit);
         }
 
         let mut nonce = [0u8; NONCE_BYTES];
@@ -371,8 +412,15 @@ impl Issuer {
             one_time: true,
             policy_ref: self.config.policy_ref.clone(),
         };
-        self.log.append(&record, self.config.max_per_decision).map_err(|e| match e {
+        let limits = AppendLimits {
+            per_decision: self.config.caps.per_decision,
+            per_subject: self.config.caps.per_subject,
+            distinct_decisions: self.config.caps.distinct_decisions,
+        };
+        self.log.append(&record, &limits).map_err(|e| match e {
             LogError::DecisionLimit => IssueError::DecisionLimit,
+            LogError::SubjectLimit => IssueError::SubjectLimit,
+            LogError::DistinctDecisionsLimit => IssueError::DistinctDecisionsLimit,
             other => IssueError::Log(other),
         })?;
         if let Ok(mut last) = self.last_ms.lock() {

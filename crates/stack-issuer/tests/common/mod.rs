@@ -17,7 +17,7 @@ use stack_authority::{
     SIGNATURE_BYTES,
 };
 use stack_issuer::{
-    AuthorizationRequest, Authorizer, ConfigError, DecisionVerifier, Entropy, EntropyError, IssuanceLog, IssuanceRecord, Issuer,
+    AppendLimits, AuthorizationRequest, Authorizer, ConfigError, DecisionVerifier, IssuanceCaps, ResetRecord, Usage, Entropy, EntropyError, IssuanceLog, IssuanceRecord, Issuer,
     IssuerConfig, LogError, Refusal, SignError, Signer,
 };
 use stack_receipt::Provenance;
@@ -65,21 +65,25 @@ pub const ROOTS: &[&str] = &["/data"];
 /// High, so the tests that issue many capabilities for one decision are not limited.
 pub const MAX_PER_DECISION: u32 = 1000;
 
+/// Generous caps, so the tests that issue many capabilities for one decision are not limited.
+pub fn default_caps() -> IssuanceCaps {
+    IssuanceCaps { per_decision: MAX_PER_DECISION, per_subject: MAX_PER_DECISION, distinct_decisions: MAX_PER_DECISION }
+}
+
+pub fn lim(per_decision: u32) -> AppendLimits {
+    AppendLimits { per_decision, per_subject: MAX_PER_DECISION, distinct_decisions: MAX_PER_DECISION }
+}
+
 pub fn issuer_config() -> IssuerConfig {
-    config_with_limit(MAX_PER_DECISION)
+    config_with_caps(default_caps())
 }
 
 pub fn config_with_limit(max_per_decision: u32) -> IssuerConfig {
-    IssuerConfig::from_kernel_policy(
-        &kernel_policy(),
-        ISSUER,
-        POLICY_REF,
-        canonical_limits(),
-        MAX_LIFETIME_MS,
-        ROOTS,
-        max_per_decision,
-    )
-    .unwrap()
+    config_with_caps(IssuanceCaps { per_decision: max_per_decision, ..default_caps() })
+}
+
+pub fn config_with_caps(caps: IssuanceCaps) -> IssuerConfig {
+    IssuerConfig::from_kernel_policy(&kernel_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, caps).unwrap()
 }
 
 // ---- fixture signer -------------------------------------------------------
@@ -161,6 +165,8 @@ pub struct SharedLog {
     pub records: Arc<Mutex<Vec<IssuanceRecord>>>,
     pub fail: Arc<Mutex<bool>>,
     pub not_durable: Arc<Mutex<bool>>,
+    /// (decision root, count cleared) for each reset.
+    pub resets: Arc<Mutex<Vec<(String, u32)>>>,
 }
 
 impl SharedLog {
@@ -176,20 +182,47 @@ impl IssuanceLog for SharedLog {
     fn is_durable(&self) -> bool {
         !*self.not_durable.lock().unwrap()
     }
-    fn issued_for_decision(&self, decision_root: &str) -> Result<u32, LogError> {
-        Ok(self.records.lock().unwrap().iter().filter(|r| r.decision_root == decision_root).count() as u32)
+    fn usage(&self, decision_root: &str, subject_digest: &str) -> Result<Usage, LogError> {
+        let records = self.records.lock().unwrap();
+        let mut roots: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
+        for r in records.iter() {
+            *roots.entry(r.decision_root.as_str()).or_insert(0) += 1;
+        }
+        let resets = self.resets.lock().unwrap();
+        let reset_of = |root: &str| resets.iter().filter(|(r, _)| r == root).map(|(_, n)| *n).sum::<u32>();
+        let decision = roots.get(decision_root).copied().unwrap_or(0).saturating_sub(reset_of(decision_root));
+        let subject = records.iter().filter(|r| r.subject_digest == subject_digest).count() as u32
+            - resets
+                .iter()
+                .filter(|(root, _)| records.iter().any(|r| &r.decision_root == root && r.subject_digest == subject_digest))
+                .map(|(_, n)| *n)
+                .sum::<u32>();
+        Ok(Usage { decision, decision_known: roots.contains_key(decision_root), subject, distinct_decisions: roots.len() as u32 })
     }
-    fn append(&self, record: &IssuanceRecord, max_per_decision: u32) -> Result<(), LogError> {
+    fn append(&self, record: &IssuanceRecord, limits: &AppendLimits) -> Result<(), LogError> {
         if *self.fail.lock().unwrap() {
             return Err(LogError::Unavailable("fixture log offline".into()));
         }
-        let mut records = self.records.lock().unwrap();
-        let same = records.iter().filter(|r| r.decision_root == record.decision_root).count();
-        if same >= max_per_decision as usize {
+        let used = self.usage(&record.decision_root, &record.subject_digest)?;
+        if used.decision >= limits.per_decision {
             return Err(LogError::DecisionLimit);
         }
-        records.push(record.clone());
+        if used.subject >= limits.per_subject {
+            return Err(LogError::SubjectLimit);
+        }
+        if !used.decision_known && used.distinct_decisions >= limits.distinct_decisions {
+            return Err(LogError::DistinctDecisionsLimit);
+        }
+        self.records.lock().unwrap().push(record.clone());
         Ok(())
+    }
+    fn reset_decision(&self, reset: &ResetRecord) -> Result<u32, LogError> {
+        let used = self.usage(&reset.decision_root, "")?;
+        if used.decision == 0 {
+            return Err(LogError::NothingToReset);
+        }
+        self.resets.lock().unwrap().push((reset.decision_root.clone(), used.decision));
+        Ok(used.decision)
     }
 }
 
@@ -347,7 +380,11 @@ impl Drop for TempDir {
 
 /// A well-formed issuance record line (with its newline) for a decision root.
 pub fn record_line(root_byte: u8) -> String {
-    format!("{{\"cap_id\":\"cap-x\",\"decision_root\":\"{}\"}}\n", hex::encode([root_byte; 32]))
+    format!(
+        "{{\"cap_id\":\"cap-x\",\"decision_root\":\"{}\",\"subject_digest\":\"{}\"}}\n",
+        hex::encode([root_byte; 32]),
+        hex::encode([root_byte; 32])
+    )
 }
 
 /// A clock that counts its readings.

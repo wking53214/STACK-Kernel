@@ -135,7 +135,7 @@ fn more_than_the_most_scopes_is_refused_and_exactly_the_most_is_not() {
 #[test]
 fn the_roots_must_be_stated_and_may_not_be_the_whole_tree() {
     let p = kernel_policy();
-    let make = |roots: &[&str]| IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, roots, MAX_PER_DECISION);
+    let make = |roots: &[&str]| IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, roots, default_caps());
     assert!(matches!(make(&[]), Err(ConfigError::Roots)));
     assert!(matches!(make(&["/"]), Err(ConfigError::Roots)));
     assert!(matches!(make(&["/a/../b"]), Err(ConfigError::Roots)));
@@ -170,7 +170,7 @@ fn the_record_carries_every_field_it_names() {
     let b = cap.capability().binding.clone().unwrap();
     let r = log.records.lock().unwrap()[0].clone();
     assert_eq!(r.issuer_id, ISSUER);
-    assert_eq!(r.policy_ref, POLICY_REF);
+    assert_eq!(r.policy_ref, issuer_config().policy_ref());
     assert_eq!(r.key_id, public_key(ISSUER).key_id().to_hex());
     assert_eq!(r.args_digest, b.args_digest.to_hex());
     assert_eq!(r.worker, b.worker);
@@ -245,7 +245,7 @@ fn refusing_args_policy() -> KernelPolicy {
 fn a_kernel_that_refuses_arguments_gets_no_capability_for_arguments() {
     let case = case("all_pass");
     let log = SharedLog::default();
-    let config = IssuerConfig::from_kernel_policy(&refusing_args_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, MAX_PER_DECISION).unwrap();
+    let config = IssuerConfig::from_kernel_policy(&refusing_args_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, default_caps()).unwrap();
     let issuer = new_issuer(config, FixtureSigner::honest(ISSUER), CounterEntropy::default(), log.clone(), ManualClock::new(T0),
     )
     .unwrap();
@@ -375,7 +375,7 @@ fn a_clock_that_goes_backwards_between_issuances_is_refused() {
 #[test]
 fn a_policy_that_neither_refuses_arguments_nor_requires_a_binding_is_refused() {
     let p = KernelPolicy { refuse_arguments: false, require_execution_binding: false, ..kernel_policy() };
-    let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, MAX_PER_DECISION);
+    let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, default_caps());
     assert!(matches!(r, Err(ConfigError::UnsafePolicyPair)));
 }
 
@@ -405,8 +405,8 @@ fn after_a_failed_write_the_file_log_refuses_every_later_append_until_reopened()
     // /dev/null accepts the open and the write, and refuses to flush it (EINVAL): a write that
     // did not become durable.
     let log = FileIssuanceLog::open(std::path::Path::new("/dev/null")).unwrap();
-    assert!(log.append(&record, 10).is_err());
-    let second = log.append(&record, 10).unwrap_err().to_string();
+    assert!(log.append(&record, &lim(10)).is_err());
+    let second = log.append(&record, &lim(10)).unwrap_err().to_string();
     assert!(second.contains("earlier write failed"), "{second}");
 }
 
@@ -443,7 +443,7 @@ fn the_failed_write_latch_holds_under_concurrent_appends() {
                 let (log, barrier, record) = (log.clone(), barrier.clone(), record.clone());
                 std::thread::spawn(move || {
                     barrier.wait();
-                    log.append(&record, 1000).unwrap_err().to_string()
+                    log.append(&record, &lim(1000)).unwrap_err().to_string()
                 })
             })
             .collect();
@@ -468,7 +468,7 @@ fn a_seat_name_that_is_empty_too_long_or_holds_a_control_character_is_refused() 
 #[test]
 fn issuer_id_and_policy_ref_are_checked_at_configuration() {
     let p = kernel_policy();
-    let make = |id: &str, pref: &str| IssuerConfig::from_kernel_policy(&p, id, pref, canonical_limits(), MAX_LIFETIME_MS, ROOTS, MAX_PER_DECISION);
+    let make = |id: &str, pref: &str| IssuerConfig::from_kernel_policy(&p, id, pref, canonical_limits(), MAX_LIFETIME_MS, ROOTS, default_caps());
     assert!(matches!(make("", POLICY_REF), Err(ConfigError::Text("issuer_id"))));
     assert!(matches!(make("bad\nid", POLICY_REF), Err(ConfigError::Text("issuer_id"))));
     assert!(matches!(make(&"x".repeat(129), POLICY_REF), Err(ConfigError::Text("issuer_id"))));

@@ -65,7 +65,7 @@ fn every_bound_field_is_the_one_the_issuer_derived_not_one_the_requester_sent() 
     let policy = kernel_policy();
     assert_eq!(cap.audience, policy.audience);
     assert_eq!(cap.issuer_id, ISSUER);
-    assert_eq!(cap.policy_ref, POLICY_REF);
+    assert_eq!(cap.policy_ref, issuer_config().policy_ref());
     assert_eq!(cap.subject_digest, Digest32::from_hex(case["subject_digest"].as_str().unwrap()).unwrap());
     assert_eq!(cap.decision_root, Digest32::from_hex(case["root"].as_str().unwrap()).unwrap());
     assert_eq!(cap.operations, vec!["echo".to_owned()]);
@@ -287,8 +287,8 @@ fn the_config_refuses_a_lifetime_ceiling_beyond_what_a_verifier_accepts() {
     use stack_issuer::{ConfigError, IssuerConfig};
     let p = kernel_policy();
     for bad in [0, 24 * HOUR + 1] {
-        let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), bad, ROOTS, MAX_PER_DECISION);
+        let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), bad, ROOTS, default_caps());
         assert!(matches!(r, Err(ConfigError::MaxLifetime)), "{bad}");
     }
-    assert!(IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), 24 * HOUR, ROOTS, MAX_PER_DECISION).is_ok());
+    assert!(IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), 24 * HOUR, ROOTS, default_caps()).is_ok());
 }

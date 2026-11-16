@@ -20,9 +20,10 @@
 //! * Two hooks have no default: a [`DecisionVerifier`] (is the CNS decision real?) and an
 //!   [`Authorizer`] (may this requester be issued this?). The crate ships only refusing
 //!   placeholders.
-//! * One decision root may produce at most a configured number of capabilities, counted in
-//!   the issuance log so the count survives a restart. The count covers the records the log
-//!   knows about: rotating the log without carrying its history resets it.
+//! * Three caps, counted in the issuance log so they survive a restart: capabilities per decision
+//!   root, per subject digest, and the number of distinct decision roots. They cover the records
+//!   the log knows about: rotating the log without carrying its history resets them. An operator
+//!   can re-allow one decision with a logged reset.
 //! * It appends an [`IssuanceRecord`] to an [`IssuanceLog`] *before* it returns
 //!   the capability. If the record cannot be written, no capability is returned.
 //!
@@ -40,9 +41,11 @@ mod issue;
 mod log;
 mod signer;
 
-pub use config::{ConfigError, IssuerConfig, MAX_LIFETIME_CEILING_MS};
+pub use config::{ConfigError, IssuanceCaps, IssuerConfig, MAX_LIFETIME_CEILING_MS};
 pub use entropy::{Entropy, EntropyError, OsEntropy};
 pub use hooks::{AuthorizationRequest, Authorizer, DecisionVerifier, DenyAllRequests, RefuseAllDecisions, Refusal};
 pub use issue::{IssuanceRequest, IssueError, Issued, Issuer, MAX_RESOURCES_PER_CAPABILITY};
-pub use log::{FileIssuanceLog, IssuanceLog, IssuanceRecord, LogError, MAX_RECORD_LINE_BYTES};
+pub use log::{
+    AppendLimits, FileIssuanceLog, IssuanceLog, IssuanceRecord, LogError, ResetRecord, Usage, MAX_RECORD_LINE_BYTES,
+};
 pub use signer::{SignError, Signer};
