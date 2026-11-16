@@ -71,13 +71,13 @@ fn a_log_renamed_while_open_stops_accepting_appends() {
     let (path, moved) = (dir.file("issuance.jsonl"), dir.file("moved.jsonl"));
     let log = FileIssuanceLog::open(&path).unwrap();
     let root = "ab".repeat(32);
-    log.append(&record_for(&root), 5).unwrap();
+    log.append(&record_for(&root), &lim(5)).unwrap();
     std::fs::rename(&path, &moved).unwrap();
-    let e = log.append(&record_for(&root), 5).unwrap_err().to_string();
+    let e = log.append(&record_for(&root), &lim(5)).unwrap_err().to_string();
     assert!(e.contains("renamed, replaced or removed"), "{e}");
     // The handle stays latched, even if the path comes back.
     std::fs::copy(&moved, &path).unwrap();
-    assert!(log.append(&record_for(&root), 5).is_err());
+    assert!(log.append(&record_for(&root), &lim(5)).is_err());
 }
 
 #[cfg(unix)]
@@ -87,13 +87,13 @@ fn a_log_removed_or_replaced_while_open_stops_accepting_appends() {
     let path = dir.file("issuance.jsonl");
     let log = FileIssuanceLog::open(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    assert!(log.append(&record_for(&"ab".repeat(32)), 5).is_err(), "removed");
+    assert!(log.append(&record_for(&"ab".repeat(32)), &lim(5)).is_err(), "removed");
     let dir2 = TempDir::new("replace");
     let path2 = dir2.file("issuance.jsonl");
     let log2 = FileIssuanceLog::open(&path2).unwrap();
     std::fs::remove_file(&path2).unwrap();
     std::fs::write(&path2, b"").unwrap();
-    assert!(log2.append(&record_for(&"cd".repeat(32)), 5).is_err(), "replaced by another file");
+    assert!(log2.append(&record_for(&"cd".repeat(32)), &lim(5)).is_err(), "replaced by another file");
 }
 
 // ---- F2: history segments are read under a shared lock and checked ----------------
@@ -137,8 +137,9 @@ fn several_history_segments_and_the_live_file_all_count() {
     std::fs::write(&b, format!("{}{}", record_line(7), record_line(8))).unwrap();
     std::fs::write(&live, record_line(7)).unwrap();
     let log = FileIssuanceLog::open_with_history(&live, &[a.as_path(), b.as_path()]).unwrap();
-    assert_eq!(log.issued_for_decision(&hex::encode([7u8; 32])).unwrap(), 3, "a + b + live");
-    assert_eq!(log.issued_for_decision(&hex::encode([8u8; 32])).unwrap(), 1);
+    let (seven, eight) = (hex::encode([7u8; 32]), hex::encode([8u8; 32]));
+    assert_eq!(log.usage(&seven, &seven).unwrap().decision, 3, "a + b + live");
+    assert_eq!(log.usage(&eight, &eight).unwrap().decision, 1);
 }
 
 // ---- F3: a handle used by another process is latched (unit test in log.rs) ---------
@@ -210,13 +211,13 @@ fn a_record_the_log_could_not_read_back_is_refused_before_it_is_written() {
     let dir = TempDir::new("unreadable");
     let path = dir.file("issuance.jsonl");
     let log = FileIssuanceLog::open(&path).unwrap();
-    assert!(log.append(&record_for(&"AB".repeat(32)), 5).is_err(), "upper-case root");
-    assert!(log.append(&record_for("ab"), 5).is_err(), "short root");
+    assert!(log.append(&record_for(&"AB".repeat(32)), &lim(5)).is_err(), "upper-case root");
+    assert!(log.append(&record_for("ab"), &lim(5)).is_err(), "short root");
     let mut huge = record_for(&"ab".repeat(32));
     huge.requester = "x".repeat(MAX_RECORD_LINE_BYTES);
-    assert!(log.append(&huge, 5).is_err(), "over the line limit");
+    assert!(log.append(&huge, &lim(5)).is_err(), "over the line limit");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "nothing was written");
-    log.append(&record_for(&"ab".repeat(32)), 5).unwrap();
+    log.append(&record_for(&"ab".repeat(32)), &lim(5)).unwrap();
     drop(log);
     assert!(FileIssuanceLog::open(&path).is_ok(), "and the log reopens");
 }
@@ -345,7 +346,7 @@ fn the_file_log_writes_every_field_of_the_record_to_disk() {
         "expires_at_ms": T0 + 60_000,
         "issued_at_ms": T0,
         "one_time": true,
-        "policy_ref": POLICY_REF,
+        "policy_ref": issuer_config().policy_ref(),
     });
     for (k, v) in want.as_object().unwrap() {
         assert_eq!(&line[k], v, "{k}");
@@ -363,9 +364,9 @@ fn an_external_truncation_does_not_leave_a_hole_before_the_next_record() {
     let dir = TempDir::new("append");
     let path = dir.file("issuance.jsonl");
     let log = FileIssuanceLog::open(&path).unwrap();
-    log.append(&record_for(&"ab".repeat(32)), 9).unwrap();
+    log.append(&record_for(&"ab".repeat(32)), &lim(9)).unwrap();
     std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(0).unwrap();
-    log.append(&record_for(&"cd".repeat(32)), 9).unwrap();
+    log.append(&record_for(&"cd".repeat(32)), &lim(9)).unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains('\0'), "the record was written at the old offset");
     assert_eq!(text.lines().count(), 1);
@@ -401,15 +402,17 @@ fn exact_length_limits_are_accepted_and_one_more_is_refused() {
 #[test]
 fn issuer_id_and_policy_ref_accept_their_exact_maximum() {
     let p = kernel_policy();
-    let make = |id: &str, pref: &str| IssuerConfig::from_kernel_policy(&p, id, pref, canonical_limits(), MAX_LIFETIME_MS, ROOTS, MAX_PER_DECISION);
+    let make = |id: &str, pref: &str| IssuerConfig::from_kernel_policy(&p, id, pref, canonical_limits(), MAX_LIFETIME_MS, ROOTS, default_caps());
     assert!(make(&"i".repeat(128), POLICY_REF).is_ok());
-    assert!(make(ISSUER, &"p".repeat(256)).is_ok());
+    // 184 bytes of caller text, plus `@sha256:` and a 64-character digest, is the 256 a capability allows.
+    assert!(make(ISSUER, &"p".repeat(184)).is_ok());
+    assert!(matches!(make(ISSUER, &"p".repeat(185)), Err(ConfigError::Text("policy_ref"))));
 }
 
 #[test]
 fn an_invalid_kernel_policy_is_refused_at_configuration() {
     let p = stack_admission::KernelPolicy { required_seats: vec![], ..kernel_policy() };
-    let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, MAX_PER_DECISION);
+    let r = IssuerConfig::from_kernel_policy(&p, ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, default_caps());
     assert!(matches!(r, Err(ConfigError::Policy(_))));
 }
 

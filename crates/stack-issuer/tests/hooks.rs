@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use stack_admission::execution_binding;
 use stack_authority::{ManualClock, ResourceScope, ScopeKind};
 use stack_issuer::{
-    ConfigError, DenyAllRequests, FileIssuanceLog, IssuanceLog, IssuanceRecord, IssuanceRequest, IssueError, Issuer,
-    IssuerConfig, RefuseAllDecisions, MAX_RECORD_LINE_BYTES,
+    ConfigError, DenyAllRequests, FileIssuanceLog, IssuanceCaps, IssuanceLog, IssuanceRecord, IssuanceRequest, IssueError,
+    Issuer, IssuerConfig, RefuseAllDecisions, MAX_RECORD_LINE_BYTES,
 };
 use stack_trident::canonical::to_canonical_bytes;
 
@@ -275,7 +275,7 @@ fn a_refusal_does_not_use_up_a_decisions_allowance() {
 
 #[test]
 fn a_limit_of_zero_is_a_configuration_error() {
-    let r = IssuerConfig::from_kernel_policy(&kernel_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, 0);
+    let r = IssuerConfig::from_kernel_policy(&kernel_policy(), ISSUER, POLICY_REF, canonical_limits(), MAX_LIFETIME_MS, ROOTS, IssuanceCaps { per_decision: 0, ..default_caps() });
     assert!(matches!(r, Err(ConfigError::DecisionLimit)));
 }
 
@@ -364,7 +364,7 @@ fn the_limit_is_exact_under_concurrent_appends_to_the_real_file_log() {
                 let (log, barrier, root) = (log.clone(), barrier.clone(), root.clone());
                 std::thread::spawn(move || {
                     barrier.wait();
-                    log.append(&record_for(&root), 3).is_ok()
+                    log.append(&record_for(&root), &lim(3)).is_ok()
                 })
             })
             .collect();
@@ -400,7 +400,7 @@ fn the_limit_is_exact_under_concurrent_issuance_through_the_real_file_log() {
 fn a_log_line_is_accepted_up_to_the_line_limit_and_refused_one_byte_past_it() {
     let dir = TempDir::new("linelimit");
     let path = dir.file("issuance.jsonl");
-    let head = format!("{{\"cap_id\":\"c\",\"decision_root\":\"{}\",\"pad\":\"", "ab".repeat(32));
+    let head = format!("{{\"cap_id\":\"c\",\"decision_root\":\"{0}\",\"subject_digest\":\"{0}\",\"pad\":\"", "ab".repeat(32));
     let tail = "\"}";
     let make = |len: usize| {
         let pad = len - head.len() - tail.len();
@@ -424,6 +424,9 @@ fn a_log_far_larger_than_one_line_opens_by_streaming() {
     }
     std::fs::write(&path, body).unwrap();
     let log = FileIssuanceLog::open(&path).unwrap();
-    assert_eq!(log.issued_for_decision(&hex::encode([7u8; 32])).unwrap(), 3000);
-    assert_eq!(log.issued_for_decision(&hex::encode([8u8; 32])).unwrap(), 0);
+    let (seven, eight) = (hex::encode([7u8; 32]), hex::encode([8u8; 32]));
+    let u = log.usage(&seven, &seven).unwrap();
+    assert_eq!((u.decision, u.subject, u.distinct_decisions, u.decision_known), (3000, 3000, 1, true));
+    let u = log.usage(&eight, &eight).unwrap();
+    assert_eq!((u.decision, u.subject, u.decision_known), (0, 0, false));
 }

@@ -19,6 +19,18 @@ pub enum LogError {
     /// This decision root already has the most records allowed.
     #[error("decision issuance limit reached")]
     DecisionLimit,
+    /// This subject already has the most records allowed.
+    #[error("subject issuance limit reached")]
+    SubjectLimit,
+    /// The log already holds the most distinct decision roots allowed, and this one is new.
+    #[error("distinct decision limit reached")]
+    DistinctDecisionsLimit,
+    /// A reset was not well formed (bad root, operator or reason).
+    #[error("the reset is not well formed")]
+    BadReset,
+    /// A reset named a decision that has nothing to reset.
+    #[error("the decision has no issuances to reset")]
+    NothingToReset,
 }
 
 /// What an issuance leaves behind. Enough to reconcile against the use store
@@ -89,6 +101,62 @@ impl IssuanceRecord {
     }
 }
 
+/// The limits an append enforces, atomically with the write. All three are required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppendLimits {
+    /// The most records one decision root may have.
+    pub per_decision: u32,
+    /// The most records one subject digest may have, across all its decision roots.
+    pub per_subject: u32,
+    /// The most distinct decision roots the log may hold.
+    pub distinct_decisions: u32,
+}
+
+/// What the log already holds for a request, read before signing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    /// Records counted against the decision root.
+    pub decision: u32,
+    /// Whether the decision root is already in the log (a reset root still is).
+    pub decision_known: bool,
+    /// Records counted against the subject digest.
+    pub subject: u32,
+    /// Distinct decision roots in the log.
+    pub distinct_decisions: u32,
+}
+
+/// An operator's deliberate re-allowance of one decision root, written into the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetRecord {
+    /// The decision root to re-allow, 64 lowercase hex characters.
+    pub decision_root: String,
+    /// Who did it, as the caller named them. 1 to 128 bytes, no control character.
+    pub operator: String,
+    /// Why. 1 to 512 bytes, no control character.
+    pub reason: String,
+    /// When, by the issuer's clock.
+    pub reset_at_ms: u64,
+}
+
+impl ResetRecord {
+    fn valid(&self) -> bool {
+        let text = |s: &str, max: usize| !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control);
+        is_lower_hex_64(&self.decision_root) && text(&self.operator, 128) && text(&self.reason, 512)
+    }
+
+    /// One JSON object, one line. The `reset` key tells it from an issuance record.
+    pub fn to_json_line(&self) -> String {
+        json!({
+            "reset": true,
+            "decision_root": self.decision_root,
+            "operator": self.operator,
+            "reason": self.reason,
+            "reset_at_ms": self.reset_at_ms,
+        })
+        .to_string()
+    }
+}
+
 /// Where issuance records go. The issuer calls `append` before it returns a
 /// capability and returns none if `append` fails.
 ///
@@ -101,17 +169,20 @@ pub trait IssuanceLog: Send + Sync + fmt::Debug {
     /// Whether `append` is durable. The issuer refuses a log that says no, as
     /// the kernel refuses a store that is not durable.
     fn is_durable(&self) -> bool;
-    /// How many records already carry this decision root. A non-binding read the
-    /// issuer uses to refuse an exhausted decision before it asks the signer to
-    /// sign; the binding check is `append`.
-    fn issued_for_decision(&self, decision_root: &str) -> Result<u32, LogError>;
-    /// Atomically: if fewer than `max_per_decision` records already carry this
-    /// record's `decision_root`, durably records it; otherwise returns
-    /// [`LogError::DecisionLimit`] and records nothing. Two concurrent calls on
-    /// one log cannot both take the last slot. The guarantee covers the records
-    /// this log knows about: a second log over the same storage, or records that
+    /// What the log holds for this decision root and subject. A non-binding read the
+    /// issuer uses to refuse an exhausted request before it asks the signer to sign; the
+    /// binding check is `append`.
+    fn usage(&self, decision_root: &str, subject_digest: &str) -> Result<Usage, LogError>;
+    /// Atomically: check `limits` against the log, and if every one holds, durably record
+    /// `record`; otherwise return the matching limit error and record nothing. Two
+    /// concurrent calls on one log cannot both take the last slot. The guarantee covers the
+    /// records this log knows about: a second log over the same storage, or records that
     /// were moved elsewhere, are not counted unless the implementation says so.
-    fn append(&self, record: &IssuanceRecord, max_per_decision: u32) -> Result<(), LogError>;
+    fn append(&self, record: &IssuanceRecord, limits: &AppendLimits) -> Result<(), LogError>;
+    /// Durably records a reset and sets the decision root's count back to zero, subtracting
+    /// what it had from its subject's count. Returns the count it had. Fails with
+    /// [`LogError::NothingToReset`] if the root is unknown or already at zero.
+    fn reset_decision(&self, reset: &ResetRecord) -> Result<u32, LogError>;
 }
 
 /// The longest line `FileIssuanceLog` will read when it opens a file: 1 MiB. A record is
@@ -133,18 +204,21 @@ pub const MAX_RECORD_LINE_BYTES: usize = 1 << 20;
 ///   handle if not (Unix). The check is not atomic with the write. It does not help on
 ///   a network filesystem whose locks are client-local.
 /// * Opening reads the file once, line by line. It refuses an unterminated last line
-///   (a torn write: appending would fuse two records), an empty line, a line that is not
-///   a record (a JSON object with a string `cap_id` and a 64-character lowercase hex
-///   `decision_root`), invalid UTF-8, and a line over [`MAX_RECORD_LINE_BYTES`]. `append`
+///   (a torn write: appending would fuse two records), an empty line, a line that is neither
+///   an issuance record (a JSON object with a string `cap_id` and 64-character lowercase hex
+///   `decision_root` and `subject_digest`) nor a reset record, invalid UTF-8, a line over
+///   [`MAX_RECORD_LINE_BYTES`], and a reset of a decision that has no issuances. `append`
 ///   refuses to write a record that `open` would refuse.
 /// * It refuses a symlink, a FIFO and a socket. `is_durable` is true only for a regular
 ///   file, so `Issuer::new` refuses a log on a device.
-/// * The per-decision counts are rebuilt from the file. **Rotation resets them.** To
-///   rotate without re-arming spent decisions, open the new file with
-///   [`FileIssuanceLog::open_with_history`] and list every earlier segment. The old
+/// * The counts are rebuilt from the file. **Rotation resets them.** To rotate without
+///   re-arming spent decisions, open the new file with
+///   [`FileIssuanceLog::open_with_history`] and list every earlier segment, **oldest
+///   first** (a reset in a later segment applies to the records before it). The old
 ///   issuer must be stopped first: history segments are read under a shared lock, so a
 ///   segment still held by a running issuer makes the open fail.
-/// * Counts and open time grow with the number of distinct decision roots ever logged.
+/// * Memory and open time grow with the number of distinct decision roots, which the
+///   `distinct_decisions` limit bounds for new roots.
 /// * After a failed write or flush the handle refuses every later append until it is
 ///   reopened after the log is repaired.
 /// * It is not tamper-evident (no hash chain, no signature), and the directory entry is
@@ -154,12 +228,45 @@ pub struct FileIssuanceLog {
     durable: bool,
 }
 
+#[derive(Default)]
+struct Tally {
+    /// Per decision root: how many records, and the subject they were issued for.
+    roots: HashMap<String, (u32, String)>,
+    /// Per subject: how many records, across its decision roots.
+    subjects: HashMap<String, u32>,
+}
+
+impl Tally {
+    fn issue(&mut self, root: &str, subject: &str) {
+        let entry = self.roots.entry(root.to_owned()).or_insert_with(|| (0, subject.to_owned()));
+        entry.0 = entry.0.saturating_add(1);
+        let s = self.subjects.entry(subject.to_owned()).or_insert(0);
+        *s = s.saturating_add(1);
+    }
+
+    /// The count a reset would clear, or `None` if there is nothing to reset.
+    fn resettable(&self, root: &str) -> Option<u32> {
+        self.roots.get(root).map(|(n, _)| *n).filter(|n| *n > 0)
+    }
+
+    fn reset(&mut self, root: &str) -> Option<u32> {
+        let (n, subject) = self.roots.get_mut(root).map(|(n, s)| (std::mem::take(n), s.clone()))?;
+        if n == 0 {
+            return None;
+        }
+        if let Some(s) = self.subjects.get_mut(&subject) {
+            *s = s.saturating_sub(n);
+        }
+        Some(n)
+    }
+}
+
 struct FileInner {
     file: File,
     path: PathBuf,
     pid: u32,
     ident: Option<(u64, u64)>,
-    counts: HashMap<String, u32>,
+    tally: Tally,
     failed: bool,
 }
 
@@ -187,8 +294,8 @@ fn ident(meta: &Metadata) -> Option<(u64, u64)> {
     }
 }
 
-/// Counts the decisions in `reader`, line by line, adding to `counts`.
-fn count_into(reader: impl Read, counts: &mut HashMap<String, u32>, name: &str) -> Result<(), LogError> {
+/// Reads `reader` line by line into `tally`.
+fn count_into(reader: impl Read, tally: &mut Tally, name: &str) -> Result<(), LogError> {
     let bad = |msg: String| LogError::Unavailable(format!("{name}: {msg}"));
     let mut reader = BufReader::new(reader);
     let mut buf = Vec::new();
@@ -215,14 +322,22 @@ fn count_into(reader: impl Read, counts: &mut HashMap<String, u32>, name: &str) 
         let line = std::str::from_utf8(&buf).map_err(|_| bad(format!("line {n} is not valid UTF-8")))?;
         let value: serde_json::Value =
             serde_json::from_str(line).map_err(|_| bad(format!("line {n} is not an issuance record")))?;
-        let root = value
-            .get("decision_root")
-            .and_then(serde_json::Value::as_str)
-            .filter(|r| is_lower_hex_64(r))
-            .filter(|_| value.get("cap_id").is_some_and(serde_json::Value::is_string))
+        let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        let hex64 = |key: &str| text(key).filter(|r| is_lower_hex_64(r));
+        if value.get("reset").is_some() {
+            let ok = value.get("reset") == Some(&serde_json::Value::Bool(true))
+                && text("operator").is_some()
+                && text("reason").is_some()
+                && value.get("reset_at_ms").is_some_and(serde_json::Value::is_u64);
+            let root = hex64("decision_root").filter(|_| ok).ok_or_else(|| bad(format!("line {n} is not a reset record")))?;
+            tally.reset(root).ok_or_else(|| bad(format!("line {n} resets a decision that has no issuances")))?;
+            continue;
+        }
+        let (root, subject) = hex64("decision_root")
+            .zip(hex64("subject_digest"))
+            .filter(|_| text("cap_id").is_some())
             .ok_or_else(|| bad(format!("line {n} is not an issuance record")))?;
-        let c = counts.entry(root.to_owned()).or_insert(0);
-        *c = c.saturating_add(1);
+        tally.issue(root, subject);
     }
 }
 
@@ -245,12 +360,12 @@ impl FileIssuanceLog {
 
     /// Like [`FileIssuanceLog::open`], and also counts the records in each earlier
     /// segment listed in `history`, so that rotating the log does not give a spent
-    /// decision a fresh allowance. List every segment you have kept, once each. Every
-    /// segment must be a regular file, must not be the live file, and must not be held
-    /// by a running issuer (it is read under a shared lock). The segments are checked
-    /// before the live file is created.
+    /// decision a fresh allowance. List every segment you have kept, once each, **oldest
+    /// first**. Every segment must be a regular file, must not be the live file, and must
+    /// not be held by a running issuer (it is read under a shared lock). The segments are
+    /// checked before the live file is created.
     pub fn open_with_history(path: &Path, history: &[&Path]) -> Result<Self, LogError> {
-        let mut counts: HashMap<String, u32> = HashMap::new();
+        let mut tally = Tally::default();
         let mut seen: HashSet<(u64, u64)> = HashSet::new();
         for segment in history {
             let name = segment.display().to_string();
@@ -265,7 +380,7 @@ impl FileIssuanceLog {
                 }
             }
             f.try_lock_shared().map_err(|e| lock_error(e, &name))?;
-            count_into(&f, &mut counts, &name)?;
+            count_into(&f, &mut tally, &name)?;
         }
 
         if let Ok(meta) = std::fs::symlink_metadata(path) {
@@ -296,18 +411,51 @@ impl FileIssuanceLog {
             return Err(LogError::Unavailable("the live log is also listed as a history segment".into()));
         }
         // The same handle is read and then appended to, so the file counted is the file written.
-        count_into(&file, &mut counts, &path.display().to_string())?;
+        count_into(&file, &mut tally, &path.display().to_string())?;
         Ok(Self {
             inner: Mutex::new(FileInner {
                 file,
                 path: path.to_owned(),
                 pid: std::process::id(),
                 ident: id,
-                counts,
+                tally,
                 failed: false,
             }),
             durable: meta.is_file(),
         })
+    }
+}
+
+impl FileInner {
+    /// The checks every write makes first: not latched, same process, same file.
+    fn ready(&mut self) -> Result<(), LogError> {
+        // Checked under the lock, so a thread that was waiting cannot write after another failed.
+        if self.failed {
+            return Err(LogError::Unavailable("an earlier write failed; reopen after repairing the log".into()));
+        }
+        if self.pid != std::process::id() {
+            self.failed = true;
+            return Err(LogError::Unavailable("the log handle is being used by a forked process".into()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let same = std::fs::metadata(&self.path).is_ok_and(|m| ident(&m) == self.ident && m.nlink() > 0);
+            if !same {
+                self.failed = true;
+                return Err(LogError::Unavailable("the log file was renamed, replaced or removed while open".into()));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_line(&mut self, mut line: String) -> Result<(), LogError> {
+        line.push('\n');
+        if let Err(e) = self.file.write_all(line.as_bytes()).and_then(|()| self.file.sync_all()) {
+            self.failed = true;
+            return Err(LogError::Unavailable(e.to_string()));
+        }
+        Ok(())
     }
 }
 
@@ -316,52 +464,61 @@ impl IssuanceLog for FileIssuanceLog {
         self.durable
     }
 
-    fn issued_for_decision(&self, decision_root: &str) -> Result<u32, LogError> {
+    fn usage(&self, decision_root: &str, subject_digest: &str) -> Result<Usage, LogError> {
         let inner = self.inner.lock().map_err(|_| LogError::Unavailable("log lock poisoned".into()))?;
-        Ok(inner.counts.get(decision_root).copied().unwrap_or(0))
+        let known = inner.tally.roots.get(decision_root);
+        Ok(Usage {
+            decision: known.map_or(0, |(n, _)| *n),
+            decision_known: known.is_some(),
+            subject: inner.tally.subjects.get(subject_digest).copied().unwrap_or(0),
+            distinct_decisions: u32::try_from(inner.tally.roots.len()).unwrap_or(u32::MAX),
+        })
     }
 
-    fn append(&self, record: &IssuanceRecord, max_per_decision: u32) -> Result<(), LogError> {
+    fn append(&self, record: &IssuanceRecord, limits: &AppendLimits) -> Result<(), LogError> {
         // Refuse a record `open` would refuse, before anything is written.
-        let mut line = record.to_json_line();
-        if !is_lower_hex_64(&record.decision_root) || line.len() > MAX_RECORD_LINE_BYTES {
+        let line = record.to_json_line();
+        if !is_lower_hex_64(&record.decision_root) || !is_lower_hex_64(&record.subject_digest) || line.len() > MAX_RECORD_LINE_BYTES {
             return Err(LogError::Unavailable("the record would not be readable when the log is reopened".into()));
         }
-        line.push('\n');
         let mut inner = self.inner.lock().map_err(|_| LogError::Unavailable("log lock poisoned".into()))?;
-        // Checked under the lock, so a thread that was waiting cannot write after another failed.
-        if inner.failed {
-            return Err(LogError::Unavailable("an earlier write failed; reopen after repairing the log".into()));
-        }
-        if inner.pid != std::process::id() {
-            inner.failed = true;
-            return Err(LogError::Unavailable("the log handle is being used by a forked process".into()));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let same = std::fs::metadata(&inner.path).is_ok_and(|m| ident(&m) == inner.ident && m.nlink() > 0);
-            if !same {
-                inner.failed = true;
-                return Err(LogError::Unavailable("the log file was renamed, replaced or removed while open".into()));
-            }
-        }
-        if inner.counts.get(&record.decision_root).copied().unwrap_or(0) >= max_per_decision {
+        inner.ready()?;
+        let known = inner.tally.roots.get(&record.decision_root).map(|(n, _)| *n);
+        if known.unwrap_or(0) >= limits.per_decision {
             return Err(LogError::DecisionLimit);
         }
-        if let Err(e) = inner.file.write_all(line.as_bytes()).and_then(|()| inner.file.sync_all()) {
-            inner.failed = true;
-            return Err(LogError::Unavailable(e.to_string()));
+        if inner.tally.subjects.get(&record.subject_digest).copied().unwrap_or(0) >= limits.per_subject {
+            return Err(LogError::SubjectLimit);
         }
-        let c = inner.counts.entry(record.decision_root.clone()).or_insert(0);
-        *c = c.saturating_add(1);
+        if known.is_none() && inner.tally.roots.len() >= limits.distinct_decisions as usize {
+            return Err(LogError::DistinctDecisionsLimit);
+        }
+        inner.write_line(line)?;
+        inner.tally.issue(&record.decision_root, &record.subject_digest);
         Ok(())
+    }
+
+    fn reset_decision(&self, reset: &ResetRecord) -> Result<u32, LogError> {
+        if !reset.valid() {
+            return Err(LogError::BadReset);
+        }
+        let mut inner = self.inner.lock().map_err(|_| LogError::Unavailable("log lock poisoned".into()))?;
+        inner.ready()?;
+        if inner.tally.resettable(&reset.decision_root).is_none() {
+            return Err(LogError::NothingToReset);
+        }
+        inner.write_line(reset.to_json_line())?;
+        inner.tally.reset(&reset.decision_root).ok_or(LogError::NothingToReset)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn limits(n: u32) -> AppendLimits {
+        AppendLimits { per_decision: n, per_subject: 1000, distinct_decisions: 1000 }
+    }
 
     #[test]
     fn a_handle_used_by_a_process_that_did_not_open_it_is_latched() {
@@ -378,7 +535,7 @@ mod tests {
             issuer_id: String::new(),
             key_id: String::new(),
             requester: String::new(),
-            subject_digest: String::new(),
+            subject_digest: "cd".repeat(32),
             decision_root: "ab".repeat(32),
             operation: String::new(),
             args_digest: String::new(),
@@ -391,7 +548,7 @@ mod tests {
             one_time: true,
             policy_ref: String::new(),
         };
-        let e = log.append(&record, 5).unwrap_err().to_string();
+        let e = log.append(&record, &limits(5)).unwrap_err().to_string();
         assert!(e.contains("forked"), "{e}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         drop(log);
