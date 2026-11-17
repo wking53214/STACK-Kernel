@@ -2,7 +2,7 @@
 
 A capability issuer, as a library. It makes the `stack-capability/2` capabilities the kernel verifies. It holds no key, runs no service, and decides nothing about where it is deployed.
 
-Status: library and tests. There is no service wrapper, no production signer, no requester authentication, no real decision verifier and no real authorization policy. Two hooks that a deployment must supply are required by the type system, and only refusing placeholders ship. See "What this does not do" before relying on it.
+Status: library and tests. There is no service wrapper, no production signer, no requester authentication, no real authorization policy, and no CNS side that produces decision receipts. A receipt verifier (`CnsReceiptVerifier`) exists and is tested, but it has nothing to verify until CNS signs receipts. Two hooks that a deployment must supply are required by the type system, and only refusing placeholders ship. See "What this does not do" before relying on it.
 
 ## What it does
 
@@ -31,10 +31,10 @@ Every capability it issues is one-time and version 2.
 
 ## The two required hooks and the per-decision cap
 
-`Issuer::new` takes a `DecisionVerifier` and an `Authorizer`. Neither has a default and the crate ships nothing that allows anything: `RefuseAllDecisions` and `DenyAllRequests` refuse everything, so an issuer built with them issues nothing.
+`Issuer::new` takes a `DecisionVerifier` and an `Authorizer`. Neither has a default. `RefuseAllDecisions` and `DenyAllRequests` refuse everything, so an issuer built with them issues nothing; `CnsReceiptVerifier` allows only a decision with a valid, unexpired receipt signed by a pinned CNS key, and no authorization policy ships that allows anything.
 
 - `Authorizer::authorize(requester, operation, scopes, lifetime, args_digest, subject_digest, decision_root)`: may this requester be issued this? A passing CNS decision is about a subject, not about an operation or a requester. It runs first: it is cheap local policy.
-- `DecisionVerifier::verify(subject_digest, decision, decision_root)`: is this CNS decision genuine? The issuer cannot tell by itself (the CNS proof is an HMAC local to CNS). It runs second, because it is probably a call to CNS, so a requester the policy refuses costs no lookup.
+- `DecisionVerifier::verify_with_receipt(subject_digest, decision, decision_root, receipt)` (default: ignore the receipt and call `verify(subject_digest, decision, decision_root)`): is this CNS decision genuine? The issuer cannot tell by itself (the CNS proof is an HMAC local to CNS). It runs second, because it is probably a call to CNS, so a requester the policy refuses costs no lookup.
 
 Both run before the issuer takes entropy, reads the clock or asks the signer for anything, and after the issuer's own structural checks, with the values it recomputed. A refusal from either means no capability, no log record and no cap slot. Hooks are called concurrently, may be called for a request that is refused later, have no timeout, and report only a refusal text (an outage and a forged decision look the same). Do not forward that text to a requester: error text can name roster seats and internal policy. A hook that holds a key must not derive `Debug` over it.
 
@@ -67,7 +67,7 @@ Both run before the issuer takes entropy, reads the clock or asks the signer for
 
 ## Tests
 
-109 tests: `tests/issue.rs` (18), `tests/hardening.rs` (27), `tests/hooks.rs` (21), `tests/review6.rs` (22), `tests/caps.rs` (20) and one unit test in `src/log.rs` (the fork check). The verifier in the end-to-end issue test is the real `stack_authority::Authority`, the CNS decision is a case the real SuperGate produced (the admission crate's fixture), and keys, hooks and the in-memory log are test fixtures, named as such. The cap and file-log behaviour is tested against the real `FileIssuanceLog`.
+132 tests: `tests/receipt.rs` (23, see "CNS decision receipts"), `tests/issue.rs` (18), `tests/hardening.rs` (27), `tests/hooks.rs` (21), `tests/review6.rs` (22), `tests/caps.rs` (20) and one unit test in `src/log.rs` (the fork check). The verifier in the end-to-end issue test is the real `stack_authority::Authority`, the CNS decision is a case the real SuperGate produced (the admission crate's fixture), and keys, hooks and the in-memory log are test fixtures, named as such. The cap and file-log behaviour is tested against the real `FileIssuanceLog`.
 
 Mutation checks. Four independent reviews each found that my tests were weaker than I had said, so the figures are given with their history:
 - The first nine mutations were caught by the first 18 tests. Review 4 then found eleven more that survived; `hardening.rs` pins them.
@@ -78,9 +78,17 @@ Mutation checks. Four independent reviews each found that my tests were weaker t
 
 The reviewer also ran an end-to-end test through the real `Admission` and worker in a scratch copy and it passed; that test is not in this repository, because it needs a dev-dependency cycle with `stack-admission`.
 
+## CNS decision receipts
+
+`CnsReceiptVerifier` is a `DecisionVerifier` that requires a receipt: a 193-byte fixed-length statement, signed by a CNS key the deployment pins, that CNS decided this root about this subject between two times. Call `Issuer::issue_with_receipt(request, Some(&receipt))`. `Issuer::issue(request)` passes no receipt, so this verifier refuses it.
+
+The verifier checks, in this order: length, version, that the key id is pinned, the strict Ed25519 signature (the contents are not believed before it verifies), the key's window (it must cover now and the time the receipt was issued; pin the new key before the old one retires, with overlapping windows), that subject and root equal the values the issuer recomputed, that the life is positive and no longer than the verifier allows (at most 24 hours; set it to minutes), that the receipt is not from the future beyond a skew of at most 5 minutes, and that it has not expired. The signature covers a domain label (`stack-issuer/cns-decision-receipt/1`) and every other byte. The full layout is in `src/receipt.rs`; a receipt built independently in Python is a known-answer test.
+
+What it does not do: a compromised CNS key signs anything; the nonce is recorded, not checked, so one receipt can back several requests inside its life (the per-decision and per-subject caps bound that); the receipt is not in the issuance log record (the log records the decision root); and **nothing in CNS produces receipts yet**. That part is a CNS change that needs the owner's go-ahead and a key custody decision. Passing a receipt to a verifier that does not override `verify_with_receipt` checks nothing.
+
 ## What this does not do
 
-- **No real decision verifier exists.** The CNS proof is an HMAC under a key local to CNS. The issuer checks everything the kernel checks, and a forged but self-consistent decision of PASS verdicts passes those checks. The `DecisionVerifier` hook makes the deployment say what it does about that; until someone writes a verifier backed by a channel to CNS, the safe configuration is `RefuseAllDecisions`, which issues nothing. A deployment that plugs in an allow-all verifier gets exactly the weakness the hook was added to expose.
+- **No CNS side produces receipts yet.** The CNS proof is an HMAC under a key local to CNS. The issuer checks everything the kernel checks, and a forged but self-consistent decision of PASS verdicts passes those checks. `CnsReceiptVerifier` closes that gap once CNS signs a receipt for each decision (see "CNS decision receipts"); until CNS does, and a deployment pins its key, the safe configuration is `RefuseAllDecisions`, which issues nothing. A deployment that plugs in an allow-all verifier gets exactly the weakness the hook was added to expose.
 - **No real authorization policy exists.** The `Authorizer` hook is where a deployment decides who may be issued what. `requester` is a label the caller supplies; authenticating the requester is the caller's job, and the hook is only as good as that authentication. The per-decision cap limits how many capabilities one decision can ever produce; it does not say who gets them.
 - **No production signer.** Key custody (R-1, R-2, R-3) is deployment. The kernel's trust set decides which key it believes.
 - **The log is not tamper-evident** (no hash chain, no signature), and the directory entry is not flushed. The lock stops a second issuer, not another program editing the file; truncating or hand-editing the log resets the counts. On non-Unix platforms the owner-only mode and the rename and fork checks do not apply, and `File::try_lock` behaves differently on Windows (not tested).

@@ -257,6 +257,14 @@ impl Issuer {
     /// check the signature, write the log (which checks the cap again, atomically), and
     /// only then return the capability.
     pub fn issue(&self, req: &IssuanceRequest) -> Result<Issued, IssueError> {
+        self.issue_with_receipt(req, None)
+    }
+
+    /// [`Self::issue`], with the CNS decision receipt the requester supplied, handed to the
+    /// verifier unread. Whether a missing, malformed or expired receipt is refused is the
+    /// verifier's rule (see [`CnsReceiptVerifier`](crate::CnsReceiptVerifier)); the receipt is
+    /// not an input to anything else the issuer derives, and it is not part of the log record.
+    pub fn issue_with_receipt(&self, req: &IssuanceRequest, receipt: Option<&[u8]>) -> Result<Issued, IssueError> {
         if req.requester.is_empty() || req.requester.len() > 128 || req.requester.chars().any(char::is_control) {
             return Err(IssueError::Text("requester"));
         }
@@ -326,7 +334,7 @@ impl Issuer {
             })
             .map_err(|r| IssueError::NotAuthorized(r.0))?;
         self.verifier
-            .verify(&subject_digest, &req.decision, &decision_root)
+            .verify_with_receipt(&subject_digest, &req.decision, &decision_root, receipt)
             .map_err(|r| IssueError::DecisionNotVerified(r.0))?;
         // A non-binding look at the counts, so an exhausted request does not cost a signature.
         // The binding check is the log's `append`.

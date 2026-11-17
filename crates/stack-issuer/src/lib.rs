@@ -18,8 +18,9 @@
 //!   crate does not make; tests use a fixture signer. It checks every signature
 //!   against the signer's own public key before anything leaves.
 //! * Two hooks have no default: a [`DecisionVerifier`] (is the CNS decision real?) and an
-//!   [`Authorizer`] (may this requester be issued this?). The crate ships only refusing
-//!   placeholders.
+//!   [`Authorizer`] (may this requester be issued this?). The crate ships refusing placeholders
+//!   and a [`CnsReceiptVerifier`], which accepts a decision only with a valid signed receipt from
+//!   CNS.
 //! * Three caps, counted in the issuance log so they survive a restart: capabilities per decision
 //!   root, per subject digest, and the number of distinct decision roots. They cover the records
 //!   the log knows about: rotating the log without carrying its history resets them. An operator
@@ -30,8 +31,9 @@
 //! What this crate does not establish: that a real CNS decision exists. The CNS
 //! proof is an HMAC under a key local to the CNS process, so the issuer can
 //! check the decision's structure, roster, positions, subject binding and root,
-//! exactly as the kernel does, but not who produced it. That needs a
-//! verification channel to CNS which does not exist yet (see the README).
+//! exactly as the kernel does, but not who produced it. A [`CnsReceiptVerifier`]
+//! answers that with a receipt CNS signs; nothing in CNS produces receipts yet (see the
+//! README).
 #![forbid(unsafe_code)]
 
 mod config;
@@ -39,6 +41,7 @@ mod entropy;
 mod hooks;
 mod issue;
 mod log;
+mod receipt;
 mod signer;
 
 pub use config::{ConfigError, IssuanceCaps, IssuerConfig, MAX_LIFETIME_CEILING_MS};
@@ -47,5 +50,9 @@ pub use hooks::{AuthorizationRequest, Authorizer, DecisionVerifier, DenyAllReque
 pub use issue::{IssuanceRequest, IssueError, Issued, Issuer, MAX_RESOURCES_PER_CAPABILITY};
 pub use log::{
     AppendLimits, FileIssuanceLog, IssuanceLog, IssuanceRecord, LogError, ResetRecord, Usage, MAX_RECORD_LINE_BYTES,
+};
+pub use receipt::{
+    AttesterKey, CnsReceiptVerifier, ReceiptConfigError, ReceiptError, ReceiptFields, MAX_ATTESTER_KEYS,
+    MAX_RECEIPT_VALIDITY_CEILING_MS, MAX_SKEW_CEILING_MS, RECEIPT_DOMAIN, RECEIPT_LEN, RECEIPT_NONCE_BYTES, RECEIPT_VERSION,
 };
 pub use signer::{SignError, Signer};

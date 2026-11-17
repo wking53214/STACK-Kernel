@@ -47,6 +47,23 @@ pub trait DecisionVerifier: Send + Sync + fmt::Debug {
     /// `subject_digest` and `decision_root` are the values the issuer recomputed,
     /// never the requester's claims. `decision` is the claim as received.
     fn verify(&self, subject_digest: &Digest32, decision: &DecisionClaim, decision_root: &Digest32) -> Result<(), Refusal>;
+
+    /// The same question, with the receipt the requester supplied, if any (see
+    /// [`CnsReceiptVerifier`](crate::CnsReceiptVerifier)). The issuer calls this, not `verify`.
+    ///
+    /// The default ignores the receipt and calls `verify`, so a verifier written before receipts
+    /// existed behaves as it did. A deployment that wants receipts must use a verifier that
+    /// overrides this: passing a receipt to one that does not is not an error, and checks nothing.
+    fn verify_with_receipt(
+        &self,
+        subject_digest: &Digest32,
+        decision: &DecisionClaim,
+        decision_root: &Digest32,
+        receipt: Option<&[u8]>,
+    ) -> Result<(), Refusal> {
+        let _ = receipt;
+        self.verify(subject_digest, decision, decision_root)
+    }
 }
 
 /// What the issuer is about to grant, for the authorizer to judge.
