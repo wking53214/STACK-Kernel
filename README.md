@@ -1,10 +1,27 @@
 # ≡TACK Kernel
 
-Reference implementation of the ≡TACK governance kernel, written in Rust and C++ with comprehensive red-team validation. Each component was built, attacked by a separate red-team agent, hardened, measured and documented. The complete manual is in `manual/`.
+Reference implementation of the ≡TACK governance kernel: Rust crates and C++23 headers that run in user space. It is **not an operating-system kernel** and is not loaded into one. Repository name: STACK-Kernel. The manual is in `manual/`.
 
-These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](https://github.com/wking53214/CNS), Apache-2.0). Several source comments reference that contract.
+Status: experiment. Last checked 2026-11-19 at commit `4d2287d`. License: Apache-2.0 (`LICENSE`). Prerequisites: Linux (seccomp, POSIX timers and `pidfd` are used), Rust 1.95 or newer, and for the C++ layer CMake 3.22 or newer, a C++23 compiler (`-fno-exceptions -fno-rtti`, plus `-mavx2` on x86_64) and Catch2 3, which the C++ build requires (`find_package(Catch2 REQUIRED)`). The C++ build and test commands are in `cpp/README.md`. The C++ headers carry syscall tables for x86_64 and aarch64 (INSPECTED).
 
-`stack-sentinel` reproduces CNS's subject digest (`cns.gate.subject_digest`) in Rust, and it is held to CNS's own answer key: `crates/stack-sentinel/tests/fixtures/cns-digest-vectors.json` is a copy of CNS's `contracts/digest-vectors.json` (the inputs and the digest CNS gives each), and `cargo test -p stack-sentinel --test cns_vectors` recomputes every one. According to CNS's workflow as of CNS commit `4acd8f9`, CNS runs these tests against its own copy, so a stale copy here is reported there.
+## Role Within ≡TACK
+
+- **What it is.** The enforcement-side reference code: an admission chain (a CNS decision and a capability in, a signed receipt out), a verify-only authorization boundary, receipts with an independent verifier, and a supervised worker that runs a payload under limits.
+- **What it owns.** Recomputing the subject digest and decision root, checking a capability against its own trust set, one-time use, write-ahead receipts, and running a worker (the supervised C++ path) under a deadline and a seccomp filter.
+- **What it contributes.** The part of ≡TACK that decides whether a signed capability may run and records what happened.
+- **What it does not own.** The gate vocabulary and digest definition (CNS); deciding that a human approved (HUMANITY's issuer, which signs before the kernel sees anything); a production issuer or signing key (none exists here: tests use fixture keys derived from public labels); custody of the long-term ledger (sentinel_os; this repo holds the Rust verifier); authentication of a person (a shared key proves possession, not a person).
+- **Depends on.** The CNS gate contract (`cns/gate.py`), held to CNS's own digest vectors by `stack-sentinel`'s `cns_vectors` test.
+- **Depended on by.** `HUMANITY/issuer` pins this repo's crates at commit `e2f2134` (INSPECTED in its `Cargo.toml`). Other consumers: UNKNOWN. `stack-admission`'s README says nothing outside that crate calls it.
+- **Verified versus declared.** Verified by tests that ran in this check: see "Build and test". Declared only: the flywheel below (trap logs feeding tighter boundaries), the `trap_events` table and Q1 to Q6 analyses, and any production deployment.
+- **Governance and control design.** The kernel does not trust a CNS PASS, a matching digest or a decision's HMAC as permission. Permission exists only as an `AuthorizedAction` made by `Authority::authorize`. Evaluation, authorization and enforcement are separate steps here; the issuer that signs is outside this repo.
+
+## Security notes
+
+- Isolation exists only in the supervised worker path (`SupervisedExecutor::RunWorker`, fork and exec of a separate program under rlimits, a strict seccomp filter and a SIGKILL deadline). The in-process path (`GovernedMinotaurHost`) uses a cooperative deadline that does not stop a payload. See `cpp/CONTAINMENT.md`.
+- `stack_audit.hpp` is telemetry. Its "HMAC" is an XOR placeholder stated as such in the source. It is not a receipt. Receipts are in `stack-receipt`.
+- `stack_arena.hpp` is a fixed-size arena with a generation counter. Its header says reuse is not isolation.
+- Failure behavior: the admission stages refuse on failure and record where a log is reachable (`crates/stack-admission/README.md`, section 1). A kernel killed during execution leaves an incomplete record (tested).
+- Out of model: a kernel bug in seccomp, side channels, and a payload that runs legitimately for the whole deadline.
 
 ## What is here
 
@@ -25,19 +42,22 @@ These crates are built around the CNS gate contract (`cns/gate.py` in [CNS](http
 | `stack-authority` | Verify-only authorization boundary: capabilities, scope, revocation |
 | `stack-receipt` | Execution receipts and their independent verifier |
 | `stack-bumpers` | Elastic Bumpers: a new design, see the crate's own status note |
+| `stack-issuer` | Capability issuer as a library. Holds no key, runs no service. See the crate's README. |
 | `stack-ffi` | C++/Rust FFI bridge to the containment stack |
 | `_warm` | Dependency warm-up crate, not part of the kernel |
+
+Ten of these crates open their own source with a "Status: new design" note: `stack-inlet`, `stack-trident`, `stack-minotaur`, `stack-greenwave`, `stack-transmission`, `stack-bumpers` and the four `stack-anc-*` crates (INSPECTED 2026-11-15). The notes describe reference implementations of components that are not running in any other ≡TACK repository. Read a crate's note before treating its row above as a working part of a deployed system.
 
 C++ headers (kernel layers 1-6) in `cpp/include/`:
 
 | File | Component |
 |---|---|
 | `stack_kernel.hpp` | Foundation: CNS compatibility layer |
-| `posix_deadline_timer_hardened.hpp` | Layer 2: Deadline timer + preemption detection |
+| `posix_deadline_timer_hardened.hpp` | Layer 2: deadline timer that sets a flag read after the payload returns. Does not stop a payload. |
 | `stack_kinetic_governor.hpp` | Layer 3: Rate limiting + token bucket |
-| `stack_host_binding.hpp` | Layer 4: Orchestration + SECCOMP enforcement |
-| `stack_audit.hpp` | Layer 5: Audit trail + subject binding |
-| `stack_arena.hpp` | Layer 6: Memory isolation + arena allocation |
+| `stack_host_binding.hpp` | Layer 4: capability-mask check, per-thread seccomp allowlist, cooperative deadline. Not isolation. |
+| `stack_audit.hpp` | Layer 5: audit telemetry ring. The HMAC is an XOR placeholder. Not a receipt. |
+| `stack_arena.hpp` | Layer 6: fixed-size arena with a generation counter. Not isolation (see its header). |
 
 `cpp/include/` also holds `stack_run_cancel.hpp` (lets another thread stop a supervised worker in flight) and `stack_supervised_exec.hpp` (supervised execution in a child process). Neither is a numbered layer.
 
@@ -46,6 +66,8 @@ holds the raw timing runs the ANC sections quote. `manual/review/` holds the
 final reviewer's findings. Whether each finding is reflected in the manual has not been checked.
 
 ## Build and test
+
+EXECUTED 2026-11-19 at `4d2287d` (Rust 1.97, one pass, Linux): `cargo test -p stack-admission -p stack-authority -p stack-receipt -p stack-sentinel` gave 491 passed, 0 failed, 2 ignored (the same as the 2026-11-15 run at `14b48a0`). Since then `stack-issuer` and `stack-p3-2` changed (receipt verifier and caps; class-aware deadlines and an opt-in restart snapshot); those two crates were not run in this check, and the statements above about the issuer (a library, no key, no service) and about the host layers were re-read against the new code (INSPECTED 2026-11-19; the C++ headers are unchanged since `14b48a0`). That is four crates, not the workspace. The other crates, the clippy job and the C++ build and `ctest` were not run (UNKNOWN). A passing test shows the tested behavior holds. It is not universal security.
 
 Rust 1.95 or newer is required (`rust-version` in `Cargo.toml`). The CI clippy job pins
 Rust 1.99.0; the other CI jobs use the stable toolchain. Most external dependencies come
@@ -92,7 +114,7 @@ Python says `VERIFIED`, Rust says `TRUNCATED`). The header of
 
 A second test in the same file, `live_edge_cases_differ_only_as_documented`, feeds both programs twelve hand-built inputs. They agree on six. On the other six Rust is stricter by design: duplicate JSON keys, nesting deeper than 256, a key file over 1 MiB, more than 64 keys, and keys supplied only through the environment.
 
-## Design Analogy: The Flywheel
+## Design analogy: the flywheel (intended, not implemented as described)
 
 ≡TACK is built on a core principle: **enforcement is visibility**. Every time a boundary prevents execution (a deadline expires, a quota is exhausted, a capability is denied, memory is exceeded), that enforcement event is not logged and forgotten. Instead, it becomes the signal that tightens the next boundary.
 
@@ -104,7 +126,7 @@ Neither the water nor the banks are static. They are in constant conversation.
 
 ### Applied to ≡TACK
 
-1. **Payload executes** within the six-layer containment boundary
+1. **Payload executes** under the host layers (isolation only on the supervised worker path)
 2. **Boundary enforces**: deadline fires, quota exhausted, capability revoked, memory exceeded
 3. **Trap event is logged** with full execution context
 4. **Sentinel observes** patterns in trap logs and asks: which boundaries catch most, why, in what states?
@@ -119,9 +141,9 @@ Neither the water nor the banks are static. They are in constant conversation.
 | 1: HardwareClock | Measurement foundation (CPU clock ticks) |
 | 2: Preemption | Detects deadline breach (signal-based flag) |
 | 3: RateLimiting | Enforces quota (token bucket) |
-| 4: Orchestration | Composes layers 1-3, enforces 5-6 (six gates) |
-| 5: Audit | Records all verdicts with subject binding |
-| 6: Isolation | Memory boundary isolation (arena) |
+| 4: Orchestration | Composes layers 1 to 3 around a trusted payload (cooperative; not isolation) |
+| 5: Audit | Telemetry ring (placeholder MAC) |
+| 6: Arena | Fixed-size arena; the header says it is not isolation |
 | P3.2: Hard Preemption | Hybrid model: signal sets flag + context-local state → trap events logged for Sentinel |
 
 Every enforcement event is a data point. The intended design has Sentinel run offline analysis (Q1-Q6 queries on a `trap_events` table) to identify which boundaries trap most, which agents trigger most traps, and what patterns emerge. Based on patterns, boundaries would be reorganized for the next execution. This repository records `TrapEvent`s in `stack-p3-2`, but it does not implement the table or the Q1-Q6 analyses; those are specified in `manual/sections/p3.2_schema_design.md`.
@@ -130,74 +152,9 @@ Every enforcement event is a data point. The intended design has Sentinel run of
 
 ---
 
-## Accepted timing residual (ANC strategy 1)
+## Timing residual (ANC strategy 1)
 
-Status: documented, not eliminated, and open for direct callers. The padded response still has a small, measurable difference between the two secret-dependent paths. A caller who can time the padded function directly can detect it in minutes (see the November 6, 2026 measurements below), so the per-source guard must be wired in before any deployment. This section is the current record. Where it conflicts with older numbers in `manual/sections/anc_ceiling.md`, this section wins.
-
-### Fast-lane cropped residual (open finding, November 11, 2026)
-
-The test `the_fast_lane_hides_the_cost_of_cheap_operations` (`crates/stack-anc-ceiling/tests/lanes.rs`) pads a cheap operation (50 iterations for class A, 1,500 for class B) through the fast lane (250 µs ceiling, one hard-ceiling bucket) and compares the two classes. Its first-order and second-order checks have not failed. Its cropped check (the line is |t| of 10) failed in 2 of the 5 CI runs seen on November 7 and 11, 2026, at 19.3 and 20.2 at the 50th percentile with a Kolmogorov-Smirnov p-value near 1e-50, and passed in the other 3. The sign of t at the median was negative in both failing runs (-19.3 and -20.2). That is far larger than the spread within a run, so the two samples differed at the median in those runs. Whether that is a property of the fast lane or run-to-run drift on the shared runner (as recorded below for the padded leaky validator, where the sign of the crops changed from run to run) is not established, and two failures do not settle the sign. It did not reproduce on a local 4-vCPU virtual machine (4 of 4 runs passed), so the cause is unknown. The cropped check is therefore recorded as an open finding, moved to `the_fast_lane_cropped_residual_open_finding` (ignored by default, run with `--ignored`), as was done for the padded leaky validator below. The standard lane's cropped check still runs in the blocking test. **Until it is understood, the fast lane is not claimed to hide the cost of cheap operations at the cropped-percentile level.**
-
-### What the residual is
-
-`stack-anc-ceiling` releases every response at admission plus a fixed ceiling (50 µs in the tests). The validator used for measurement is `leaky_validate`, which stops at the first wrong byte. Class A (wrong at byte 0) finishes earlier than class B (wrong at byte 31). After padding, a difference remains between the two classes. Measured values, all on one 4-core virtual machine:
-
-| Setup | Gap, class A minus B | Noise | Result |
-|---|---|---|---|
-| In-process, padded, 20 runs of 20,000 per class | about -2.8 ns (mean) | run-to-run sd 1.0 ns | 19 of 20 runs negative |
-| Loopback socket, 4 connections, one source, 10 runs of 3 s | -2.39 ns | standard error 0.22 ns | t = -10.8, 10 of 10 runs negative |
-| Same, A vs A control (no difference expected) | -0.07 ns | standard error 0.33 ns | t = -0.2, valid |
-| Loopback socket, 1 connection, 800,000 requests | -3.2 ns (middle 50%) | per request sd 1.28 µs | t = -0.8, not detectable at this sample size |
-
-In the baseline runs (no barrier), the sign was negative in every run we kept, except one subagent session of 10 runs that reported the opposite sign for the same seeds. We have not reproduced that session and don't know its cause. With the barrier added in the server, the sign was mixed (pooled +0.39 ns, not significant).
-
-**Re-measured November 6, 2026 (in-process, large n).** Two runs of 2,000,000 padded calls per class, random class order, one seed each. Full-distribution means are not usable here: the per-request spread is about 21 to 28 µs, so the mean's error is tens of nanoseconds, and the same setup gave a gap of 2.4 ns in one run and 30 ns in the other. The middle-50% estimator used in the table above gave a gap of -0.5 ns and -0.3 ns (class A minus B), with a per-request spread of about 80 ns. So the in-process gap measured here is smaller than the 2.8 ns in the table, and it is not stable across setups: lower-half comparisons with and without the test's calibration step gave values from -1.5 to +1.6 ns and from -0.5 to +3.3 ns, with the sign varying.
-
-Samples needed to reach |t| of 4.5 with this estimator, per class, for a caller that can time the padded function directly: about 33,000 for a 2.8 ns gap, and about 1.0 to 3.5 million for the 0.3 to 0.5 ns gap measured here. At 50 µs per call, the second figure is roughly 2 to 6 minutes of calls. This does not describe a network attacker, whose cost depends on network noise, which we have not measured.
-
-The class-variance gap noted in an earlier review was noise, not evidence of a leak. A no-op operation with no secret-dependent work gave class variance ratios from 0.09 to 38 across seeds. Do not use class variance comparisons as evidence on this machine.
-
-### What an attacker needs (estimates, not measurements on a real network)
-
-These use the standard detection rule (|t| of at least 4.5) and assume independent noise, which is the attacker's best case.
-
-- **One connection, loopback:** about 6.6 million requests per class (about 13 million total). At about 83 µs per round trip, roughly 18 minutes of traffic.
-- **Four connections, loopback:** about 70,000 requests per class (about 140,000 total), roughly 2 seconds at about 67,000 requests per second. The per-request noise drops under concurrency, probably because server threads stop sleeping between requests.
-- **A network adds noise.** Real networks are noisier than loopback, which raises these numbers. We have not measured a real network, so the attack cost on one is unknown.
-
-**Measured again, November 6, 2026 (loopback, client and server in one process, 2-vCPU machine).** These replace the estimates above where they conflict.
-
-- **One connection:** median round trip about 83 µs, middle-50% noise about 1.1 to 1.4 µs per request. Seven runs (100,000 to 600,000 requests each) gave gap estimates (class A minus B) of -22.6, -19.2, +5.7, -15.3, +11.3, +4.2 and -21.5 ns. Their spread (about 14 ns) is far larger than the sampling error within a run (about 3 ns). Run-to-run drift dominates, so a 2.8 ns residual cannot be read from one run, and the average across runs is about -8 ns with no reliable sign.
-- **Four connections:** on this machine the noise rose to about 23 µs per request, because four client threads and four server threads share two vCPUs. Overruns appeared (about 24 per 600,000). The 70,000 figure above was not reproduced here, and it is not comparable, because it came from a 4-vCPU machine whose noise we did not measure.
-- **What this means:** on this machine, a network attacker cannot reliably see the residual. The limiting factor is run-to-run drift, not per-request noise. This is one machine, so the 4-vCPU figures are not overturned, only left unverified.
-
-Loopback is the most favorable channel for an attacker. If a real deployment is slower to attack than these figures, that is a property of the network, not of the padding.
-
-### What we tried and why it is not a fix
-
-- **A memory barrier after the validator** (1,000 fences). In-process, it cut the gap to about -0.9 ns, but that result is not a fix. It added about 6 µs per request, and at 4 connections the overrun rate rose from 0.002% to 0.075% and errors from 2 to 34. The release-time check failed, so the barrier was not adopted.
-- **Padding overshoot exists even without load.** The 99th percentile release lands 11 to 14 µs past the 50 µs ceiling at every connection count tested (1, 2, 4 and 8). The median overshoot is under 0.1 µs.
-- **Overrun replies are a separate timing class.** In the guarded 4-connection run, 2 of about 200,000 padded operations finished after the hard ceiling and were answered with `Trip::Overrun`. Their release time differs from normal replies. The cause is probably the OS briefly descheduling a spinning thread (not measured). Overruns are counted, not hidden.
-- **Eight connections:** the stage recorded 2 errors (client or pad, not separated). We have not identified them.
-
-### What limits the damage
-
-- **Per-source guard** (`stack-anc-ceiling::source_guard`, PR #54, merged). Caps requests in flight per source and failed checks per source, with a cooldown. In a 3-second test from one source with 4 connections, 11 requests were admitted and 200,757 were refused, and refused responses were released on the same schedule as admitted ones. The guard is a library module. It is **not yet wired into any service**, and its limits are not tuned, because the legitimate failure rate per source is unknown.
-- **A source-spreading attacker** is slowed, not blocked. Each source has its own budget, so cost rises with the number of sources needed.
-
-### What is not claimed
-
-- That the two paths take the same time. They do not: by roughly 0.3 to 3 ns across our runs, with the sign not stable in every setup.
-- That the residual is zero, or that the test `calibrated_spin_padding_hides_the_early_exit` proves it. That test checks for a measurable difference under its own rules. It is non-blocking in CI, and it has failed on recent CI runs. Its cropped check now lives in a separate ignored test (`calibrated_spin_padding_cropped_residual_open_finding`); the test named above checks only the first- and second-order statistics. Its cropped checks flag the residual only intermittently: without calibration, 13 of 30 in-process runs had some crop above the line of 10; with calibration, the lower-half check stayed within 3.2 in all 10 runs measured. In CI itself (November 6, 2026), the cropped check on the leaky validator was above 10 in 7 of 9 runs (5 earlier logs, 2 of 3 diagnostic reruns on the same commit). The no-op operation, measured in the same runs with the same calibration, was never above 2.1. The sign of the leaky crops changed from run to run, which fits run-to-run drift rather than a fixed class offset. Locally, with the calibration step, the test passed 60 of 60 runs, so CI's environment is the one that exposes it.
-- Attackers on the same physical core, through shared cache, or through a sibling hardware thread (SMT). These are outside the threat model.
-- Any real network, any production load pattern, or any second machine.
-- That the sign of the residual is fixed across all setups. In the baseline runs it was negative in every run we kept, except one subagent session. With the barrier added, it was mixed.
-
-### How this was accepted
-
-The residual is a documented open risk, not an accepted one. For a direct caller it is practical to detect in minutes. For a network attacker the bound depends on the channel and request budget, which are unmeasured. The mitigation available now is the per-source guard, which is not yet deployed. Anyone deploying the library in front of an untrusted network must (1) wire in the guard, (2) set its limits from the legitimate failure rate for that deployment, (3) monitor overrun and refusal counts, and (4) decide whether the estimates above are acceptable for their threat model.
-
-The loopback measurements came from scratch harnesses that are **not committed to this repository**, so they cannot be reproduced from the repo as it stands.
+Open and documented, not eliminated. A caller who can time the padded function directly can detect a small difference between the two secret-dependent paths in minutes (measured November 2026). The per-source guard that limits the damage is a library module and is not wired into any service. Two cropped-percentile checks are recorded as open findings (the fast lane, and the padded leaky validator) and are ignored by default. The loopback harnesses used for the measurements are not committed, so those numbers cannot be reproduced from this repository. Anyone deploying `stack-anc-ceiling` in front of an untrusted network must wire in the guard, set its limits from the legitimate failure rate, and monitor overrun and refusal counts. Full record: [`docs/anc-ceiling-residual.md`](docs/anc-ceiling-residual.md). Where it conflicts with older numbers in `manual/sections/anc_ceiling.md`, the doc wins.
 
 ## Known state
 
@@ -210,5 +167,7 @@ The loopback measurements came from scratch harnesses that are **not committed t
   - Run on idle machine for reliable results
   - Strategy 1 (`rt04`) and Green Wave driver tests affected
 - ANC cannot make timing difference zero mathematically
-  - See "Accepted timing residual" above for the measured residual and its limits (open for direct callers)
+  - See "Timing residual (ANC strategy 1)" above for the measured residual and its limits (open for direct callers)
   - Manual's ANC section explains signal detection limits
+
+Maintainer: William N. King.
