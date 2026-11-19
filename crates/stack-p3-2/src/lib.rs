@@ -93,6 +93,24 @@ impl HardPreemptionKernel {
         self.begin_transaction(agent_id, subject_digest, now_ns.saturating_add(budget))
     }
 
+    /// Like `begin_transaction_governed`, for a call of one tool class. The class label must come from the kernel's own
+    /// tool wrapper, never from the agent. `None` or an unknown class behaves exactly like `begin_transaction_governed`.
+    pub fn begin_transaction_governed_class<S: governed_limits::LimitSource>(
+        &self,
+        limits: &GovernedLimits<S>,
+        agent_id: String,
+        tool_class: Option<&str>,
+        subject_digest: [u8; 32],
+        default_budget_ns: u64,
+    ) -> Result<uuid::Uuid, &'static str> {
+        let budget = limits.effective_for_class(&agent_id, tool_class, default_budget_ns);
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "clock before epoch")?
+            .as_nanos() as u64;
+        self.begin_transaction(agent_id, subject_digest, now_ns.saturating_add(budget))
+    }
+
     /// Check preemption boundary: trap if preempted, log context + reason.
     // TrapEvent is the public error type; boxing it would change this signature for callers.
     #[allow(clippy::result_large_err)]

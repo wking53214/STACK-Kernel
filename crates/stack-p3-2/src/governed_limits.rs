@@ -45,13 +45,25 @@ impl LimitKind {
 /// The governance side keeps ids that match `^[A-Za-z0-9._-]{1,64}$` as they are and replaces
 /// every other id with `h-` + the first 24 hex characters of its SHA-256.
 pub fn agent_key(agent_id: &str) -> String {
-    let safe = !agent_id.is_empty()
-        && agent_id.len() <= 64
-        && agent_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+    safe_key(agent_id)
+}
+
+/// The class part of a boundary id uses the same rule as an agent id, so the Python side needs no second rule.
+pub fn class_key(tool_class: &str) -> String {
+    safe_key(tool_class)
+}
+
+fn safe_key(raw: &str) -> String {
+    // "h-" is reserved for hashed keys (red team finding S4 on the Python side): an id that already looks like
+    // a hashed key is hashed again, so it cannot land on another identity's boundary.
+    let safe = !raw.is_empty()
+        && raw.len() <= 64
+        && !raw.starts_with("h-")
+        && raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
     if safe {
-        agent_id.to_string()
+        raw.to_string()
     } else {
-        let digest = hex::encode(Sha256::digest(agent_id.as_bytes()));
+        let digest = hex::encode(Sha256::digest(raw.as_bytes()));
         format!("h-{}", &digest[..24])
     }
 }
@@ -59,6 +71,17 @@ pub fn agent_key(agent_id: &str) -> String {
 pub fn boundary_id(agent_id: &str, kind: LimitKind) -> String {
     format!("stack.agent.{}.{}", agent_key(agent_id), kind.suffix())
 }
+
+/// Per-class deadline boundary: `stack.agent.<agent>.class.<class>.deadline_ns`. Only the deadline has class limits.
+pub fn class_boundary_id(agent_id: &str, tool_class: &str) -> String {
+    format!("stack.agent.{}.class.{}.{}", agent_key(agent_id), class_key(tool_class), LimitKind::DeadlineNs.suffix())
+}
+
+/// The kernel's own lowest acceptable class deadline, as a share of its configured default. A governed class
+/// deadline below this is raised to it, whatever the service says (answers a service that is faulty or hostile).
+pub const CLASS_DEADLINE_FLOOR: f64 = 0.25;
+/// Class boundaries kept in the cache at most; further new class ids are not fetched (default applies).
+pub const CLASS_CACHE_LIMIT: usize = 4096;
 
 /// Where limits come from. `Ok(None)` means "no such boundary yet" (nothing has been tightened).
 pub trait LimitSource: Send + Sync {
@@ -142,17 +165,25 @@ pub struct LimitStats {
     pub source_errors: u64,
     pub invalid_values: u64,
     pub above_ceiling: u64,
+    pub below_floor: u64,
+    pub class_cache_full: u64,
+    pub snapshot_restored: u64,
+    pub snapshot_rejected: u64,
+    pub snapshot_write_errors: u64,
 }
 
 struct Entry {
     value: Option<u64>, // last good governed value
     checked: Instant,
+    restored: bool, // loaded from the snapshot and not yet confirmed by the service
 }
 
 pub struct GovernedLimits<S: LimitSource> {
     source: S,
     ttl: Duration,
     state: Mutex<(HashMap<String, Entry>, LimitStats)>,
+    deadline_floor: Option<f64>,
+    snapshot: Option<std::path::PathBuf>,
 }
 
 /// A governed value is usable only if it is a positive finite number. A fractional value is rounded
@@ -174,42 +205,138 @@ fn parse_limit(v: &serde_json::Value) -> Option<u64> {
 
 impl<S: LimitSource> GovernedLimits<S> {
     pub fn new(source: S, ttl: Duration) -> Self {
-        Self { source, ttl, state: Mutex::new((HashMap::new(), LimitStats::default())) }
+        Self { source, ttl, state: Mutex::new((HashMap::new(), LimitStats::default())), deadline_floor: None, snapshot: None }
     }
 
     pub fn stats(&self) -> LimitStats {
         self.state.lock().map(|g| g.1.clone()).unwrap_or_default()
     }
 
+    /// Opt in to a kernel-side floor on the whole-agent deadline: a governed deadline below `ratio` x default is raised
+    /// to it. Off unless called, so existing behavior is unchanged. A ratio outside (0, 1] is ignored.
+    pub fn with_deadline_floor(mut self, ratio: f64) -> Self {
+        if ratio.is_finite() && ratio > 0.0 && ratio <= 1.0 {
+            self.deadline_floor = Some(ratio);
+        }
+        self
+    }
+
+    /// Keep the last good governed values in a file so a restart does not forget them (limit F3 of the Round 23 proposal).
+    /// On start the file is read and every value goes through the same checks as a live one (positive, at most the
+    /// default, at least the floor), so a damaged or edited file can only produce a limit between the floor and the default.
+    /// Restored values are treated as stale: the first lookup asks the service, a larger answer replaces them, and a
+    /// "nothing governed" answer clears them. Only when the service cannot be reached does a restored value stand.
+    /// A bad or missing file is ignored (default applies) and counted. Written only when a value changes.
+    pub fn with_snapshot(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        let path = path.into();
+        let now = Instant::now();
+        let stale = now.checked_sub(self.ttl + Duration::from_secs(1)).unwrap_or(now);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let (map, stats) = &mut *self.state.lock().unwrap();
+            match serde_json::from_str::<HashMap<String, serde_json::Value>>(&text) {
+                Ok(items) => {
+                    for (id, v) in items.into_iter().take(CLASS_CACHE_LIMIT + 64) {
+                        let id_ok = !id.is_empty() && id.len() <= 256
+                            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+                        match (id_ok, parse_limit(&v)) {
+                            (true, Some(n)) => {
+                                map.insert(id, Entry { value: Some(n), checked: stale, restored: true });
+                                stats.snapshot_restored += 1;
+                            }
+                            _ => stats.snapshot_rejected += 1,
+                        }
+                    }
+                }
+                Err(_) => stats.snapshot_rejected += 1,
+            }
+        }
+        self.snapshot = Some(path);
+        self
+    }
+
+    fn write_snapshot(&self, map: &HashMap<String, Entry>, stats: &mut LimitStats) {
+        let Some(path) = &self.snapshot else { return };
+        let items: HashMap<&String, u64> = map.iter().filter_map(|(k, e)| e.value.map(|v| (k, v))).collect();
+        let tmp = path.with_extension("tmp");
+        let ok = serde_json::to_vec(&items).ok().is_some_and(|b| std::fs::write(&tmp, b).is_ok() && std::fs::rename(&tmp, path).is_ok());
+        if !ok {
+            stats.snapshot_write_errors += 1;
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn source_for_test(&self) -> &S {
+        &self.source
+    }
+
+    fn floor_of(ratio: f64, default: u64) -> u64 {
+        (((default as f64) * ratio).ceil() as u64).clamp(1, default.max(1))
+    }
+
     /// The limit to enforce for this agent right now: never above `default`.
     pub fn effective(&self, agent_id: &str, kind: LimitKind, default: u64) -> u64 {
-        let id = boundary_id(agent_id, kind);
+        let floor = match (kind, self.deadline_floor) {
+            (LimitKind::DeadlineNs, Some(r)) => Some(Self::floor_of(r, default)),
+            _ => None,
+        };
+        self.lookup(&boundary_id(agent_id, kind), default, floor, false)
+    }
+
+    /// Deadline for one tool class of an agent: the lowest of the class limit, the agent limit and `default`. The
+    /// class limit is always held to [CLASS_DEADLINE_FLOOR x default, default] by the kernel itself. No class, an empty
+    /// class, a missing class limit or an unusable class limit leaves exactly the whole-agent result.
+    pub fn effective_for_class(&self, agent_id: &str, tool_class: Option<&str>, default: u64) -> u64 {
+        let agent_value = self.effective(agent_id, LimitKind::DeadlineNs, default);
+        let class = match tool_class {
+            Some(c) if !c.is_empty() => c,
+            _ => return agent_value,
+        };
+        let floor = Self::floor_of(CLASS_DEADLINE_FLOOR, default);
+        let class_value = self.lookup(&class_boundary_id(agent_id, class), default, Some(floor), true);
+        class_value.min(agent_value)
+    }
+
+    fn lookup(&self, id: &str, default: u64, floor: Option<u64>, is_class: bool) -> u64 {
+        let id = id.to_string();
         let now = Instant::now();
         // A poisoned lock means another thread panicked; stay on the safe default.
         let mut guard = match self.state.lock() {
             Ok(g) => g,
             Err(_) => return default,
         };
+        if is_class && !guard.0.contains_key(&id) && guard.0.len() >= CLASS_CACHE_LIMIT {
+            guard.1.class_cache_full += 1;
+            return default;
+        }
         let fresh = guard.0.get(&id).is_some_and(|e| now.duration_since(e.checked) < self.ttl);
         if !fresh {
             // Network I/O happens under the lock, bounded by the source timeout. A kernel that
             // cannot afford that should call this from a refresher thread and read the cache.
             let result = self.source.fetch(&id);
             let (map, stats) = &mut *guard;
-            let entry = map.entry(id.clone()).or_insert(Entry { value: None, checked: now });
+            let entry = map.entry(id.clone()).or_insert(Entry { value: None, checked: now, restored: false });
             entry.checked = now; // also on failure: do not hammer a down service
+            let before = entry.value;
             match result {
                 Err(_) => stats.source_errors += 1,
                 Ok(None) => {
                     stats.fetched += 1;
+                    if entry.restored {
+                        entry.value = None; // the service answered: nothing is governed, a stale snapshot must not outlive that
+                        entry.restored = false;
+                    }
                 }
                 Ok(Some(v)) => match parse_limit(&v) {
                     Some(n) => {
                         stats.fetched += 1;
                         entry.value = Some(n);
+                        entry.restored = false;
                     }
                     None => stats.invalid_values += 1,
                 },
+            }
+            if entry.value != before {
+                self.write_snapshot(&*map, stats);
             }
         }
         let (map, stats) = &mut *guard;
@@ -218,7 +345,13 @@ impl<S: LimitSource> GovernedLimits<S> {
                 stats.above_ceiling += 1;
                 default
             }
-            Some(v) => v,
+            Some(v) => match floor {
+                Some(f) if v < f => {
+                    stats.below_floor += 1;
+                    f
+                }
+                _ => v,
+            },
             None => default,
         }
     }
