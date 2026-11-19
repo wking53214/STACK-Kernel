@@ -34,6 +34,25 @@ applies them to its own simulated traps, but nothing in the library enforces the
 Contract check against the live Python service:
 `GOVERNED_E2E_PORT=<port> GOVERNED_E2E_TOKEN=<token> cargo test -p stack-p3-2 -- --ignored e2e`
 
+## Class deadlines and the kernel floor (round 23)
+
+`GovernedLimits::effective_for_class(agent, class, default)` returns the lowest of the class limit, the agent limit and the
+default. The class limit is a boundary named `stack.agent.<agent>.class.<class>.deadline_ns`; the class part follows the same
+safe-id/hash rule as the agent part. The class label must come from the kernel's own tool wrapper, never from the agent. No
+class, an empty class, a missing limit or an unusable value gives exactly the whole-agent result. The kernel itself holds a class
+deadline to [0.25 x default, default] (`CLASS_DEADLINE_FLOOR`), whatever the service sends; a value raised to the floor is counted
+in `stats().below_floor`. At most `CLASS_CACHE_LIMIT` (4096) cache entries are created for class ids; beyond that the default
+applies and `class_cache_full` counts it. `begin_transaction_governed_class` is the kernel entry point.
+
+`with_deadline_floor(ratio)` opts in to the same kind of floor for the whole-agent deadline. It is off by default so existing
+behavior is unchanged; without it a governed agent deadline of 1 ns is applied as 1 ns. Recommended on.
+
+Defect fixed: `agent_key` did not reserve the `h-` prefix, which the Python side does (an id spelled like a hashed key is hashed
+again). An agent named `h-abc` would have read a different boundary from the one the governance side wrote.
+
+Still true: the cache is in memory only, so a kernel restart with the service down applies the default (documented by test).
+Tests: `tests/class_deadlines.rs`.
+
 ## Validation canary (`governed_workload --canary-share S --canary-ns D0`)
 
 The governance side's validation layer (`TrapPolicy(validate_after=...)` in `experimental`) judges a
