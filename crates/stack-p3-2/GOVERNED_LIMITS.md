@@ -74,3 +74,11 @@ kernel must not reveal to a task which deadline it is running under.
 Not checked here: the `experimental` repo (`scripts/adjudication_server.py`, `TrapBridge`,
 the T16 threat model and `docs/TRACE_TEST_PLAN.md`) is not part of this checkout. This
 document cites those names and does not verify them.
+
+Restart snapshot (opt in): `GovernedLimits::new(...).with_snapshot(path)` keeps the last good governed values in a file, written
+(temp file then rename) only when a value changes. After a restart the values are loaded as stale and pass the same checks as live ones
+(positive, at most the default, at least the floor), so an edited file can only produce a limit between the floor and the default. The first
+lookup asks the service: a larger answer (a person loosened it) replaces the restored value, "nothing governed" clears it, and only an
+unreachable service leaves the restored value in force. A corrupt or missing file is ignored and counted (`snapshot_rejected`).
+Not covered: the file is not encrypted or signed (an attacker who can write it can only tighten, down to the floor, which is a denial of service
+bounded by that floor); a restored value can be stricter than the current governed one while the service is down.

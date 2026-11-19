@@ -183,3 +183,92 @@ fn a_service_error_keeps_the_last_good_class_value() {
     assert_eq!(g.effective_for_class("a", Some("read"), D), 20_000_000_000);
     assert!(g.stats().source_errors >= 1);
 }
+
+// ---- restart snapshot (limit F3) ----
+fn tmpfile(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("gl-snap-{}-{}", std::process::id(), name));
+    let _ = std::fs::remove_file(&d);
+    d
+}
+
+#[test]
+fn a_restart_keeps_a_tightened_limit_when_the_service_is_down() {
+    let p = tmpfile("keep");
+    let a = gl(MapSource::new(&[(&cid("a", "read"), json!(20_000_000_000u64))])).with_snapshot(&p);
+    assert_eq!(a.effective_for_class("a", Some("read"), D), 20_000_000_000);
+    let b = gl(MapSource::failing()).with_snapshot(&p); // restart, service unreachable
+    assert_eq!(b.effective_for_class("a", Some("read"), D), 20_000_000_000);
+    assert_eq!(b.stats().snapshot_restored, 1);
+}
+
+#[test]
+fn without_a_snapshot_a_restart_forgets_as_documented() {
+    let a = gl(MapSource::new(&[(&cid("a", "read"), json!(20_000_000_000u64))]));
+    assert_eq!(a.effective_for_class("a", Some("read"), D), 20_000_000_000);
+    let b = gl(MapSource::failing());
+    assert_eq!(b.effective_for_class("a", Some("read"), D), D);
+}
+
+#[test]
+fn a_larger_answer_from_the_service_replaces_the_restored_value() {
+    let p = tmpfile("loosen");
+    gl(MapSource::new(&[(&cid("a", "read"), json!(20_000_000_000u64))])).with_snapshot(&p)
+        .effective_for_class("a", Some("read"), D);
+    let b = gl(MapSource::new(&[(&cid("a", "read"), json!(50_000_000_000u64))])).with_snapshot(&p); // a person loosened it
+    assert_eq!(b.effective_for_class("a", Some("read"), D), 50_000_000_000);
+}
+
+#[test]
+fn a_nothing_governed_answer_clears_a_restored_value() {
+    let p = tmpfile("clear");
+    gl(MapSource::new(&[(&cid("a", "read"), json!(20_000_000_000u64))])).with_snapshot(&p)
+        .effective_for_class("a", Some("read"), D);
+    let b = gl(MapSource::new(&[])).with_snapshot(&p);
+    assert_eq!(b.effective_for_class("a", Some("read"), D), D);
+}
+
+#[test]
+fn an_edited_snapshot_cannot_go_outside_floor_and_default() {
+    let p = tmpfile("edited");
+    let c = cid("a", "read");
+    let doc = json!({ c.clone(): 1u64, "bad id!": 5, "x.y": "junk" });
+    std::fs::write(&p, doc.to_string()).unwrap();
+    let b = gl(MapSource::failing()).with_snapshot(&p);
+    assert_eq!(b.effective_for_class("a", Some("read"), D), FLOOR); // raised to the kernel floor, never below
+    assert!(b.stats().snapshot_rejected >= 2);
+    let p2 = tmpfile("huge");
+    std::fs::write(&p2, json!({ cid("a", "read"): 9_000_000_000_000u64 }).to_string()).unwrap();
+    let b2 = gl(MapSource::failing()).with_snapshot(&p2);
+    assert_eq!(b2.effective_for_class("a", Some("read"), D), D); // above the default: ignored
+}
+
+#[test]
+fn a_corrupt_or_missing_snapshot_is_ignored() {
+    let p = tmpfile("corrupt");
+    std::fs::write(&p, b"{not json").unwrap();
+    let b = gl(MapSource::failing()).with_snapshot(&p);
+    assert_eq!(b.effective_for_class("a", Some("read"), D), D);
+    assert_eq!(b.stats().snapshot_rejected, 1);
+    let c = gl(MapSource::failing()).with_snapshot(tmpfile("never-written"));
+    assert_eq!(c.effective_for_class("a", Some("read"), D), D);
+}
+
+#[test]
+fn an_unwritable_snapshot_path_changes_nothing_but_a_counter() {
+    let bad = std::path::PathBuf::from("/nonexistent-dir-xyz/snap.json");
+    let a = gl(MapSource::new(&[(&cid("a", "read"), json!(20_000_000_000u64))])).with_snapshot(&bad);
+    assert_eq!(a.effective_for_class("a", Some("read"), D), 20_000_000_000);
+    assert_eq!(a.stats().snapshot_write_errors, 1);
+}
+
+#[test]
+fn the_snapshot_is_written_only_when_a_value_changes() {
+    let p = tmpfile("once");
+    let a = gl(MapSource::new(&[(&cid("a", "read"), json!(20_000_000_000u64))])).with_snapshot(&p);
+    for _ in 0..50 { a.effective_for_class("a", Some("read"), D); }
+    // one write for the class value, none for the 49 repeats (the agent boundary has no value, so no write)
+    assert_eq!(a.stats().snapshot_write_errors, 0);
+    let t0 = std::fs::metadata(&p).unwrap().modified().unwrap();
+    for _ in 0..50 { a.effective_for_class("a", Some("read"), D); }
+    assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), t0);
+}
