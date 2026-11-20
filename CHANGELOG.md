@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### CI
+
+The `crosscheck` job checked out sentinel_os at a commit that is on no branch there, so GitHub could remove it at any time. The pin now names a commit on sentinel_os `main` (`413a194`). The verifier script that job runs, `tools/verify_receipts.py`, is identical at both commits.
+
 ### Naming
 
 In prose and comments the kernel is written ≡TACK. Crate, binary, file, metric, span and environment-variable names use `stack` or `STACK`. The repository is named STACK-Kernel.
