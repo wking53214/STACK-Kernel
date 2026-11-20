@@ -176,7 +176,7 @@ fn max_first_order(r: &Report) -> f64 {
 }
 
 /// `check_crop` is false only for the fast lane, whose cropped residual is an open finding
-/// (see `the_fast_lane_cropped_residual_open_finding` and the README). The raw and second-order
+/// (see `the_fast_lane_cropped_residual_open_finding` below). The raw and second-order
 /// checks, and the calibration, still run for every lane.
 fn assert_lane_hides_cost(name: &str, check_crop: bool, run: impl Fn(u32) -> u32) {
     let prepare = |c: Class, _: &mut stack_anc_harness::SplitMix64| match c {
@@ -240,11 +240,12 @@ fn the_fast_lane_hides_the_cost_of_cheap_operations() {
 /// local 4-vCPU virtual machine (4 of 4 runs passed), so the effect is seen on the CI runner and
 /// its cause is not known. The fast lane is the one
 /// with a 250 us ceiling and a single hard-ceiling bucket; the standard lane's cropped check still
-/// runs in the blocking test. Documented in the README ("Fast-lane cropped residual"). Run with
+/// runs in the blocking test. Recorded here, not in the README; the fast lane itself is described in
+/// `manual/sections/anc_ceiling.md`. Run with
 /// `--ignored` to measure it. Until it is understood, the fast lane is not claimed to hide the
 /// cost of cheap operations at the cropped-percentile level.
 #[test]
-#[ignore = "open finding: fast-lane cropped residual, see README"]
+#[ignore = "open finding: fast-lane cropped residual, see the comment above this test"]
 fn the_fast_lane_cropped_residual_open_finding() {
     let lanes = two_lanes();
     assert_lane_hides_cost("fast lane (cropped check)", true, |n| lanes.fast().pad(|| cheap_op(n)).map(|p| p.value).unwrap_or(0));

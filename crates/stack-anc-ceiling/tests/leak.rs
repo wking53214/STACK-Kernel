@@ -78,11 +78,11 @@ fn calibrated_spin_padding_hides_the_early_exit() {
 /// Open finding, ignored by default. The cropped check on the padded
 /// leaky validator is above its line of 10 in most CI runs (7 of 9 on
 /// November 6, 2026), and its sign changes from run to run. The residual
-/// is documented in the README ("Accepted timing residual"). Run with
+/// is documented in the README ("Timing residual (ANC strategy 1)"). Run with
 /// `--ignored` to measure it. Runs without the calibration step, which
 /// fails more often than the blocking test does.
 #[test]
-#[ignore = "open finding: cropped residual on padded leaky validator, see README"]
+#[ignore = "open finding: cropped residual on padded leaky validator, see README, Timing residual (ANC strategy 1)"]
 fn calibrated_spin_padding_cropped_residual_open_finding() {
     let padded = padded_run();
     let crop_max = padded
