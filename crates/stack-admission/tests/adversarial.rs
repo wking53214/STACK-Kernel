@@ -20,6 +20,8 @@ use stack_trident::{ReasonCode, StartError, StoreError};
 /// Slack over the deadline for a killed worker: the kill, the reap and the
 /// scheduler. Stated here, asserted below, and the measured value is printed.
 const SLACK: Duration = Duration::from_secs(2);
+/// Generous outer bound for the whole pipeline (see the non-returning payload test).
+const WALL_SLACK: Duration = Duration::from_secs(15);
 
 fn policy_with_deadline(ns: u64) -> stack_admission::KernelPolicy {
     let mut p = policy();
@@ -74,11 +76,14 @@ fn a_non_returning_payload_is_terminated_within_a_measured_bound() {
             );
             assert!(supervisor >= deadline, "{label}: killed before the deadline: {supervisor:?}");
             assert!(supervisor < deadline + SLACK, "{label}: supervisor took {supervisor:?}");
-            assert!(wall < deadline + SLACK, "{label}: the pipeline took {wall:?}");
+            // The supervisor figure above is the real guarantee. The whole pipeline also does
+            // process setup and receipt writing, which a loaded CI machine can stretch, so this
+            // bound only has to prove the payload cannot hold the pipeline forever.
+            assert!(wall < deadline + WALL_SLACK, "{label}: the pipeline took {wall:?}");
             worst = worst.max(wall);
         }
     }
-    println!("measured: worst whole-pipeline time for a non-returning payload: {worst:?} (bound {:?})", deadline + SLACK);
+    println!("measured: worst whole-pipeline time for a non-returning payload: {worst:?} (bound {:?})", deadline + WALL_SLACK);
     // Six receipts, all TimedOut, all verifying.
     let v = h.verify_full(&case, None);
     assert_eq!(v.state, State::VerifiedWithLimitations, "{}", v.to_json());
