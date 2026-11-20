@@ -753,9 +753,9 @@ fn shedding_outcome_is_independent_of_token_value() {
 /// which is a measured counterexample. Its shed-rate difference between
 /// classes has the same sign in every local run so far, but the size is
 /// too small for a reliable |t| > 4.5 at 1.5 to 6 million probes on a
-/// 2-vCPU machine. Run with `--ignored` to measure it; see the README.
+/// 2-vCPU machine. Run with `--ignored` to measure it; see `manual/sections/comparison.md`.
 #[test]
-#[ignore = "open finding: balanced_dummy shed channel, see README"]
+#[ignore = "open finding: balanced_dummy shed channel, see manual/sections/comparison.md"]
 fn shedding_reflects_load_only_for_balanced_dummy() {
     let _l = serial();
     let t = shed_channel_t(Validator::BalancedDummy);
